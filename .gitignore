@@ -42,3 +42,7 @@ bom/
 out/
 
 # End of https://www.toptal.com/developers/gitignore/api/kicad
+
+# Visual Studio Code temporary and workspace files
+.vscode/
+*.code-workspace
