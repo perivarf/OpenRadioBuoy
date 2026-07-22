@@ -36,8 +36,33 @@ bool SDWriter::begin(void){
   if (debug_serial)
     Serial.println("Initializing SD card!");
 
-  SD_fail = !SD.begin(SD_CS_PIN);
- 
+  /*
+    The SD card sits on SPI1 (PA5/PA6/PA7) together with the IMU. Both chip
+    selects are driven high before the bus is started, so neither slave
+    answers while the other is being addressed. setMOSI/setMISO/setSCLK must
+    be called before SPI.begin().
+  */
+  pinMode(SPI_CS_IMU_PIN, OUTPUT);
+  digitalWrite(SPI_CS_IMU_PIN, HIGH);
+  pinMode(SPI_CS_SD_PIN, OUTPUT);
+  digitalWrite(SPI_CS_SD_PIN, HIGH);
+
+  SPI.setMOSI(SPI_MOSI_PIN);
+  SPI.setMISO(SPI_MISO_PIN);
+  SPI.setSCLK(SPI_SCK_PIN);
+  SPI.begin();
+
+  SD_fail = !SD.begin(SdSpiConfig(SPI_CS_SD_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPI_MHZ), &SPI));
+
+  if (SD_fail && debug_serial){
+    // sdErrorCode/sdErrorData say whether the card never answered CMD0 (wiring,
+    // CS, no card) or failed later in the init handshake (card/speed issue).
+    Serial.print("SD begin failed, error 0x");
+    Serial.print(SD.sdErrorCode(), HEX);
+    Serial.print(" data 0x");
+    Serial.println(SD.sdErrorData(), HEX);
+  }
+
   if (!SD_fail && ((WIO_MODE == BUOY_MODE) || (WIO_MODE == MOORED_MODE))){
     active = true;
 

@@ -1,20 +1,249 @@
 #include "gps_manager.h"
 
+/*
+  Little endian helpers for UBX payloads. The module always sends little
+  endian regardless of host byte order, so the bytes are assembled by hand.
+*/
+static int32_t ubxI4(const uint8_t * p){
+  return (int32_t) ((uint32_t) p[0] | ((uint32_t) p[1] << 8) \
+                    | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24));
+}
 
+static uint32_t ubxU4(const uint8_t * p){
+  return (uint32_t) p[0] | ((uint32_t) p[1] << 8) \
+         | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+}
+
+static uint16_t ubxU2(const uint8_t * p){
+  return (uint16_t) (p[0] | (p[1] << 8));
+}
+
+/*
+  Send a UBX message (class/id + payload) over the DDC port, appending the
+  two byte Fletcher checksum. The buffer only has to hold the small CFG
+  messages we send during startup.
+*/
+static void sendUbx(uint8_t cls, uint8_t id, const uint8_t * payload, uint16_t len){
+  uint8_t buf[32];
+  buf[0] = 0xB5; buf[1] = 0x62; buf[2] = cls; buf[3] = id;
+  buf[4] = (uint8_t) (len & 0xFF); buf[5] = (uint8_t) (len >> 8);
+  for (uint16_t i = 0; i < len; i++){
+    buf[6 + i] = payload[i];
+  }
+  uint8_t ckA = 0, ckB = 0;
+  for (uint16_t i = 2; i < 6 + len; i++){
+    ckA += buf[i];
+    ckB += ckA;
+  }
+  buf[6 + len] = ckA;
+  buf[7 + len] = ckB;
+  Wire.beginTransmission(GPS_I2C_ADDR);
+  Wire.write(buf, 8 + len);
+  Wire.endTransmission();
+}
+
+// Pre-built NAV-PVT poll (empty payload), checksum included.
+static const uint8_t navPvtPoll[] = {0xB5, 0x62, 0x01, 0x07, 0x00, 0x00, 0x08, 0x19};
 
 void GPS_Manager::begin(float baudrate){
   /*
-    We initialize the GPS at a set baudrate,
-    and supply power to the GPS enable pin to 
-    power it up. 
+    The GPS talks UBX over I2C, so the baudrate argument is unused. It is kept
+    so the call sites in main.cpp stay the same as for the old UART module.
+
+    We bring up the bus, verify the module answers a MON-VER poll, and raise
+    its navigation rate. Without the CFG-RATE the M8 only computes a solution
+    at 1 Hz and repeated polls would return the same fix over and over.
   */
-  pinMode(GPS_SLEEP_PIN, OUTPUT);
-  digitalWrite(GPS_SLEEP_PIN, HIGH);
-  delay(200);
-  ss.begin(baudrate);
-  initialized = true;
+  (void) baudrate;
+
+  // setSDA/setSCL must be called before begin()
+  Wire.setSDA(sda_pin);
+  Wire.setSCL(scl_pin);
+  Wire.begin();
+  Wire.setClock(GPS_I2C_CLOCK);
+  delay(100);
+
+  initialized = false;
+  const uint8_t monVer[] = {0xB5, 0x62, 0x0A, 0x04, 0x00, 0x00, 0x0E, 0x34};
+
+  /*
+    Probe until the module answers. shutdownGPS() leaves it in RXM-PMREQ backup,
+    and a warm reset (reflash, reset button) can hit it while it is still down.
+    The bus traffic is itself the DDC wakeup source, so retrying is what brings
+    it back; a cold start needs the retries too while the module boots.
+  */
+  uint8_t ack = 1;
+  uint32_t probe_start = millis();
+  while (ack != 0 && (millis() - probe_start < GPS_probe_timeout)){
+    Wire.beginTransmission(GPS_I2C_ADDR);
+    Wire.write(monVer, sizeof(monVer));
+    ack = Wire.endTransmission();
+    if (ack != 0){
+      delay(50);
+      IWatchdog.reload();
+    }
+  }
+
+  if (ack == 0){
+    delay(200);  // give the module time to place the answer in its buffer
+    uint16_t answer_size = availBytes();
+    if (answer_size > 0){
+      initialized = true;
+      // Drop the version string so it does not sit in front of the first PVT
+      flushDDC(answer_size);
+
+      // UBX-CFG-RATE: measRate = GPS_nav_period_ms, navRate = 1, timeRef = GPS
+      uint8_t rate[6] = {(uint8_t) (GPS_nav_period_ms & 0xFF),
+                         (uint8_t) (GPS_nav_period_ms >> 8),
+                         0x01, 0x00, 0x01, 0x00};
+      sendUbx(0x06, 0x08, rate, 6);
+      delay(100);
+      flushDDC(availBytes());  // drop the ACK
+      if (debug_serial){
+        Serial.print(F("GPS: ready, nav rate "));
+        Serial.print(GPS_nav_rate_hz);
+        Serial.println(F(" Hz"));
+      }
+    } else if (debug_serial){
+      Serial.println(F("GPS: no MON-VER response"));
+    }
+  } else if (debug_serial){
+    Serial.println(F("GPS: no ACK on I2C address 0x42"));
+  }
+
   delay(100);
   currentPosition = {0,0,0,0,0,0};
+}
+
+uint16_t GPS_Manager::availBytes(void){
+  /*
+    Number of bytes waiting in the module's DDC output buffer, from the
+    0xFD/0xFE register pair.
+  */
+  Wire.beginTransmission(GPS_I2C_ADDR);
+  Wire.write((uint8_t) 0xFD);
+  if (Wire.endTransmission(false) != 0){  // repeated start, keep the bus
+    return 0;
+  }
+  if (Wire.requestFrom(GPS_I2C_ADDR, (uint8_t) 2) < 2){
+    return 0;
+  }
+  uint16_t nbytes = ((uint16_t) Wire.read() << 8) | (uint8_t) Wire.read();
+  return (nbytes == 0xFFFF) ? 0 : nbytes;  // 0xFFFF means "no data" per the protocol spec
+}
+
+void GPS_Manager::flushDDC(uint16_t nbytes){
+  /*
+    Discard nbytes from the output buffer, 32 bytes at a time to stay within
+    the Wire receive buffer.
+  */
+  while (nbytes > 0){
+    uint8_t chunk = (nbytes > 32) ? 32 : (uint8_t) nbytes;
+    uint8_t got = Wire.requestFrom(GPS_I2C_ADDR, chunk);
+    if (got == 0){
+      break;
+    }
+    while (Wire.available()){
+      (void) Wire.read();
+    }
+    nbytes -= got;
+  }
+}
+
+bool GPS_Manager::pollPVT(uint32_t max_wait_time){
+  /*
+    Poll NAV-PVT and block until the answer has been read and decoded, or
+    max_wait_time has passed. Returns true if a checksum-valid PVT frame was
+    decoded; the caller inspects pvt.valid to see whether it also holds a fix.
+  */
+  if (!initialized){
+    return false;
+  }
+  Wire.beginTransmission(GPS_I2C_ADDR);
+  Wire.write(navPvtPoll, sizeof(navPvtPoll));
+  if (Wire.endTransmission() != 0){
+    return false;
+  }
+
+  uint32_t poll_start = millis();
+  uint16_t avail = 0;
+  while (millis() - poll_start < max_wait_time){
+    avail = availBytes();
+    if (avail >= GPS_pvt_frame_size){
+      break;
+    }
+    delay(20);
+    IWatchdog.reload();
+  }
+  if (avail < GPS_pvt_frame_size){
+    return false;
+  }
+
+  uint8_t frame[GPS_pvt_frame_size];
+  uint16_t idx = 0;
+  bool gotPVT = false;
+  while (avail > 0){
+    uint8_t chunk = (avail > 32) ? 32 : (uint8_t) avail;
+    uint8_t got = Wire.requestFrom(GPS_I2C_ADDR, chunk);
+    if (got == 0){
+      break;
+    }
+    while (Wire.available()){
+      uint8_t b = Wire.read();
+      if (idx == 0 && b != 0xB5){          // sync char 1
+        continue;
+      }
+      if (idx == 1 && b != 0x62){          // sync char 2
+        idx = 0;
+        continue;
+      }
+      frame[idx++] = b;
+      if (idx == GPS_pvt_frame_size){
+        // NAV-PVT is class 0x01, id 0x07 with a 92 byte payload
+        if (frame[2] == 0x01 && frame[3] == 0x07 && ubxU2(frame + 4) == 92){
+          uint8_t ckA = 0, ckB = 0;
+          for (uint16_t j = 2; j < GPS_pvt_frame_size - 2; j++){
+            ckA += frame[j];
+            ckB += ckA;
+          }
+          if (ckA == frame[GPS_pvt_frame_size - 2] && ckB == frame[GPS_pvt_frame_size - 1]){
+            decodePVT(frame + 6);
+            gotPVT = true;
+          }
+        }
+        idx = 0;
+      }
+    }
+    avail -= got;
+    IWatchdog.reload();
+  }
+  return gotPVT;
+}
+
+void GPS_Manager::decodePVT(const uint8_t * p){
+  /*
+    Decode a NAV-PVT payload (92 bytes, protocol version 18) into pvt.
+    Offsets are counted from the start of the payload.
+  */
+  pvt.year      = ubxU2(p + 4);
+  pvt.month     = p[6];
+  pvt.day       = p[7];
+  pvt.hour      = p[8];
+  pvt.minute    = p[9];
+  pvt.second    = p[10];
+  pvt.timeValid = (p[11] & 0x03) == 0x03;   // validDate and validTime
+  pvt.fixType   = p[20];
+  pvt.numSV     = p[23];
+  pvt.valid     = ((p[21] & 0x01) != 0) && (pvt.fixType >= 2);  // gnssFixOK
+
+  if (pvt.valid){
+    pvt.lng_e7     = ubxI4(p + 24);
+    pvt.lat_e7     = ubxI4(p + 28);
+    pvt.hAcc_mm    = ubxU4(p + 40);
+    pvt.gSpeed_mms = ubxI4(p + 60);
+    pvt.headMot_e5 = ubxI4(p + 64);
+  }
+  fix = pvt.valid;
 }
 
 uint8_t GPS_Manager::setTimeFromGps(){
@@ -33,30 +262,23 @@ uint8_t GPS_Manager::setTimeFromGps(){
       return 1;
     }
     uint32_t searchStart = millis();
-    
-    // Error code 1 removed for debugging purposes
-    uint16_t iteration_counter = 0;
-    
-    // We try to get a fix to get RTC
-    while ((gps.date.isValid() == false) || (gps.time.isValid() == false) && (millis() - searchStart < max_GPS_read_time)){
-      while(ss.available() > 0){
-        gps.encode(ss.read());
-      }
-      if (iteration_counter > 2000){
-        IWatchdog.reload();
-        iteration_counter = 0;
-      }
-      iteration_counter++;
-      if ((millis() - searchStart > max_GPS_read_time) && gps.time.isValid() == false){
+
+    // We poll the module until it reports a valid date and time. The M8 knows
+    // the UTC time from the navigation message before it has a position fix,
+    // so this normally succeeds well before performNReadings does.
+    while (!pvt.timeValid){
+      if (millis() - searchStart >= max_GPS_read_time){
         return 2;
       }
+      pollPVT(min(watchdog_wait_time/2, max_GPS_read_time - (millis() - searchStart)));
+      IWatchdog.reload();
     }
-    hour = gps.time.hour();
-    minute = gps.time.minute();
-    second = gps.time.second();
-    date.year  = gps.date.year();
-    date.month = gps.date.month();
-    date.day   = gps.date.day();
+    hour   = pvt.hour;
+    minute = pvt.minute;
+    second = pvt.second;
+    date.year  = pvt.year;
+    date.month = pvt.month;
+    date.day   = pvt.day;
     date.valid = true;
   }
   // We set the RTC using the GPS measurements
@@ -139,28 +361,28 @@ uint8_t GPS_Manager::getGPSData(uint32_t max_wait_time){
       return 2;
     }
     uint32_t searchStart = millis();
-    int counter = 0;
-    while ((gps.location.isUpdated() == false) && (millis() - searchStart < max_wait_time)){
-      while(ss.available() > 0){
-        gps.encode(ss.read());
-      }
-      //No need to pet the dog every cycle
-      counter++;
-      if (counter > 100){
-        IWatchdog.reload();
-      }
-    }
-    
-    reading.timestamp = timestamp;
-    reading.lat       = (uint32_t) (scale_factor*gps.location.lat());
-    reading.lng       = (uint32_t) (scale_factor*gps.location.lng());
-    reading.vel       = (uint32_t) (scale_factor*gps.speed.mps());
-    reading.direction = (uint32_t) (scale_factor*gps.course.deg());
 
-    if (gps.date.isUpdated() || iterations < 1){
-      date.year  = gps.date.year();
-      date.month = gps.date.month();
-      date.day   = gps.date.day();
+    // Poll until the module reports a usable fix, or we run out of time. A
+    // frame without a fix still carries date and satellite count, so it is
+    // worth decoding either way.
+    while (!pvt.valid && (millis() - searchStart < max_wait_time)){
+      pollPVT(min(watchdog_wait_time/2, max_wait_time - (millis() - searchStart)));
+      IWatchdog.reload();
+    }
+
+    reading.timestamp = timestamp;
+    if (pvt.valid){
+      // 1e-7 deg -> deg and mm/s -> m/s before the shared scale_factor is applied
+      reading.lat       = (uint32_t) (scale_factor*(pvt.lat_e7*1e-7));
+      reading.lng       = (uint32_t) (scale_factor*(pvt.lng_e7*1e-7));
+      reading.vel       = (uint32_t) (scale_factor*(pvt.gSpeed_mms/1000.0));
+      reading.direction = (uint32_t) (scale_factor*(pvt.headMot_e5*1e-5));
+    }
+
+    if (pvt.timeValid || iterations < 1){
+      date.year  = pvt.year;
+      date.month = pvt.month;
+      date.day   = pvt.day;
     }
 
   }
@@ -296,13 +518,25 @@ void GPS_Manager::processReadings(bool fullProcessingToggle){
 
 void GPS_Manager::shutdownGPS(void){
   /*
-    We shut the GPS down to save power. 
+    We shut the GPS down to save power.
+
+    This PCB has no GPS enable line, so instead of cutting power we ask the
+    module for a software backup (UBX-RXM-PMREQ) with the DDC port kept as a
+    wakeup source. Any I2C traffic in the next begin() wakes it again, and it
+    keeps its ephemeris so the next fix is a hot start.
   */
-  if (sleep_GPS){
-    pinMode(GPS_SLEEP_PIN, INPUT);
-  }  
+  if (sleep_GPS && initialized){
+    // duration = 0 (until woken), flags = backup, wakeupSources = DDC(spics)
+    uint8_t pmreq[16] = {0x00, 0x00, 0x00, 0x00,   // version + reserved
+                         0x00, 0x00, 0x00, 0x00,   // duration 0 = infinite
+                         0x02, 0x00, 0x00, 0x00,   // flags: backup
+                         0x08, 0x00, 0x00, 0x00};  // wakeupSources: spics (DDC)
+    sendUbx(0x02, 0x41, pmreq, 16);
+    delay(20);
+  }
   packet.clear();
-  ss.end();
+  Wire.end();
+  initialized = false;
 }
 
 size_t GPS_Manager::updateTransmitMessage(){
@@ -437,5 +671,5 @@ void GPS_Manager::updateBeaconMsg(uint32_t WiO_ID){
 }
 
 
-// Default GPS manager on RX1/TX1
-GPS_Manager gps_manager(GPS_RX_PIN, GPS_TX_PIN);
+// Default GPS manager on the I2C2 bus shared with the GPS module
+GPS_Manager gps_manager(I2C_SDA_PIN, I2C_SCL_PIN);

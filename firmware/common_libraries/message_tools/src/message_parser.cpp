@@ -58,8 +58,8 @@ analog_Reading Message_Parser::parse_analog_message(byte* msg)
     analog_Reading analog_reading_packet;
 
     uint8_t offset = 1;
-    turbidity_reading_packet.timestamp = msg_extract_uint<time_t>(msg, offset, true, offset);
-    turbidity_reading_packet.voltage = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    analog_reading_packet.timestamp = msg_extract_uint<time_t>(msg, offset, true, offset);
+    analog_reading_packet.voltage = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     return analog_reading_packet;
 }
 

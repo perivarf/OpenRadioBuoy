@@ -2,6 +2,16 @@
 #define CONFIG_H
 #include "Arduino.h"
 
+/*
+  The console is the mySerial instance in main.cpp (USART1 on PB6/PB7). The
+  shared libraries print to `Serial`, which on this variant is an unused
+  LPUART1 on PA2/PA3, so their output would be lost. Alias it here - config.h
+  resolves to each project's own copy, so this does not affect basestation.
+*/
+extern HardwareSerial mySerial;
+#undef Serial          // WSerial.h has already aliased it to SerialLP1
+#define Serial mySerial
+
 
 // OLB MODE PARAMETERS - DO NOT ADJUST LIGHTLY
 static constexpr uint8_t BUOY_MODE {0};
@@ -54,7 +64,7 @@ static constexpr uint32_t thermometre_pause_between_readings {300};
 // Enable or disable parameters
 static constexpr bool remove_outliers                       {true};
 static constexpr bool debug_serial                          {true};
-static constexpr bool enable_GPS                            {false};
+static constexpr bool enable_GPS                            {true};
 static constexpr bool enable_watchdog                       {true};
 static constexpr bool debug_SD                              {false};
 static constexpr int  serial_baud                           {115200};
@@ -67,10 +77,33 @@ static constexpr bool enable_baseStation_parameter_updates  {false};
 static constexpr bool enable_recovery_beacon                {true};
 static constexpr bool log_every_reading                     {true};
 static constexpr bool resync_RTC_using_GPS                  {true};
+static constexpr bool enable_bootloader_menu                {true};
+static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
+
+// Debug console on USART1, the header pins on this PCB. The ROM bootloader
+// listens on the same pair, so the menu and the flashing use one cable.
+// USART1 supports only this orientation: PB6 is in PinMap_UART_TX, PB7 in
+// PinMap_UART_RX. Swapping them leaves the line undriven.
+static constexpr uint32_t DEBUG_SERIAL_TX_PIN               {PB6};
+static constexpr uint32_t DEBUG_SERIAL_RX_PIN               {PB7};
+
+/*
+  Bus wiring on this PCB. Do not change unless you have rewired the ORB.
+
+  SPI1 is shared by the SD card and the LSM6DSVTR IMU, so both chip selects
+  must be driven high before either slave is addressed.
+*/
+static constexpr uint32_t SPI_MOSI_PIN                   {PA7};
+static constexpr uint32_t SPI_MISO_PIN                   {PA6};
+static constexpr uint32_t SPI_SCK_PIN                    {PA5};
+static constexpr uint32_t SPI_CS_SD_PIN                  {PA4};
+static constexpr uint32_t SPI_CS_IMU_PIN                 {PB3};
+static constexpr uint32_t I2C_SDA_PIN                    {PA11};
+static constexpr uint32_t I2C_SCL_PIN                    {PA12};
 
 // Motion parameters
 static float    motion_treshold                          {0.5};
-static uint32_t target_reading_distance                    {30};
+static uint32_t target_reading_distance                  {30};
 
 // Watchdog and power parameters
 static constexpr uint32_t watchdog_wait_time              {32*s_2_ms};

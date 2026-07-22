@@ -15,6 +15,8 @@
   This feature is currently disabled. 
 */
 
+HardwareSerial mySerial{DEBUG_SERIAL_RX_PIN, DEBUG_SERIAL_TX_PIN};
+
 
 /* Workaround for millis not increasing during sleep cycles */
 uint32_t measurement_timer;
@@ -29,13 +31,72 @@ uint32_t millis_time_corrected(uint32_t sleep_cycles){
   return millis() + sleep_cycles*sleep_time;
 }
 
+/*
+  Jump to the system bootloader in ROM (0x1FFF0000 on STM32WLxx). After the
+  jump the ROM bootloader listens on USART1 (PB6/PB7), the same pins as the
+  serial console. Follows ST's official recipe: interrupts off, clocks back to
+  reset state, NVIC cleared, MSP loaded from the bootloader vector table, then
+  jump to its reset handler.
+*/
+static void jumpToBootloader(void){
+  const uint32_t bootAddr = 0x1FFF0000UL;  // system memory, STM32WLE5 (AN2606)
+  __disable_irq();
+  SysTick->CTRL = 0;
+  SysTick->LOAD = 0;
+  SysTick->VAL  = 0;
+  HAL_RCC_DeInit();
+  for (uint8_t i = 0; i < 8; i++){  // disable and clear every NVIC interrupt
+    NVIC->ICER[i] = 0xFFFFFFFFUL;
+    NVIC->ICPR[i] = 0xFFFFFFFFUL;
+  }
+  __enable_irq();  // the bootloader needs interrupts for UART reception
+  void (*bootJump)(void) = (void (*)(void))(*((uint32_t *)(bootAddr + 4)));
+  __set_MSP(*(uint32_t *)bootAddr);
+  bootJump();  // never returns
+}
+
+/*
+  Startup menu: press 'b' in the serial monitor within bootloader_menu_window
+  to jump to the UART bootloader and flash without an ST-Link. One dot per
+  second shows the window is still open. Runs before the watchdog is started,
+  so the wait cannot trigger a reset.
+*/
+static void bootloaderWindow(void){
+  mySerial.print(F("Press 'b' within "));
+  mySerial.print(bootloader_menu_window/s_2_ms);
+  mySerial.println(F(" s for bootloader mode..."));
+  uint32_t windowStart = millis();
+  uint32_t lastDot = windowStart;
+  while (millis() - windowStart < bootloader_menu_window){
+    if (mySerial.available() && mySerial.read() == 'b'){
+      mySerial.println(F("\nJumping to bootloader - ready for UART flashing"));
+      mySerial.flush();
+      delay(50);  // let the line drain before the UART is torn down
+      jumpToBootloader();
+    }
+    if (millis() - lastDot >= s_2_ms){
+      mySerial.print(F("."));
+      lastDot = millis();
+    }
+  }
+  mySerial.println();
+}
+
 void setup() {
 
-  // Serial debugging can be turned on or off with the debug_serial flag
-  if (debug_serial){
-    Serial.begin(serial_baud);
-    Serial.println("Serial initialized!");
+  // Serial debugging can be turned on or off with the debug_serial flag.
+  // The bootloader menu needs the console too, so it also brings Serial up.
+  if (debug_serial || enable_bootloader_menu){
+    mySerial.begin(serial_baud);
     delay(100);
+  }
+  if (debug_serial){
+    mySerial.println("Serial initialized!");
+    delay(100);
+  }
+
+  if (enable_bootloader_menu){
+    bootloaderWindow();
   }
 
   // We try to enable rtc timing
@@ -54,9 +115,9 @@ void setup() {
   bool SD_fail = sd_writer.begin();  
   int8_t status = sd_writer.startLogging("boot_info.txt");
   if (!SD_fail && debug_serial){
-    Serial.println("SD opened");
-    Serial.print("Status code: ");
-    Serial.println(status);
+    mySerial.println("SD opened");
+    mySerial.print("Status code: ");
+    mySerial.println(status);
   }
   IWatchdog.reload();
 
@@ -75,7 +136,7 @@ void setup() {
 
   if (SD_fail){
     if (debug_serial){
-      Serial.println(F("SD card mount failed. Proceeding with Radio only"));
+      mySerial.println(F("SD card mount failed. Proceeding with Radio only"));
     }
     delay(100);
   }
@@ -107,13 +168,13 @@ void setup() {
   /*
     We need to read the attached thermistors for a buoy ID
   */
-  thermo_manager.begin(PA9,PB10);
+  thermo_manager.begin(THERMO_DATA_PIN, THERMO_POWER_PIN);
 
   gps_manager.getDeploymentMessage(LORA.WiO_ID);
   LORA.startup_timestamp = gps_manager.timestamp;
   IWatchdog.reload();
   if (debug_serial){
-    Serial.println("Sending deployment message");
+    mySerial.println("Sending deployment message");
   }
   if (IWatchdog.isReset() == false && transmitDeploymentMessage){
     /*
@@ -149,9 +210,6 @@ void setup() {
   gps_manager.shutdownGPS();
   sd_writer.closeLog();
   thermo_manager.sleep();
-  if (debug_LED_enabled){
-    digitalWrite(LED_BUILTIN, LOW);
-  }
   LORA.sleep();
 
   
@@ -166,9 +224,9 @@ void setup() {
 
 
   if (debug_serial){
-    Serial.println("Setup complete, loop beginning");
+    mySerial.println("Setup complete, loop beginning");
     delay(100);
-    Serial.end();
+    mySerial.end();
   }
 
 
@@ -178,10 +236,6 @@ void task_measure_gps_temp() {
 
   // Measure time!
   unsigned long measurement_start = millis();
-
-  if (debug_LED_enabled){
-    digitalWrite(LED_BUILTIN, HIGH);
-  }
 
   // Wake up sensors
   gps_manager.begin(GPS_baud);
@@ -199,8 +253,8 @@ void task_measure_gps_temp() {
 
   // We read each sensor
   if (debug_serial){
-    Serial.println("Reading sensors");
-    Serial.println(gps_manager.iterations);
+    mySerial.println("Reading sensors");
+    mySerial.println(gps_manager.iterations);
     delay(100);
   }
   
@@ -232,29 +286,13 @@ void task_measure_gps_temp() {
   thermo_manager.sleep();
   sd_writer.closeLog();
   IWatchdog.reload();
-
-  // Turn off LED
-  if (debug_LED_enabled){
-    digitalWrite(LED_BUILTIN, LOW);
-  }
-
 }
   
 
 void task_transmit() {
 
   if (debug_serial){
-    Serial.println("Looking for base station");
-  }
-
-  if (debug_LED_enabled){
-    for (int i = 0; i < 3; i++){
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(800);
-      digitalWrite(LED_BUILTIN, HIGH);
-      IWatchdog.reload();
-    }
-    digitalWrite(LED_BUILTIN, LOW);
+    mySerial.println("Looking for base station");
   }
   
   char logname[30];
@@ -292,7 +330,7 @@ void task_transmit() {
 
     // GPS data
     if (debug_serial){
-        Serial.print("Sending G: "); Serial.print(GPS_message_size); Serial.println(" bytes");
+        mySerial.print("Sending G: "); mySerial.print(GPS_message_size); mySerial.println(" bytes");
     }
     
     gps_manager.updateTransmitMessage();
@@ -303,7 +341,7 @@ void task_transmit() {
     sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
 
     // Thermometer data
-    if (debug_serial){ Serial.print("Sending T: "); Serial.print(thermo_message_size); Serial.println(" bytes");}
+    if (debug_serial){ mySerial.print("Sending T: "); mySerial.print(thermo_message_size); mySerial.println(" bytes");}
 
     thermo_manager.updateTransmitMessage();
     message_data = LORA.sendData(thermo_manager.msgB, thermo_message_size, 10000);
@@ -318,10 +356,10 @@ void task_transmit() {
     IWatchdog.reload();
 
     if (debug_serial){
-      Serial.print("Available: ");
-      Serial.println(LORA.available);
-      Serial.print("Num packets left: ");
-      Serial.println(thermo_manager.temperatures.size());
+      mySerial.print("Available: ");
+      mySerial.println(LORA.available);
+      mySerial.print("Num packets left: ");
+      mySerial.println(thermo_manager.temperatures.size());
     }
 
     delay(500);
@@ -370,9 +408,9 @@ void loop() {
   bool disable_sensors = false;
 
   if (debug_serial){
-    Serial.begin(serial_baud);
+    mySerial.begin(serial_baud);
     delay(100);
-    Serial.println("Booting up!");
+    mySerial.println("Booting up!");
 
   }
 
@@ -393,11 +431,11 @@ void loop() {
   }
 
   if (debug_serial){
-    Serial.println("\n Succesfull iteration, starting to log\n");
-    Serial.println("Logging finished");
-    Serial.println(F("Shutting down"));
+    mySerial.println("\n Succesfull iteration, starting to log\n");
+    mySerial.println("Logging finished");
+    mySerial.println(F("Shutting down"));
     delay(100);
-    Serial.end();
+    mySerial.end();
   }
   
   // We sleep for "sleep_time" before waking up to refresh the watchdog

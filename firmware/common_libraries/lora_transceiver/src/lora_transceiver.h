@@ -88,7 +88,7 @@ class LoRa_Transceiver{
     buoyInfo findBuoy(uint32_t);    
   private:
     STM32WLx radio = new STM32WLx_Module();
-    const uint32_t rfswitch_pins[5] = {PA4, PA5, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC};
+    const uint32_t rfswitch_pins[5] = {PB8, PC13, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC};
     const Module::RfSwitchMode_t rfswitch_table[4] = {
       {STM32WLx::MODE_IDLE,  {LOW,  LOW}},
       {STM32WLx::MODE_RX,    {HIGH, LOW}},

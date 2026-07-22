@@ -13,6 +13,14 @@
 
 using Address = uint8_t[8];
 
+/*
+  Thermometre wiring on this PCB. T_DATA is the OneWire bus, T_POWER feeds the
+  sensors and is dropped in sleep(). Do not change unless you have rewired the
+  OLB.
+*/
+static constexpr uint16_t THERMO_DATA_PIN  {PA9};
+static constexpr uint16_t THERMO_POWER_PIN {PA8};
+
 // T + E + numSensors + 5 byte per thermometre + 9 byte for timestamp
 static constexpr uint8_t thermo_message_size {3 + sizeof(uint16_t) + 5*max_number_of_thermometres + 1 + sizeof(time_t)};
 static constexpr uint8_t  thermometre_resolution             {12};

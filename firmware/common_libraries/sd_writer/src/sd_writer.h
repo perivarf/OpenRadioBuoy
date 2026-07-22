@@ -2,15 +2,14 @@
 #define SD_WRITER_H
 
 #include "config.h"
+#include "SPI.h"
 #include "SdFat.h"
 #include "IWatchdog.h"
 #include "etl/deque.h"
 #include "etl_error_manager.h"
 
-#define SD_CS_PIN PB9
-#define PIN_SPI_MISO PB14
-#define PIN_SPI_MOSI PA10
-#define PIN_SPI_SCK  PB13
+// Pins live in the project's config.h; this is the bus speed only.
+static constexpr uint8_t  SD_SPI_MHZ      {12};
 
 
 static constexpr uint8_t OLB_SD_INACTIVE   {0};

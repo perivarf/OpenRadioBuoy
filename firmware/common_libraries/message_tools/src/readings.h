@@ -40,7 +40,7 @@ struct beacon_Reading
 struct analog_Reading
 {   
     uint8_t  analogReadingType;
-    uint32_t reading;
+    uint32_t voltage;
     uint16_t measurementID;
     time_t timestamp;
 };
