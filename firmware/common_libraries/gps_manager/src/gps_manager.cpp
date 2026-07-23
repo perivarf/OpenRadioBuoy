@@ -56,12 +56,51 @@ void GPS_Manager::begin(float baudrate){
   */
   (void) baudrate;
 
+  /*
+    TEMP DIAGNOSTIC (ported from ORB_test): check the bus before init. Both
+    lines must rest HIGH (external pull-ups to VCC). A LOW here means a line is
+    held down - bad wiring, missing pull-up, or an unpowered module - and no
+    address can ever ACK. Must be read BEFORE Wire.begin() claims the pins.
+  */
+  if (debug_serial){
+    pinMode(sda_pin, INPUT);
+    pinMode(scl_pin, INPUT);
+    delay(10);
+    Serial.print(F("GPS: SDA rest "));
+    Serial.print(digitalRead(sda_pin) ? F("HIGH ok") : F("LOW <-- held down!"));
+    Serial.print(F(", SCL rest "));
+    Serial.println(digitalRead(scl_pin) ? F("HIGH ok") : F("LOW <-- held down!"));
+  }
+
   // setSDA/setSCL must be called before begin()
   Wire.setSDA(sda_pin);
   Wire.setSCL(scl_pin);
   Wire.begin();
   Wire.setClock(GPS_I2C_CLOCK);
   delay(100);
+
+  /*
+    TEMP DIAGNOSTIC: scan the whole bus, then probe 0x42 with the raw
+    endTransmission code so we can tell the failure modes apart:
+    0 = ACK, 2 = NACK (bus ok, nobody answered), 4 = bus error, 5 = timeout.
+  */
+  if (debug_serial){
+    uint8_t found = 0;
+    for (uint8_t addr = 1; addr < 127; addr++){
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0){
+        Serial.print(F("GPS: I2C device at 0x"));
+        Serial.println(addr, HEX);
+        found++;
+      }
+    }
+    Serial.print(F("GPS: scan found "));
+    Serial.print(found);
+    Serial.println(F(" device(s)"));
+    Wire.beginTransmission(GPS_I2C_ADDR);
+    Serial.print(F("GPS: 0x42 endTransmission code "));
+    Serial.println(Wire.endTransmission());
+  }
 
   initialized = false;
   const uint8_t monVer[] = {0xB5, 0x62, 0x0A, 0x04, 0x00, 0x00, 0x0E, 0x34};

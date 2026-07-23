@@ -2,6 +2,19 @@
 #define CONFIG_H
 #include "Arduino.h"
 
+/*
+  The console is the mySerial instance in main.cpp (USART1 on PB6/PB7, the
+  debug header on this PCB). The variant's own `Serial` is an unused LPUART1 on
+  PA2/PA3, so alias it here and every existing Serial.print lands on the header.
+  USART1 supports only this orientation: PB6 is in PinMap_UART_TX, PB7 in
+  PinMap_UART_RX. Swapping them leaves the line undriven.
+*/
+static constexpr uint32_t DEBUG_SERIAL_TX_PIN            {PB6};
+static constexpr uint32_t DEBUG_SERIAL_RX_PIN            {PB7};
+extern HardwareSerial mySerial;
+#undef Serial          // WSerial.h has already aliased it to SerialLP1
+#define Serial mySerial
+
 static constexpr uint8_t BUOY_MODE {0};
 static constexpr uint8_t BST_MODE {1};
 static constexpr uint8_t MOORED_MODE {2};
@@ -14,6 +27,21 @@ static constexpr int max_message_length             {255};
 
 // SD card parameters
 const int8_t DISABLE_CS_PIN = -1;
+
+/*
+  Bus wiring. Same PCB as the drifter, so these must match its config.h.
+
+  SPI1 is shared by the SD card and the LSM6DSVTR IMU, so both chip selects
+  must be driven high before either slave is addressed. RF_SWITCH pins are the
+  RAK3172 module's antenna switch, per the core's variant_RAK3172_MODULE.h.
+*/
+static constexpr uint32_t SPI_MOSI_PIN                   {PA7};
+static constexpr uint32_t SPI_MISO_PIN                   {PA6};
+static constexpr uint32_t SPI_SCK_PIN                    {PA5};
+static constexpr uint32_t SPI_CS_SD_PIN                  {PA4};
+static constexpr uint32_t SPI_CS_IMU_PIN                 {PB3};
+static constexpr uint32_t I2C_SDA_PIN                    {PA11};
+static constexpr uint32_t I2C_SCL_PIN                    {PA12};
 
 // Radio parameters
 static constexpr float LoRa_freq_send               {863};

@@ -15,7 +15,7 @@ void LoRa_Transceiver::getWiOID(void){
   WiO_ID = HAL_GetUIDw0();
   if (debug_serial){
     Serial.print("Buoy ID: ");
-    Serial.print(WiO_ID);
+    Serial.println(WiO_ID);
   }
 }
 
