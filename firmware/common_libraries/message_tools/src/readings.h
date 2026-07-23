@@ -38,11 +38,24 @@ struct beacon_Reading
 };
 
 struct analog_Reading
-{   
+{
     uint8_t  analogReadingType;
     uint32_t voltage;
     uint16_t measurementID;
     time_t timestamp;
+};
+
+struct wave_analysis_Reading
+{
+    uint16_t reading_ID;
+    uint32_t Hs;
+    uint32_t Tc;
+    uint32_t Tp;
+    uint32_t Tz;
+    uint32_t max_value;
+    uint16_t wave_spectrum[welch_bins];
+    time_t timestamp_start;
+    time_t timestamp_end;
 };
 
 struct buoyInfoReading

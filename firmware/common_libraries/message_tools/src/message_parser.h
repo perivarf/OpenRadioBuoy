@@ -9,6 +9,7 @@ class Message_Parser{
         temperature_Reading parse_temperature_message(byte* msg);
         GPS_Reading parse_gps_message(byte* msg);
         analog_Reading parse_analog_message(byte* msg);
+        wave_analysis_Reading parse_wave_analysis_message(byte* msg);
         buoyInfoReading parse_buoy_info_message(byte* msg);
         buoyInitMessage parse_buoy_init_message(byte* msg);
         beacon_Reading parse_beacon_message(byte *msg);
