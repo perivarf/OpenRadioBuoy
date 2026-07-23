@@ -8,6 +8,10 @@
 
 #include <queue>
 
+// Console UART (USART1 on the debug header). config.h declares this extern and
+// aliases Serial to it; the single definition must live here, as on the drifter.
+HardwareSerial mySerial{DEBUG_SERIAL_RX_PIN, DEBUG_SERIAL_TX_PIN};
+
 uint32_t health_time_start;
 uint32_t notecard_reset_start;
 uint32_t notecard_input_sync_start;
