@@ -61,6 +61,10 @@ static constexpr size_t welch_bin_min {9};  // ~0.039 Hz, about 25 s period
 static constexpr size_t welch_bin_max {64}; // ~0.3125 Hz, about 3 s period
 static constexpr size_t welch_bins = welch_bin_max - welch_bin_min;
 
+// Shared wave-analysis run parameters
+static constexpr bool     base_enable_wave_analysis           {true};
+static constexpr uint32_t base_measurement_period_wave_analysis {0UL * 60UL * 1000UL}; // 0 min between wave captures
+
 // Watchdog
 static constexpr bool     enable_watchdog    {true};
 static constexpr uint32_t watchdog_wait_time {32000};

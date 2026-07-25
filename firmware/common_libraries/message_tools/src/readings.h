@@ -58,6 +58,19 @@ struct wave_analysis_Reading
     time_t timestamp_end;
 };
 
+/*
+  On-wire size of a wave-analysis message, framed 'W' ... 'E'. Must match the byte
+  layout produced by WaveManager::updateTransmitMessage and consumed by
+  Message_Parser::parse_wave_analysis_message: tag + reading_ID(u16) +
+  {Hs,Tc,Tp,Tz,max_value}(5x u32) + wave_spectrum(welch_bins x u16) +
+  {timestamp_start,timestamp_end}(2x time_t) + trailing 'E'.
+*/
+static constexpr uint8_t wave_message_size =
+    1 + sizeof(uint16_t) + 5 * sizeof(uint32_t)
+    + welch_bins * sizeof(uint16_t) + 2 * sizeof(time_t) + 1;
+static_assert(wave_message_size <= max_message_length,
+    "wave_message_size exceeds the LoRa byte-message buffer (max_message_length)");
+
 struct buoyInfoReading
 {
     int32_t sent_packets;

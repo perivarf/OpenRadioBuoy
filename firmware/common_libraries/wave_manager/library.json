@@ -1,0 +1,23 @@
+{
+  "name": "ORB_wave_manager",
+  "version": "1.0.0",
+  "description": "IMU sampling and wave analysis (Madgwick/Kalman AHRS + Welch spectrum) for the Open Radio Buoy drifter",
+  "keywords": "ORB, IMU, waves, Welch, Madgwick, Kalman, LSM6DSV",
+  "authors":
+  [
+    {
+      "name": "Per-Ivar Faust",
+      "email": "per.ivar.faust@gmail.com",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "ststm32",
+  "dependencies": {
+    "stm32duino/STM32duino LSM6DSV16X": "^2.0.3",
+    "adafruit/SdFat - Adafruit Fork": "^2.2.3",
+    "etlcpp/Embedded Template Library": "^20.39.4",
+    "paulstoffregen/Time": "*"
+  }
+}

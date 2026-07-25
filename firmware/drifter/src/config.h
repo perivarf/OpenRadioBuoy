@@ -29,14 +29,14 @@ static constexpr uint32_t send_delay_after_handshake     {1000};
 // Sensor reading parameters
 static constexpr uint8_t  readings_per_measurement            {15};
 static constexpr uint8_t  max_number_of_measurements         {40};
-static constexpr uint32_t max_GPS_read_time                  {3*min_2_s*s_2_ms};
+static constexpr uint32_t max_GPS_read_time                  {1*min_2_s*s_2_ms}; //Default 3 min
 static constexpr uint32_t max_sensor_read_time               {40*s_2_ms};
 static constexpr float    outlier_discard_tolerance          {2};
 static constexpr uint16_t GPS_baud                           {9600};
-static constexpr uint32_t minimal_measurement_period         {10*s_2_ms};
-static           uint32_t base_measurement_period            {10*s_2_ms};
-static constexpr uint32_t maximal_measurement_period         {30*min_2_s*s_2_ms};
-static constexpr uint32_t thermometre_pause_between_readings {300};
+static constexpr uint32_t minimal_measurement_period         {0*s_2_ms}; //Default 10 min
+static           uint32_t base_measurement_period            {0*s_2_ms}; //Default 10 min
+static constexpr uint32_t maximal_measurement_period         {3*min_2_s*s_2_ms}; //Default 30 min
+static constexpr uint32_t thermometre_pause_between_readings {30};
 
 
 // Enable or disable parameters
@@ -46,7 +46,7 @@ static constexpr bool debug_SD                              {false};
 static constexpr bool transmitDeploymentMessage             {false};
 static constexpr bool debug_LED_enabled                     {false};
 static constexpr bool sleep_GPS                             {true};
-static constexpr bool perform_handshake                     {true};
+static constexpr bool perform_handshake                     {false}; //TRUE default
 static constexpr bool enable_baseStation_parameter_updates  {false};
 static constexpr bool enable_recovery_beacon                {true};
 static constexpr bool log_every_reading                     {true};
@@ -58,6 +58,13 @@ static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
 static bool     enable_motion_detection                  {false};
 static float    motion_treshold                          {0.5};
 static uint32_t target_reading_distance                  {30};
+
+// -----------------------------------------------------------------------------
+// Wave capture scheduling (the between-captures period + enable flag are shared and
+// live in common_config.h; this is the length of one blocking capture window).
+// -----------------------------------------------------------------------------
+static constexpr uint8_t  max_number_of_wave_measurements {5};
+static constexpr uint32_t wave_measurement_duration       {1*min_2_s*s_2_ms}; // 5 min capture
 
 // Power parameters
 static constexpr uint32_t sleep_time                     {9*s_2_ms};

@@ -64,6 +64,12 @@ class SDWriter{
     int8_t closeRead(void);
     int8_t shutdown(void);
 
+    // Direct access to the mounted card for libraries that need their own buffered
+    // File handles (e.g. wave_manager streaming imu.csv at 100 Hz, where the
+    // per-line sync in logString would be far too slow). The card is mounted once
+    // in begin(); callers must not hold a File open across sd_writer's own logging.
+    SdFat & card(){ return SD; }
+
     // Flag checking if SD writer already is in use
     bool active = false;
     

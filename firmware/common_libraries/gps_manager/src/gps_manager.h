@@ -72,7 +72,7 @@ class GPS_Manager{
   public:
     GPS_Manager(uint32_t sdapin, uint32_t sclpin) : sda_pin(sdapin), scl_pin(sclpin) {};
     bool fix = false;
-    void begin(float);
+    void begin(void);
     DateInfo date = {0,0,0,false};
     etl::deque<GPS_Data, max_number_of_measurements> GPSReadings;
 
@@ -95,6 +95,17 @@ class GPS_Manager{
     void updateBeaconMsg(uint32_t WiO_ID);
     byte beaconMsg[beaconMsgSize];
 
+    /*
+      Non-blocking NAV-PVT polling (ported from ORB_test Gps::update). Runs an
+      IDLE/WAIT state machine: sends a poll every GPS_nav_period_ms and reads the
+      answer back without blocking, so it can be called from a tight loop (e.g.
+      the wave-capture IMU drain) without starving the IMU FIFO. Sets freshFix()
+      true only on the call where a new PVT was decoded (one-shot). Leaves the
+      blocking pollPVT()/performNReadings() path untouched.
+    */
+    void update(void);
+    bool freshFix(void) const { return freshFix_; };
+
     // Latest decoded solution, for fix quality checks and debug output
     const UBX_PVT & lastFix(void) const { return pvt; };
   private:
@@ -103,12 +114,21 @@ class GPS_Manager{
     /*
       UBX transport over the DDC (I2C) port. availBytes reads the 0xFD/0xFE
       byte count registers, pollPVT sends a NAV-PVT poll and blocks until the
-      answer has been read back and decoded.
+      answer has been read back and decoded. readPvtFrame drains and decodes one
+      already-available frame (shared by pollPVT and the non-blocking update).
     */
     uint16_t availBytes(void);
     void flushDDC(uint16_t nbytes);
     bool pollPVT(uint32_t max_wait_time);
+    bool readPvtFrame(uint16_t avail);
     void decodePVT(const uint8_t * payload);
+
+    // Non-blocking poll state (see update()).
+    enum GpsPollState : uint8_t { GPS_POLL_IDLE, GPS_POLL_WAIT };
+    GpsPollState pollState_ = GPS_POLL_IDLE;
+    uint32_t lastPollMs_ = 0;
+    uint32_t pollSentMs_ = 0;
+    bool freshFix_ = false;
 
     etl::vector<GPS_Data, readings_per_measurement> packet;
     uint32_t sda_pin;

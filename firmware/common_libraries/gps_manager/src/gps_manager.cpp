@@ -45,16 +45,12 @@ static void sendUbx(uint8_t cls, uint8_t id, const uint8_t * payload, uint16_t l
 // Pre-built NAV-PVT poll (empty payload), checksum included.
 static const uint8_t navPvtPoll[] = {0xB5, 0x62, 0x01, 0x07, 0x00, 0x00, 0x08, 0x19};
 
-void GPS_Manager::begin(float baudrate){
+void GPS_Manager::begin(){
   /*
-    The GPS talks UBX over I2C, so the baudrate argument is unused. It is kept
-    so the call sites in main.cpp stay the same as for the old UART module.
-
-    We bring up the bus, verify the module answers a MON-VER poll, and raise
-    its navigation rate. Without the CFG-RATE the M8 only computes a solution
-    at 1 Hz and repeated polls would return the same fix over and over.
+    Bring up the bus, verify the module answers a MON-VER poll, and raise navigation rate.
+    Without the CFG-RATE the M8 only uses 1 Hz and repeated
+    polls would return the same fix over and over.
   */
-  (void) baudrate;
 
   /*
     TEMP DIAGNOSTIC (ported from ORB_test): check the bus before init. Both
@@ -106,10 +102,10 @@ void GPS_Manager::begin(float baudrate){
   const uint8_t monVer[] = {0xB5, 0x62, 0x0A, 0x04, 0x00, 0x00, 0x0E, 0x34};
 
   /*
-    Probe until the module answers. shutdownGPS() leaves it in RXM-PMREQ backup,
-    and a warm reset (reflash, reset button) can hit it while it is still down.
-    The bus traffic is itself the DDC wakeup source, so retrying is what brings
-    it back; a cold start needs the retries too while the module boots.
+    Probe until the module answers. After a Controlled GNSS stop (shutdownGPS) the
+    receiver's CPU and I2C stay alive, so it answers on the first try. The retries
+    only matter for a cold start, or a warm reset (reflash, reset button) that hits
+    the module while it is still booting.
   */
   uint8_t ack = 1;
   uint32_t probe_start = millis();
@@ -130,6 +126,11 @@ void GPS_Manager::begin(float baudrate){
       initialized = true;
       // Drop the version string so it does not sit in front of the first PVT
       flushDDC(answer_size);
+
+      // Restart the GNSS engine (CFG-RST resetMode 0x09, hotstart) after a stop.
+      uint8_t rstStart[4] = {0x00, 0x00, 0x09, 0x00};
+      sendUbx(0x06, 0x04, rstStart, 4);
+      delay(50);
 
       // UBX-CFG-RATE: measRate = GPS_nav_period_ms, navRate = 1, timeRef = GPS
       uint8_t rate[6] = {(uint8_t) (GPS_nav_period_ms & 0xFF),
@@ -217,7 +218,16 @@ bool GPS_Manager::pollPVT(uint32_t max_wait_time){
   if (avail < GPS_pvt_frame_size){
     return false;
   }
+  return readPvtFrame(avail);
+}
 
+/*
+  Drain `avail` bytes from the DDC output buffer, syncing on 0xB5 0x62 and
+  decoding the first checksum-valid NAV-PVT frame. Assumes at least one full
+  frame is already waiting (caller checks availBytes). Shared by the blocking
+  pollPVT and the non-blocking update().
+*/
+bool GPS_Manager::readPvtFrame(uint16_t avail){
   uint8_t frame[GPS_pvt_frame_size];
   uint16_t idx = 0;
   bool gotPVT = false;
@@ -259,6 +269,48 @@ bool GPS_Manager::pollPVT(uint32_t max_wait_time){
   return gotPVT;
 }
 
+/*
+  Non-blocking NAV-PVT poll, ported from ORB_test Gps::update(). Call it once per
+  loop iteration; it sends a poll every GPS_nav_period_ms (IDLE) and reads the
+  answer back without blocking (WAIT), falling back to IDLE after a ~1.2 s
+  timeout. freshFix() is true only on the iteration a new PVT was decoded, so a
+  caller writes exactly one row per fix. Keeps the IMU FIFO drained during a
+  wave capture where a blocking pollPVT (~1.1 s) would overflow it.
+*/
+void GPS_Manager::update(void){
+  freshFix_ = false;
+  if (!initialized){
+    return;
+  }
+  uint32_t nowMs = millis();
+
+  if (pollState_ == GPS_POLL_IDLE){
+    if (nowMs - lastPollMs_ < GPS_nav_period_ms){
+      return;
+    }
+    lastPollMs_ = nowMs;
+    Wire.beginTransmission(GPS_I2C_ADDR);
+    Wire.write(navPvtPoll, sizeof(navPvtPoll));
+    if (Wire.endTransmission() != 0){
+      return;  // bus hiccup: retry next interval
+    }
+    pollSentMs_ = nowMs;
+    pollState_ = GPS_POLL_WAIT;
+    return;
+  }
+
+  // WAIT: poll the byte-count register without blocking.
+  uint16_t avail = availBytes();
+  if (avail < GPS_pvt_frame_size){
+    if (nowMs - pollSentMs_ > 1200){
+      pollState_ = GPS_POLL_IDLE;  // timeout, resend next interval
+    }
+    return;
+  }
+  readPvtFrame(avail);  // sets freshFix_ (via decodePVT) on a valid frame
+  pollState_ = GPS_POLL_IDLE;
+}
+
 void GPS_Manager::decodePVT(const uint8_t * p){
   /*
     Decode a NAV-PVT payload (92 bytes, protocol version 18) into pvt.
@@ -283,6 +335,7 @@ void GPS_Manager::decodePVT(const uint8_t * p){
     pvt.headMot_e5 = ubxI4(p + 64);
   }
   fix = pvt.valid;
+  freshFix_ = true;  // new PVT decoded; update() reports it one-shot
 }
 
 uint8_t GPS_Manager::setTimeFromGps(){
@@ -557,20 +610,15 @@ void GPS_Manager::processReadings(bool fullProcessingToggle){
 
 void GPS_Manager::shutdownGPS(void){
   /*
-    We shut the GPS down to save power.
-
-    This PCB has no GPS enable line, so instead of cutting power we ask the
-    module for a software backup (UBX-RXM-PMREQ) with the DDC port kept as a
-    wakeup source. Any I2C traffic in the next begin() wakes it again, and it
-    keeps its ephemeris so the next fix is a hot start.
+    Power save mode, CPU and I2C stay alive.
+    Alternatively
+      1) power down module completely by cutting power to the VCC pin
+      2) use timed backup
   */
   if (sleep_GPS && initialized){
-    // duration = 0 (until woken), flags = backup, wakeupSources = DDC(spics)
-    uint8_t pmreq[16] = {0x00, 0x00, 0x00, 0x00,   // version + reserved
-                         0x00, 0x00, 0x00, 0x00,   // duration 0 = infinite
-                         0x02, 0x00, 0x00, 0x00,   // flags: backup
-                         0x08, 0x00, 0x00, 0x00};  // wakeupSources: spics (DDC)
-    sendUbx(0x02, 0x41, pmreq, 16);
+    // navBbrMask 0x0000 (hotstart), resetMode 0x08 (controlled GNSS stop)
+    uint8_t rst[4] = {0x00, 0x00, 0x08, 0x00};
+    sendUbx(0x06, 0x04, rst, 4);
     delay(20);
   }
   packet.clear();

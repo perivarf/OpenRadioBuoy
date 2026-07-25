@@ -41,8 +41,11 @@ void LoRa_Transceiver::beginRadio(double freq, double bw, int sf, int cr, int po
     use the changeFrequency method.
   */
   radio.setRfSwitchTable(rfswitch_pins, rfswitch_table);
-  state = radio.begin(freq, bw, sf, cr, (0x12),power, 8,1.7, false);
-  radio.setTCXO(1.7);
+  // tcxoVoltage = 0 => the reference is a plain crystal (XTAL), NOT a DIO3-controlled
+  // TCXO. Forcing TCXO on this board gave XOSC_START_ERR (device error 0x20): the
+  // radio waited for a TCXO that isn't there and the oscillator never started, so TX
+  // never completed. Do NOT call setTCXO() here (that would re-enable DIO3 control).
+  state = radio.begin(freq, bw, sf, cr, (0x12),power, 8, 0, false);
   radio.setDio1Action(setFlag);
   packet_count = 0;
   listening = false;
@@ -72,7 +75,13 @@ void LoRa_Transceiver::transmit(const char * msg){
 
 
 void LoRa_Transceiver::transmitB(byte * msg, uint8_t msgSize){
-  radio.startTransmit(msg, msgSize);
+  transmissionState = radio.startTransmit(msg, msgSize);
+  // A non-zero code means the radio never entered TX, so TxDone (DIO1) will never
+  // fire and any following waitUntilReady() would spin forever. Surface it.
+  if (debug_serial && transmissionState != RADIOLIB_ERR_NONE){
+    Serial.print("transmitB: startTransmit failed, code ");
+    Serial.println(transmissionState);
+  }
 }
 
 
@@ -97,10 +106,13 @@ void LoRa_Transceiver::sendFinalMessage(FrequencyMessage frequency_message)
 
 void LoRa_Transceiver::changeFrequency(double f){
   /*
-    This method restarts the radio with a new given frequency. 
+    This method restarts the radio with a new given frequency.
   */
-  state = radio.begin(f, LoRa_bw, LoRa_sf, LoRa_cr, (0x12), LoRa_power, 8,1.7, false);
-  radio.setTCXO(1.7);
+  // Re-apply the RF switch table (beginRadio does this too). Without it a fresh
+  // begin() leaves the STM32WL front-end unconfigured, so TX never keys up.
+  radio.setRfSwitchTable(rfswitch_pins, rfswitch_table);
+  // XTAL reference (tcxoVoltage = 0), no DIO3-TCXO control - see beginRadio().
+  state = radio.begin(f, LoRa_bw, LoRa_sf, LoRa_cr, (0x12), LoRa_power, 8, 0, false);
   radio.setDio1Action(setFlag);
   listening = false;
   delay(200);
@@ -108,7 +120,10 @@ void LoRa_Transceiver::changeFrequency(double f){
 
    if (debug_serial){
     Serial.print("Radio restarted at frequency: ");
-    Serial.println(f);
+    Serial.print(f);
+    Serial.print(" (begin state=");   // 0 = RADIOLIB_ERR_NONE; non-zero => begin failed
+    Serial.print(state);
+    Serial.println(")");
   }
 }
 
@@ -516,11 +531,31 @@ void LoRa_Transceiver::waitUntilReady(){
   /*
     Method which lets the radio wait until a message is successfully sent
   */
-  uint32_t start_wait = millis();
   if (debug_serial){
     Serial.println("Waiting for successful sending");
   }
+  uint32_t lastDiag = millis();
   while (!operationDone){
+    // Diagnostic (no timeout by design): once a second, read the radio's own IRQ
+    // register. TxDone bit set here but operationDone still false => the DIO1
+    // interrupt is not being delivered (IRQ routing). TxDone NOT set => the radio
+    // never transmitted (see the startTransmit code from transmitB).
+    if (debug_serial && millis() - lastDiag >= 1000){
+      lastDiag = millis();
+      uint32_t irq = radio.getIrqFlags();
+      // The SX126x's own error register: why did the modem never reach TxDone?
+      // 0x20=XOSC_START, 0x40=PLL_LOCK, 0x100=PA_RAMP, 0x10=IMG_CALIB, 0x4=PLL_CALIB.
+      uint16_t devErr = radio.deviceErrors();
+      // Chip status byte: bits 6:4 = current mode (0x2=STBY_RC, 0x3=STBY_XOSC,
+      // 0x4=FS, 0x5=RX, 0x6=TX). If this is not 0x6 after startTransmit, the radio
+      // never actually entered TX.
+      uint8_t chipMode = (radio.chipStatus() >> 4) & 0x07;
+      Serial.print("  waitUntilReady: irqFlags=0x"); Serial.print(irq, HEX);
+      Serial.print(" TxDone="); Serial.print((irq & RADIOLIB_SX126X_IRQ_TX_DONE) ? 1 : 0);
+      Serial.print(" devErr=0x"); Serial.print(devErr, HEX);
+      Serial.print(" chipMode=0x"); Serial.print(chipMode, HEX);
+      Serial.print(" lastTxState="); Serial.println(transmissionState);
+    }
     delay(100);
     IWatchdog.reload();
   }
