@@ -2,7 +2,7 @@
 #define WAVE_ANALYSIS_H
 
 #include <Arduino.h>
-#include "config.h"        // common_config.h: welch_bins, welch_bin_min/max
+#include "config.h"        // common_config.h: welch_bins (wire-format bin count)
 #include "wave_config.h"
 #include "imu_sampler.h"   // ImuRow
 

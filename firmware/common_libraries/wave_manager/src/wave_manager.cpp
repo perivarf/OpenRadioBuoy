@@ -77,8 +77,8 @@ uint8_t WaveManager::takeReading(void) {
 
   analyzer_.begin();
 
-  // Open the session directory (imu/gps/ses) BEFORE starting the FIFO stream: the
-  // mkdir + opening 5 files + writing headers/anchor + syncs take tens of ms of SD
+  // Open the session directory (imu/gps/ses/cfg) BEFORE starting the FIFO stream: the
+  // mkdir + opening 4 files + writing headers/anchor/config + syncs take tens of ms of SD
   // activity, and if the FIFO were already streaming it would overflow before the
   // first drain. csvActive_ spans take+process: spec/ana are added and the folder
   // renamed (_tmp -> final) in processReading -> stopSession.
@@ -149,6 +149,17 @@ bool WaveManager::startSession(void) {
   imuFile_.sync(); gpsFile_.sync();
   writeSessionAnchor();  // anchor keys (sessionFile_ kept open)
 
+  // cfg.csv: write-once and close - the constants never change during a capture.
+  // A failure here is not fatal: the run is still valid, only less self-describing.
+  snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_CFG_PREFIX);
+  File cfg = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
+  if (cfg) {
+    writeSessionConfig(cfg);
+    cfg.sync(); cfg.close();
+  } else if (debug_serial) {
+    Serial.println("WaveManager: could not open cfg.csv");
+  }
+
   rowsSinceSync_ = 0;
   if (debug_serial) { Serial.print("WaveManager: logging session to "); Serial.println(sessionDir_); }
   return true;
@@ -166,9 +177,93 @@ void WaveManager::writeSessionAnchor(void) {
   sessionFile_.print("build_seq,");       sessionFile_.println(wave_build_seq);
   sessionFile_.print("reading_id,");      sessionFile_.println(readingID_);
   sessionFile_.print("orientation,");     sessionFile_.println((int)wave_orientation_method);
+  sessionFile_.print("orientation_name,");sessionFile_.println(orientationName(wave_orientation_method));
   sessionFile_.print("start_utc_epoch,"); sessionFile_.println((uint32_t)captureStart_);
   sessionFile_.print("start_utc_iso,");   sessionFile_.println(iso);
   sessionFile_.sync();  // do not close: summary is appended at stop
+}
+
+// cfg.csv: every constant the capture depends on, so a session folder is
+// self-describing - postprocess.py can rebuild the exact pipeline (scaling,
+// bucketing, Welch, taper) from the folder alone, without matching it against a
+// firmware revision. Kept out of ses.csv because these are per-BUILD values, while
+// ses.csv holds the per-RUN anchor + summary; mixing them buried the ~12 lines you
+// actually want to eyeball under ~50 lines of constants.
+//
+// Written and closed inside startSession (before the FIFO stream starts, so the SD
+// activity cannot starve the drain loop) and never reopened - so it costs no
+// long-lived File handle, which matters with RAM at ~87%.
+void WaveManager::writeSessionConfig(File &f) {
+  f.println("key,value");
+
+  // --- capture scheduling ---
+  f.print("duration_ms,");        f.println(wave_measurement_duration);
+  f.print("period_ms,");          f.println(base_measurement_period_wave_analysis);
+
+  // --- IMU front end ---
+  f.print("imu_odr_hz,");         f.println(kImuOdrHz);
+  f.print("accel_odr_hz,");       f.println(kAccelOdrHz);
+  f.print("imu_low_power,");      f.println(kImuLowPower);
+  f.print("imu_acc_mode,");       f.println((int)kImuAccMode);
+  f.print("imu_gyr_mode,");       f.println((int)kImuGyrMode);
+  f.print("imu_spi_hz,");         f.println(kImuSpiHz);
+  f.print("accel_fs_g,");         f.println((int)kAccelFS);
+  f.print("gyro_fs_dps,");        f.println((int)kGyroFS);
+  f.print("acc_sens_mg_lsb,");    f.println(kAccSensMgPerLsb, 4);
+  f.print("gyr_sens_mdps_lsb,");  f.println(kGyrSensMdpsPerLsb, 4);
+  f.print("lpf2_enabled,");       f.println(kUseLpf2 ? 1 : 0);
+  f.print("lpf2_bw,");            f.println(kLpf2Bw);        // raw CTRL8 register value
+  f.print("lpf2_odr_div,");       f.println(kLpf2Div);
+  f.print("lpf2_cutoff_hz,");     f.println(kLpf2CutoffHz, 2);
+  f.print("sflp_odr_hz,");        f.println(kSflpOdrHz, 1);
+  f.print("sflp_game_rot_tag,");  f.println(kSflpGameRotationTag);
+  f.print("fifo_watermark,");     f.println(kFifoWatermark);
+
+  // --- windowing (raw ODR -> imu.csv rows) ---
+  f.print("output_rate_hz,");     f.println(kOutputRateHz);
+  f.print("window_ms,");          f.println(kWindowMs);
+  f.print("csv_sync_rows,");      f.println(wave_csv_sync_rows);
+
+  // --- brake detection ---
+  f.print("brake_g_thresh,");     f.println(kBrakeGThreshold, 3);
+  f.print("brake_thresh_mg2,");   f.println((float)kBrakeThresholdMg2, 1);
+  f.print("brake_min_ms,");       f.println(kBrakeMinMs);
+  f.print("brake_min_samples,");  f.println(kBrakeMinSamples);
+
+  // --- orientation / vertical acceleration ---
+  // orientation is echoed from ses.csv (same constexpr, so they cannot disagree):
+  // without it the tuning below is ambiguous, since only one method actually ran.
+  f.print("orientation,");        f.println((int)wave_orientation_method);
+  f.print("orientation_name,");   f.println(orientationName(wave_orientation_method));
+  f.print("madgwick_beta,");      f.println(kMadgwickBeta, 4);
+  f.print("kalman_q_angle,");     f.println(kKalmanQAngle, 6);
+  f.print("kalman_q_bias,");      f.println(kKalmanQBias, 6);
+  f.print("kalman_r,");           f.println(kKalmanR, 6);
+  f.print("gravity,");            f.println(kGravity, 5);
+  f.print("mg_to_ms2,");          f.println(kMg2Ms2, 8);
+  f.print("mdps_to_rads,");       f.println(kMdps2Rads, 8);
+  f.print("vacc_bucket_ms,");     f.println(kVacc10HzBucketMs);
+  f.print("vacc_fs_hz,");         f.println(kVaccFsHz, 3);
+
+  // --- Welch spectrum + acc->elevation taper ---
+  f.print("welch_seglen,");       f.println(kWelchSegLen);
+  f.print("welch_overlap_div,");  f.println(kWelchOverlapDiv);
+  f.print("welch_step,");         f.println(kWelchSegLen / kWelchOverlapDiv);
+  f.print("welch_window,");       f.println(kWelchWindow == WindowType::Hann ? "Hann" : "Hamming");
+  f.print("psd_df_hz,");          f.println(kPsdDfHz, 6);
+  f.print("wave_fmax_hz,");       f.println(kWaveFMax, 3);
+  f.print("taper_f1_hz,");        f.println(kTaperF1, 3);
+  f.print("taper_f2_hz,");        f.println(kTaperF2, 3);
+
+  // --- transmitted spectrum slice ---
+  // The bin range is drifter-side, so these keys are the only record of which
+  // frequencies the base station's wave_spectrum[] actually covers.
+  f.print("welch_bin_min,");      f.println((uint32_t)welch_bin_min);
+  f.print("welch_bin_max,");      f.println((uint32_t)welch_bin_max);
+  f.print("welch_bins,");         f.println((uint32_t)welch_bins);
+  f.print("spec_f_min_hz,");      f.println(welch_bin_min * kPsdDfHz, 5);
+  f.print("spec_f_max_hz,");      f.println((welch_bin_max - 1) * kPsdDfHz, 5);
+  f.print("scale_factor,");       f.println(scale_factor);
 }
 
 // Append the summary (known only at capture end) to the still-open session file.

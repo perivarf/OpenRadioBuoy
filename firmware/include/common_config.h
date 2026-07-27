@@ -56,10 +56,16 @@ static constexpr uint8_t max_message_length {255};
 static constexpr uint32_t scale_factor              {100000};
 static constexpr uint8_t  max_number_of_thermometres {1};
 
-// Wave analysis message parameters (size the wave_spectrum array in wave_analysis_Reading)
-static constexpr size_t welch_bin_min {9};  // ~0.039 Hz, about 25 s period
-static constexpr size_t welch_bin_max {64}; // ~0.3125 Hz, about 3 s period
-static constexpr size_t welch_bins = welch_bin_max - welch_bin_min;
+// Wave analysis message wire format: how many uint16 spectrum values a wave message
+// carries. This is the whole shared contract - it sizes wave_spectrum[] in
+// wave_analysis_Reading, drives the parse loop and fixes wave_message_size.
+//
+// WHICH frequencies those bins cover is drifter-side physics and lives next to the
+// Welch settings in wave_manager/wave_config.h (welch_bin_min/max): a bin index means
+// nothing without the segment length and sample rate behind f = k*fs/N, and the base
+// station has neither and needs neither. wave_config.h static_asserts its bin range
+// against this count, so the two cannot drift apart silently.
+static constexpr size_t welch_bins {57};
 
 // Shared wave-analysis run parameters
 static constexpr bool     base_enable_wave_analysis           {true};

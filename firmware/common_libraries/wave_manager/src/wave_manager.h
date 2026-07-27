@@ -63,6 +63,7 @@ class WaveManager {
   bool startSession(void);          // build stamp, mkdir _tmp, open imu/gps/ses, headers
   void stopSession(void);           // close ses, rename _tmp -> final (capture completed)
   void writeSessionAnchor(void);    // build_seq + start UTC (crash-safe, written up front)
+  void writeSessionConfig(File &f); // cfg.csv: every constant the capture depends on
   void writeSessionSummary(bool ok, const WaveParams &params);  // stop UTC, duration, rows, params
   void serviceGps(uint32_t relMs);  // drive gps_manager.update(); log a gps.csv row per fix
 

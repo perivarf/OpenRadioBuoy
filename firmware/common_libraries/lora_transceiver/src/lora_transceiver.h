@@ -13,17 +13,6 @@
 //This function is difficult to weave into a class structure
 void setFlag(void);
 
-// Thin subclass exposing SX126x's protected diagnostics: the device-error
-// register (why a modem operation failed) and the chip status byte (which mode
-// the chip is actually in). Used to debug a transmit that never reaches TxDone.
-class STM32WLx_Diag : public STM32WLx {
-  public:
-    STM32WLx_Diag(STM32WLx_Module* mod) : STM32WLx(mod) {}
-    uint16_t deviceErrors() { return getDeviceErrors(); }
-    int16_t  clearErrors()  { return clearDeviceErrors(); }
-    uint8_t  chipStatus()   { return getStatus(); }  // bits 6:4 = mode (0x6 = TX)
-};
-
 static volatile bool operationDone = false;
 
  
@@ -104,7 +93,7 @@ class LoRa_Transceiver{
     buoyInfo initEmptyBuoy();
     buoyInfo findBuoy(uint32_t);    
   private:
-    STM32WLx_Diag radio = new STM32WLx_Module();
+    STM32WLx radio = new STM32WLx_Module();
     const uint32_t rfswitch_pins[5] = {PB8, PC13, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC};
     const Module::RfSwitchMode_t rfswitch_table[4] = {
       {STM32WLx::MODE_IDLE,  {LOW,  LOW}},

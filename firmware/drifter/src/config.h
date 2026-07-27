@@ -64,7 +64,7 @@ static uint32_t target_reading_distance                  {30};
 // live in common_config.h; this is the length of one blocking capture window).
 // -----------------------------------------------------------------------------
 static constexpr uint8_t  max_number_of_wave_measurements {5};
-static constexpr uint32_t wave_measurement_duration       {1*min_2_s*s_2_ms}; // 5 min capture
+static constexpr uint32_t wave_measurement_duration       {30*min_2_s*s_2_ms}; // 5 min capture
 
 // Power parameters
 static constexpr uint32_t sleep_time                     {9*s_2_ms};

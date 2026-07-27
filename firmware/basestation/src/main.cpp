@@ -343,7 +343,10 @@ void loop()
             sd_writer.debugSerialPrint(" s, max_value: ");
             sd_writer.debugSerialPrintln((float)w.max_value / scale_factor);
 
-            // Elevation PSD spectrum, bins welch_bin_min..welch_bin_max. Values are
+            // Elevation PSD spectrum, welch_bins consecutive bins. Which frequencies
+            // they cover is set drifter-side (wave_config.h welch_bin_min/max + the
+            // Welch seglen) and logged to the capture's cfg.csv; it is deliberately not
+            // a shared constant, so do not label these in Hz here. Values are
             // normalised to the peak (0-65535); absolute PSD = value/65535 * max_value.
             sd_writer.debugSerialPrintln("wave spectrum (normalised 0-65535):");
             for (size_t i = 0; i < welch_bins; i++){

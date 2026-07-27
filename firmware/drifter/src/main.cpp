@@ -169,6 +169,19 @@ void setup() {
   gps_manager.processReadings(false);
 
   /*
+    Set the system clock (RTC/TimeLib) from GPS now that we have a fix. The loop
+    above can miss the in-loop clock sync if the module's time-valid flag flips only
+    after that iteration's updateTimestamp ran, leaving now() boot-relative (1970)
+    and every log/session timestamp wrong. A valid PVT always carries UTC time, so
+    set it explicitly here.
+  */
+  if (gps_manager.updateTimestamp(max_GPS_read_time, true) == 0){
+    if (debug_serial){ mySerial.print("RTC set from GPS, epoch "); mySerial.println((uint32_t)now()); }
+  } else if (debug_serial){
+    mySerial.println("WARNING: RTC not set - no valid GPS time yet (timestamps boot-relative)");
+  }
+
+  /*
     We need to read the attached thermistors for a buoy ID
   */
   thermo_manager.begin(THERMO_DATA_PIN, THERMO_POWER_PIN);

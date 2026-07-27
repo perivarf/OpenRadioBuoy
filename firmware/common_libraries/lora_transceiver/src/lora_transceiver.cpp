@@ -120,10 +120,10 @@ void LoRa_Transceiver::changeFrequency(double f){
 
    if (debug_serial){
     Serial.print("Radio restarted at frequency: ");
-    Serial.print(f);
-    Serial.print(" (begin state=");   // 0 = RADIOLIB_ERR_NONE; non-zero => begin failed
-    Serial.print(state);
-    Serial.println(")");
+    Serial.println(f);
+    if (state != RADIOLIB_ERR_NONE){
+      Serial.print("changeFrequency: begin failed, state "); Serial.println(state);
+    }
   }
 }
 
@@ -534,28 +534,7 @@ void LoRa_Transceiver::waitUntilReady(){
   if (debug_serial){
     Serial.println("Waiting for successful sending");
   }
-  uint32_t lastDiag = millis();
   while (!operationDone){
-    // Diagnostic (no timeout by design): once a second, read the radio's own IRQ
-    // register. TxDone bit set here but operationDone still false => the DIO1
-    // interrupt is not being delivered (IRQ routing). TxDone NOT set => the radio
-    // never transmitted (see the startTransmit code from transmitB).
-    if (debug_serial && millis() - lastDiag >= 1000){
-      lastDiag = millis();
-      uint32_t irq = radio.getIrqFlags();
-      // The SX126x's own error register: why did the modem never reach TxDone?
-      // 0x20=XOSC_START, 0x40=PLL_LOCK, 0x100=PA_RAMP, 0x10=IMG_CALIB, 0x4=PLL_CALIB.
-      uint16_t devErr = radio.deviceErrors();
-      // Chip status byte: bits 6:4 = current mode (0x2=STBY_RC, 0x3=STBY_XOSC,
-      // 0x4=FS, 0x5=RX, 0x6=TX). If this is not 0x6 after startTransmit, the radio
-      // never actually entered TX.
-      uint8_t chipMode = (radio.chipStatus() >> 4) & 0x07;
-      Serial.print("  waitUntilReady: irqFlags=0x"); Serial.print(irq, HEX);
-      Serial.print(" TxDone="); Serial.print((irq & RADIOLIB_SX126X_IRQ_TX_DONE) ? 1 : 0);
-      Serial.print(" devErr=0x"); Serial.print(devErr, HEX);
-      Serial.print(" chipMode=0x"); Serial.print(chipMode, HEX);
-      Serial.print(" lastTxState="); Serial.println(transmissionState);
-    }
     delay(100);
     IWatchdog.reload();
   }

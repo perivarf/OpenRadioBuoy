@@ -26,8 +26,8 @@ bool ImuSampler::begin(Print &dbg) {
 
   imu_.Enable_X();      // accelerometer
   imu_.Enable_G();      // gyroscope
-  imu_.Set_X_FS(4);     // +-4 g
-  imu_.Set_G_FS(2000);  // +-2000 dps
+  imu_.Set_X_FS((int32_t)kAccelFS);   // full-scale from wave_config (kAccelFS)
+  imu_.Set_G_FS((int32_t)kGyroFS);    // full-scale from wave_config (kGyroFS)
   imu_.Set_X_ODR((float)kImuOdrHz, kImuAccMode);
   imu_.Set_G_ODR((float)kImuOdrHz, kImuGyrMode);
 
