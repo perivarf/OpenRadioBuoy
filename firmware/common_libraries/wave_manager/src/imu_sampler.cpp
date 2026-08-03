@@ -65,6 +65,7 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   winNAcc_ = winNGyr_ = 0;
   winBraking_ = false;
   winSflpNan_ = false;
+  winFifoOvf_ = false;
   brakeRun_ = 0;
   winSumAx_ = winSumAy_ = winSumAz_ = 0;
   winSumNx_ = winSumNy_ = winSumNz_ = 0;
@@ -95,6 +96,7 @@ void ImuSampler::closeWindow() {
   r.mqw = 1.0f; r.mqx = 0.0f; r.mqy = 0.0f; r.mqz = 0.0f;
   r.vaccMadgwick = 0.0f; r.vaccSflp = 0.0f;
   r.sflpNan = winSflpNan_ ? 1 : 0;
+  r.fifoOvf = winFifoOvf_ ? 1 : 0;
   if (rowSink_) rowSink_(r);
 }
 
@@ -105,7 +107,8 @@ void ImuSampler::update(Print &dbg) {
   uint8_t full = 0;
   imu_.FIFO_Get_Full_Status(&full);
   if (full) {
-    nOverflow_++;  // stream mode overwrote oldest samples -> draining too slowly
+    nOverflow_++;       // stream mode overwrote oldest samples -> draining too slowly
+    winFifoOvf_ = true; // flag the window that was open when it happened (fifo_ovf in imu.csv)
   }
 
   uint16_t nSamples = 0;
@@ -132,6 +135,7 @@ void ImuSampler::update(Print &dbg) {
         winNAcc_ = winNGyr_ = 0;
         winBraking_ = false;
         winSflpNan_ = false;
+        winFifoOvf_ = false;
         winSumAx_ = winSumAy_ = winSumAz_ = 0;
         winSumNx_ = winSumNy_ = winSumNz_ = 0;
         winSumGx_ = winSumGy_ = winSumGz_ = 0;

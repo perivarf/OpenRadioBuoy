@@ -56,6 +56,7 @@ class StreamAnalyzer {
   uint32_t     samples10Hz() const { return n10_; }
   uint32_t     rows() const { return nData_; }
   uint32_t     brakeRows() const { return nBrake_; }
+  uint32_t     warmupRows() const { return nWarm_; }  // rows dropped before the AHRS settled
 
  private:
   void pushWelch(float sample);  // push one 10 Hz sample into the segment
@@ -72,7 +73,7 @@ class StreamAnalyzer {
   uint32_t bN_ = 0;
 
   // Counters.
-  uint32_t n10_ = 0, nData_ = 0, nBrake_ = 0;
+  uint32_t n10_ = 0, nData_ = 0, nBrake_ = 0, nWarm_ = 0;
 
   // Streaming Welch: one segment buffer + PSD accumulator.
   float segBuf_[kWelchSegLen];

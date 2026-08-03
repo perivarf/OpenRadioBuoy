@@ -131,7 +131,7 @@ enum class GyroFS  : uint16_t { DPS125 = 125, DPS250 = 250, DPS500 = 500,
                                 DPS1000 = 1000, DPS2000 = 2000, DPS4000 = 4000 };
 
 static constexpr AccelFS kAccelFS = AccelFS::G2;      // +-2 g
-static constexpr GyroFS  kGyroFS  = GyroFS::DPS1000;  // +-1000 dps
+static constexpr GyroFS  kGyroFS  = GyroFS::DPS500;  // +-500 dps
 
 // LSM6DSV16X sensitivities (datasheet), selected from the ranges above.
 static constexpr float accSensMgPerLsb(AccelFS fs) {

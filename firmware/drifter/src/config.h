@@ -66,6 +66,16 @@ static uint32_t target_reading_distance                  {30};
 static constexpr uint8_t  max_number_of_wave_measurements {5};
 static constexpr uint32_t wave_measurement_duration       {30*min_2_s*s_2_ms}; // 5 min capture
 
+// AHRS settling time at the start of a capture. The filter (Madgwick/Kalman) starts
+// from a single accel sample and needs a while to converge on the true orientation;
+// the vertical acceleration it produces before then is biased and would pollute the
+// PSD. Rows inside the warm-up are still fed to the filter (that is the point) and
+// still logged to imu.csv/gps.csv - they are only kept out of the 10 Hz bucketing,
+// the Welch accumulation and hence Hs/Tz/Tc/Tp. Set to 0 to disable.
+static constexpr uint32_t wave_measurement_filter_warm_up {30*s_2_ms};
+static_assert(wave_measurement_filter_warm_up < wave_measurement_duration,
+              "AHRS warm-up must be shorter than the capture, or nothing is analysed");
+
 // Power parameters
 static constexpr uint32_t sleep_time                     {9*s_2_ms};
 #endif

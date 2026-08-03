@@ -197,7 +197,7 @@ void StreamAnalyzer::begin(void) {
   kroll_.reset(0.0f); kpitch_.reset(0.0f);
   haveQ_ = false; prevT_ = 0;
   curBucket_ = -1; bSum_ = 0.0; bN_ = 0;
-  n10_ = nData_ = nBrake_ = 0;
+  n10_ = nData_ = nBrake_ = nWarm_ = 0;
   segFill_ = 0; nSeg_ = 0;
   for (int k = 0; k <= kWelchSegLen / 2; k++) psdAcc_[k] = 0.0f;
   ensureS2();
@@ -270,6 +270,15 @@ void StreamAnalyzer::ingest(ImuRow &r) {
   // Write orientation result back into the row -> logged to imu.csv.
   r.mqw = qSel[0]; r.mqx = qSel[1]; r.mqy = qSel[2]; r.mqz = qSel[3];
   r.vaccMadgwick = vSel; r.vaccSflp = vSflp;
+
+  // AHRS warm-up: the filter above has been updated (and the row is logged by the
+  // caller), but the orientation has not converged yet, so the vertical accel is
+  // biased. Keep those rows out of the bucketing/Welch chain -> no effect on the
+  // PSD or on Hs/Tz/Tc/Tp.
+  if (t < (long)wave_measurement_filter_warm_up) {
+    nWarm_++;
+    return;
+  }
 
   // Average to 10 Hz buckets (100 ms) -> streaming Welch.
   long bucket = t / kVacc10HzBucketMs;

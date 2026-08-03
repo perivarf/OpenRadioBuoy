@@ -13,7 +13,7 @@ WaveManager *WaveManager::s_self = nullptr;
 // captures back offline.
 static const char *kImuCsvHeader =
     "win_start_ms,n,ax_mg,ay_mg,az_mg,ax_ned,ay_ned,az_ned,gx_mdps,gy_mdps,gz_mdps,"
-    "qw,qx,qy,qz,braking,mqw,mqx,mqy,mqz,vacc_madgwick,vacc_sflp,sflp_nan";
+    "qw,qx,qy,qz,braking,mqw,mqx,mqy,mqz,vacc_madgwick,vacc_sflp,sflp_nan,fifo_ovf";
 
 void WaveManager::begin(void) {
   s_self = this;
@@ -56,7 +56,8 @@ void WaveManager::onRow(ImuRow &r) {
   imuFile_.print(r.braking); imuFile_.print(',');
   imuFile_.print(r.mqw, 5); imuFile_.print(','); imuFile_.print(r.mqx, 5); imuFile_.print(','); imuFile_.print(r.mqy, 5); imuFile_.print(','); imuFile_.print(r.mqz, 5); imuFile_.print(',');
   imuFile_.print(r.vaccMadgwick, 5); imuFile_.print(','); imuFile_.print(r.vaccSflp, 5); imuFile_.print(',');
-  imuFile_.println(r.sflpNan);
+  imuFile_.print(r.sflpNan); imuFile_.print(',');
+  imuFile_.println(r.fifoOvf);
 
   if (++rowsSinceSync_ >= wave_csv_sync_rows) {
     imuFile_.sync();  // periodic flush; NOT per row (that would stall the FIFO)
@@ -199,6 +200,9 @@ void WaveManager::writeSessionConfig(File &f) {
   // --- capture scheduling ---
   f.print("duration_ms,");        f.println(wave_measurement_duration);
   f.print("period_ms,");          f.println(base_measurement_period_wave_analysis);
+  // AHRS settling window: logged to imu.csv/gps.csv but excluded from Welch/PSD, so
+  // postprocess must skip the same leading rows to reproduce the on-device Hs.
+  f.print("filter_warm_up_ms,");  f.println(wave_measurement_filter_warm_up);
 
   // --- IMU front end ---
   f.print("imu_odr_hz,");         f.println(kImuOdrHz);
@@ -371,6 +375,7 @@ uint8_t WaveManager::processReading(void) {
     if (af) {
       af.println("key,value");
       af.print("imu_rows,");         af.println(analyzer_.rows());
+      af.print("warmup_rows,");      af.println(analyzer_.warmupRows());
       af.print("brake_windows,");    af.println(analyzer_.brakeRows());
       af.print("vacc10hz_samples,"); af.println(analyzer_.samples10Hz());
       af.print("welch_segments,");   af.println(analyzer_.segments());

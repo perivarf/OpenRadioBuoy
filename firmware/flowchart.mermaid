@@ -1,0 +1,85 @@
+flowchart TD
+    subgraph IMU["ISM330DHCX &mdash; ODR 208 Hz &mdash; src/waves/mod.rs"]
+        ACC["Akselerometer, +/-4 g<br/>on-chip LPF2 = ODR/2 = 104 Hz"]
+        GYR["Gyroskop, +/-500 dps<br/>on-chip LPF2 = 66.8 Hz"]
+        FIFO["FIFO, BDR 208 Hz<br/>ett gyro- og ett accel-ord per sample"]
+        ACC --> FIFO
+        GYR --> FIFO
+    end
+
+    FIFO -->|"208 Hz, read_and_filter"| SCALE
+
+    subgraph BUF["ImuBuf::sample &mdash; kjores per sample @ 208 Hz &mdash; src/waves/buf.rs"]
+        SCALE["Skaler ravedier<br/>gyro: dps og rad/s, accel: g og m/s2"]
+        RAW["raw_axl-buffer, kun med feature raw<br/>G16 + A16 @ 208 Hz"]
+        ROT["Roter oyeblikks-akselerasjonen<br/>a_ned = q * a_body, m/s2"]
+        GRAV["Trekk fra tyngdekraften<br/>z = a_ned_z - 9.80665"]
+        SCALE --> RAW
+        SCALE --> ROT --> GRAV
+    end
+
+    SCALE -->|"gyro, vinkelhastighet"| PRED
+    SCALE -->|"accel, tyngderetning"| CORR
+
+    subgraph FUS["Sensorfusjon, AHRS &mdash; rekursivt filter med tilstand<br/>NxpFusion i sfy, Madgwick eller Kalman i ORB"]
+        INIT["Initialisering fra ett enkelt accel-sample<br/>roll og pitch fra tyngdekraft, yaw = 0<br/>grov start, langt fra sann orientering"]
+        PRED["Prediksjon fra gyro<br/>Madgwick: q oppdateres med 0.5 q omega dt<br/>Kalman: vinkel += rate minus bias, ganger dt"]
+        CORR["Korreksjon fra accel<br/>Madgwick: gradientsteg skalert med beta<br/>Kalman: gain K, oppdaterer ogsa gyro-bias"]
+        STATE["Filtertilstand<br/>Madgwick: quaternion q, 4 tall<br/>Kalman: vinkel, bias, kovarians P<br/>konvergerer eksponentielt, tidskonstant satt av beta"]
+        INIT --> STATE
+        STATE --> PRED --> CORR --> STATE
+    end
+
+    STATE --> QUAT["Quaternion q, orientering body til NED"] --> ROT
+
+    GRAV --> FIR
+
+    subgraph FIRB["FIR-lavpass og desimering &mdash; src/fir.rs"]
+        FIR["3 uavhengige Decimator, en per akse x/y/z<br/>firwin, NTAP = 129, fc = 26 Hz = ny Nyquist<br/>DECIMATE = 208 / 26 / 2 = 4<br/>gruppeforsinkelse 64/208 = 0.31 s"]
+        OUT["Utgang kun hvert 4. sample<br/>OUT_FREQ = 208 / 4 = 52 Hz"]
+        FIR --> OUT
+    end
+
+    OUT -->|"52 Hz, x y z"| AXLBUF
+    OUT -->|"52 Hz, kun z"| WU
+
+    subgraph WARM["Innsvingningsfase &mdash; warm-up"]
+        WU{"t mindre enn filter_warm_up?"}
+        SKIP["Holdes utenfor spektret<br/>filteret oppdateres og data logges<br/>som normalt, men PSD og SWH<br/>ser aldri disse samplene"]
+        WU -->|"ja, filteret er ikke innsvingt"| SKIP
+    end
+
+    STATE -.->|"tilstanden er ikke konvergert<br/>de forste sekundene"| WU
+    WU -->|"nei, filteret er innsvingt"| WELCH
+
+    subgraph TS["Tidsserie &mdash; src/axl.rs"]
+        AXLBUF["axl-buffer, A16 som u16<br/>SAMPLE_NO = 1024 samples x 3 akser<br/>fullt etter 1024/52 = 19.7 s"]
+        PCK["AxlPacket<br/>timestamp, fifo_offset, freq = 52 Hz<br/>accel_range 4 g, gyro_range 500 dps"]
+        AXLBUF -->|"is_full"| PCK
+    end
+
+    subgraph SP["Welch-spektrum &mdash; src/waves/welch.rs"]
+        WELCH["Rullende segment, NSEG = 2048 @ 52 Hz<br/>= 39.4 s per segment"]
+        WIN["Detrend med segmentmiddel, deretter Hanning-vindu"]
+        FFT["rfft_2048, 1024 bins<br/>df = 52/2048 = 0.0254 Hz"]
+        ACCUM["Akkumuler PSD, m2/Hz<br/>NOVERLAP = 1024 gir 50 prosent overlapp<br/>nytt segment hvert 19.7 s"]
+        DONE["is_full etter mer enn 20 min<br/>= 61 segmenter, del pa nseg"]
+        ENC["u16_encode av bin 2 til 78<br/>0.051 til 1.98 Hz, 77 bins, maks-skalert"]
+        WELCH --> WIN --> FFT --> ACCUM --> DONE --> ENC
+    end
+
+    subgraph GPS["GPS &mdash; MAX-M10S &mdash; src/gps/mod.rs"]
+        PPS["Timepuls 1 Hz gir avbrudd<br/>leser NAV-PVT"]
+        EG["EgpsTime: UTC + pps_time<br/>synkroniserer RTC og posisjon"]
+        COLL["GpsCollector, GPS_PACKET_SZ = 124 samples<br/>= 124 s per pakke ved 1 Hz"]
+        GPCK["GpsPacket, deltakodet mot forste sample<br/>lon/lat/msl + vel N/E/D som 6 x u16"]
+        PPS --> EG
+        PPS --> COLL --> GPCK
+    end
+
+    PCK --> SD["SD-kort, StorageManager<br/>gir storage_id"]
+    SD --> NQ["NOTEQ"]
+    NQ --> AXLQO["notecard: axl.qo<br/>base64, 8196 tegn"]
+    ENC --> SPECQ["SPECQ"] --> SPECQO["notecard: spec.qo<br/>base64, 209 tegn, maks under 256"]
+    GPCK --> EGPSQ["EGPSQ"] --> EGPSQO["notecard: egps.qo<br/>base64, 1988 tegn"]
+    RAW -.->|"kun feature raw"| SD

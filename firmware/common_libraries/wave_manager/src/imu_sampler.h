@@ -18,6 +18,7 @@ struct ImuRow {
   float gx, gy, gz;                 // mean gyro (mdps)
   float qw, qx, qy, qz;             // last quaternion in window (on-chip SFLP)
   uint8_t braking;                  // 1 if linear |a| > threshold long enough
+  uint8_t fifoOvf;                  // 1 if the FIFO overflowed while this window was open
   // Filled by the analyzer before logging:
   float mqw, mqx, mqy, mqz;         // Madgwick/Kalman quaternion (streaming AHRS)
   float vaccMadgwick, vaccSflp;     // vertical linear accel (m/s^2): selected method vs SFLP
@@ -85,6 +86,7 @@ class ImuSampler {
   uint16_t winNAcc_ = 0, winNGyr_ = 0;
   bool     winBraking_ = false;
   bool     winSflpNan_ = false;
+  bool     winFifoOvf_ = false;
   uint16_t brakeRun_ = 0;
   double   winSumAx_ = 0, winSumAy_ = 0, winSumAz_ = 0;
   double   winSumNx_ = 0, winSumNy_ = 0, winSumNz_ = 0;  // linear accel, world/NED frame
