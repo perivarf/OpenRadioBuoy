@@ -177,8 +177,7 @@ void WaveManager::writeSessionAnchor(void) {
           hour(captureStart_), minute(captureStart_), second(captureStart_));
   sessionFile_.print("build_seq,");       sessionFile_.println(wave_build_seq);
   sessionFile_.print("reading_id,");      sessionFile_.println(readingID_);
-  sessionFile_.print("orientation,");     sessionFile_.println((int)wave_orientation_method);
-  sessionFile_.print("orientation_name,");sessionFile_.println(orientationName(wave_orientation_method));
+  sessionFile_.print("orientation_name,");sessionFile_.println(analyzer_.orientationName());
   sessionFile_.print("start_utc_epoch,"); sessionFile_.println((uint32_t)captureStart_);
   sessionFile_.print("start_utc_iso,");   sessionFile_.println(iso);
   sessionFile_.sync();  // do not close: summary is appended at stop
@@ -235,14 +234,23 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("brake_min_samples,");  f.println(kBrakeMinSamples);
 
   // --- orientation / vertical acceleration ---
-  // orientation is echoed from ses.csv (same constexpr, so they cannot disagree):
-  // without it the tuning below is ambiguous, since only one method actually ran.
-  f.print("orientation,");        f.println((int)wave_orientation_method);
-  f.print("orientation_name,");   f.println(orientationName(wave_orientation_method));
+  // Echoed from ses.csv (same analyzer, so they cannot disagree): without it the
+  // tuning below is ambiguous, since only one method actually ran.
+  f.print("orientation_name,");   f.println(analyzer_.orientationName());
   f.print("madgwick_beta,");      f.println(kMadgwickBeta, 4);
-  f.print("kalman_q_angle,");     f.println(kKalmanQAngle, 6);
-  f.print("kalman_q_bias,");      f.println(kKalmanQBias, 6);
-  f.print("kalman_r,");           f.println(kKalmanR, 6);
+  // The full Kalman tuning, because R is adaptive: r0 alone does not say what the
+  // filter did, the lambdas and dt_ref do. Written whichever filter ran, like
+  // madgwick_beta above - a capture folder should describe the build, not only
+  // the branch it took.
+  f.print("kalman_sigma_g,");     f.println(kKalmanParams.sigmaG, 6);
+  f.print("kalman_sigma_b,");     f.println(kKalmanParams.sigmaB, 8);
+  f.print("kalman_r0,");          f.println(kKalmanParams.r0, 8);
+  f.print("kalman_dt_ref,");      f.println(kKalmanParams.dtRef, 4);
+  f.print("kalman_lambda_a,");    f.println(kKalmanParams.lambdaA, 3);
+  f.print("kalman_lambda_w,");    f.println(kKalmanParams.lambdaW, 3);
+  f.print("kalman_w0,");          f.println(kKalmanParams.w0, 3);
+  f.print("kalman_p0_angle,");    f.println(kKalmanParams.p0Angle, 5);
+  f.print("kalman_p0_bias,");     f.println(kKalmanParams.p0Bias, 5);
   f.print("gravity,");            f.println(kGravity, 5);
   f.print("mg_to_ms2,");          f.println(kMg2Ms2, 8);
   f.print("mdps_to_rads,");       f.println(kMdps2Rads, 8);

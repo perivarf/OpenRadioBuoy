@@ -5,6 +5,8 @@
 #include <LSM6DSV16XSensor.h>
 
 #include "config.h"
+#include "madgwick.h"   // Madgwick   \ the two AHRS the orientation selection at
+#include "kalman.h"     // KalmanAhrs / the bottom of this file chooses between
 /*
   IMU + wave-analysis tuning, ported from ORB_test/src/settings.h.
 
@@ -23,17 +25,9 @@
 // Orientation method used on-device to derive vertical acceleration. Only ONE is
 // computed per capture to keep RAM within budget; the raw imu.csv is logged so the
 // offline postprocess (ORB_test/tools/postprocess.py) can still compare all three.
+// The selection itself (WaveAhrs / wave_use_sflp) is at the BOTTOM of this file,
+// where the tuning constants it constructs from are already defined.
 // -----------------------------------------------------------------------------
-enum class WaveOrientation : uint8_t { Madgwick, Kalman, Sflp };
-static constexpr WaveOrientation wave_orientation_method = WaveOrientation::Madgwick;
-
-// Human-readable name for the session log (ses.csv), so a capture folder says which
-// method produced its vacc column without decoding the enum value.
-static constexpr const char *orientationName(WaveOrientation m) {
-  return m == WaveOrientation::Madgwick ? "Madgwick"
-       : m == WaveOrientation::Kalman   ? "Kalman"
-       :                                  "SFLP";
-}
 
 // Log the full ORB_test-style CSV set to SD per capture, one timestamped directory
 // per wave session (mirrors ORB_test/src/Logger.cpp). The directory is created as
@@ -262,14 +256,72 @@ enum class WindowType { Hann, Hamming };
 static constexpr WindowType kWelchWindow = WindowType::Hann;
 
 // -----------------------------------------------------------------------------
-// Kalman (roll/pitch, 2-state: angle + gyro bias). Translated from
-// ORB_test/tools/postprocess.py (KalmanAngle). Not present in ORB_test firmware.
-// For a wave buoy the accel tilt must be trusted strongly (small R) so the low
-// frequency orientation pins to gravity; a large R drifts and omega^-4 amplifies
-// it into an unreasonable Hs.
+// Kalman: quaternion error-state EKF with an ADAPTIVE measurement noise, ported
+// from ORB_test/tools/kalman.py. See kalman.h for what R's three terms do; the
+// values here are that file's, and they were swept there against the measured
+// noise floor (mg/sqrt(Hz)) on the Skjaerhalden captures - not guessed:
+//
+//   r0     1e-7 -> 8.36,  1e-6 -> 6.34,  1e-5 -> 4.30,  1e-4 -> 4.85,  1e-3 -> 6.24
+//          Optimum near 1e-5. Below it the accel is trusted blindly and wave
+//          acceleration tilts the attitude; above it the gyro drifts.
+//   lambdaA  0 -> 4.299,  25 -> 4.315,  100 -> 4.535    (no effect - see kalman.h)
+//   lambdaW  0 -> 6.543,   2 -> 4.299,   10 -> 4.653    (the whole gain, -34 %)
+//
+// The sweeps were run at 50 Hz logging, hence dtRef = 20 ms: at that rate the
+// rate-invariance factor is exactly 1 and the numbers above apply unchanged. At
+// the drifter's 100 Hz rows the factor doubles R, which is the point - the same
+// bandwidth, not the same per-sample variance.
+//
+// Fixed-R history, since it is the mistake worth not repeating: the first version
+// of KalmanAhrs had r constant and left a flat 8.5e-4 (m/s^2)^2/Hz tilt-leakage
+// floor below 0.25 Hz, which omega^-4 turned into Hs 0.222 m where Madgwick and
+// SFLP both said 0.097 m (Skjaerhalden 20260731_110314). With the adaptive R the
+// same filter lands at 0.135 m. Re-measure through postprocess.py's MEKF column
+// (ORB_test/tools/mekf.py mirrors this filter) after any change here.
+//
+// NB: the accel unit is now load-bearing - it must be m/s^2, since (|a|-g)/g asks
+// how far the sample is from 1 g. wave_analysis.cpp converts before it feeds the
+// AHRS; Madgwick normalises and does not care either way.
 // -----------------------------------------------------------------------------
-static constexpr float kKalmanQAngle = 0.001f;
-static constexpr float kKalmanQBias  = 0.003f;
-static constexpr float kKalmanR      = 0.001f;
+static constexpr KalmanAhrsParams kKalmanParams = {
+    /* sigmaG  */ 0.005f,        // rad/s/sqrt(Hz), ~0.3 deg/s/sqrt(Hz)
+    /* sigmaB  */ 1.0e-5f,       // rad/s^2/sqrt(Hz)
+    /* r0      */ 1.0e-5f,
+    /* dtRef   */ 0.020f,        // s - the rate the sweeps above were run at
+    /* lambdaA */ 0.0f,
+    /* lambdaW */ 2.0f,
+    /* w0      */ 1.0f,          // rad/s
+    /* gravity */ kGravity,
+    /* p0Angle */ 5.0f * (float)M_PI / 180.0f,    // 5 deg
+    /* p0Bias  */ 1.0f * (float)M_PI / 180.0f,    // 1 deg/s
+};
+
+// -----------------------------------------------------------------------------
+// THE orientation selection. Which filter the drifter runs is decided here, at
+// compile time - only the selected one is linked into the firmware, and only its
+// state occupies RAM. It sits at the BOTTOM of this file because the constructor
+// arguments are the tuning constants above.
+//
+// Madgwick and KalmanAhrs deliberately share the same API (reset / initFromAccel /
+// update(gx..az,dt) / quaternion), so switching is a typedef - no interface, no
+// virtual calls. makeWaveAhrs() exists only because the two take different
+// constructor arguments; swap the two lines together.
+// -----------------------------------------------------------------------------
+using WaveAhrs = Madgwick;
+inline WaveAhrs makeWaveAhrs(void) { return WaveAhrs{kMadgwickBeta}; }
+
+// Kalman alternative:
+//   using WaveAhrs = KalmanAhrs;
+//   inline WaveAhrs makeWaveAhrs(void) { return WaveAhrs{kKalmanParams}; }
+
+// Feed the wave chain the chip's own SFLP fusion instead of the AHRS above. SFLP
+// arrives ready-made in every IMU row (quaternion + gravity-compensated vertical
+// accel) and is logged in every row regardless of this flag; setting it true makes
+// that column the one the spectrum, Hs/Tz/Tp and the LoRa message are built from.
+static constexpr bool wave_use_sflp = false;
+
+// What produced the vacc column, for ses.csv / cfg.csv. Derived, so a capture
+// folder can never disagree with the code that filled it.
+static constexpr const char *wave_orientation_name = wave_use_sflp ? "SFLP" : WaveAhrs::kName;
 
 #endif  // WAVE_CONFIG_H

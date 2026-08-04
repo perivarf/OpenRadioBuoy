@@ -5,11 +5,12 @@
 #include "config.h"        // common_config.h: welch_bins (wire-format bin count)
 #include "wave_config.h"
 #include "imu_sampler.h"   // ImuRow
+#include "rotation.h"      // verticalAccel (the AHRS itself comes via wave_config.h)
 
 /*
   Streaming wave analysis, ported from ORB_test/src/analysis.{h,cpp} and reduced to
-  the single on-device orientation method selected by wave_orientation_method
-  (Madgwick / Kalman / SFLP) to fit RAM. The chain is:
+  a single on-device orientation method (Madgwick / Kalman / SFLP) to fit RAM. Which
+  one is a compile-time choice made at the bottom of wave_config.h. The chain is:
 
     orientation (AHRS) -> vertical linear accel -> 10 Hz bucketing ->
     streaming Welch PSD -> acc->elevation (/omega^4) with low-frequency taper ->
@@ -19,20 +20,6 @@
   Welch keeps a single kWelchSegLen segment (75% overlap) and accumulates the PSD,
   so only ~one segment lives in RAM regardless of capture length.
 */
-
-// Classic 2-state Kalman for one angle (Lauszus): fuses the gyro rate (prediction)
-// with the accel tilt (measurement) and estimates the gyro bias. Translated from
-// ORB_test/tools/postprocess.py KalmanAngle.
-class KalmanAngle {
- public:
-  void reset(float angle);
-  float update(float newAngle, float newRate, float dt);
-  float angle() const { return angle_; }
- private:
-  float angle_ = 0.0f;
-  float bias_ = 0.0f;
-  float P_[2][2] = {{0, 0}, {0, 0}};
-};
 
 // One set of spectral moments + derived wave parameters.
 struct WaveParams {
@@ -49,6 +36,9 @@ class StreamAnalyzer {
   // bins (welch_bin_min..welch_bin_max). Returns false if no usable segment.
   bool finalize(WaveParams &params, uint16_t *spectrumOut);
 
+  // Which orientation filter produced the vacc column, for ses.csv / cfg.csv.
+  const char *orientationName(void) const { return wave_orientation_name; }
+
   // Accessors for the CSV logger (spec.csv / ana.csv).
   const float *psd() const { return psdAcc_; }
   uint16_t     psdBins() const { return kWelchSegLen / 2 + 1; }
@@ -61,10 +51,10 @@ class StreamAnalyzer {
  private:
   void pushWelch(float sample);  // push one 10 Hz sample into the segment
 
-  // Orientation state.
-  float q_[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-  KalmanAngle kroll_, kpitch_;
-  bool haveQ_ = false;
+  // Orientation. The AHRS selected in wave_config.h, held by value; unused when
+  // wave_use_sflp is set, since the chip has then already done the fusion.
+  WaveAhrs ahrs_ = makeWaveAhrs();
+  bool haveT_ = false;   // a previous row exists: dt is meaningful and the AHRS is seeded
   long prevT_ = 0;
 
   // 10 Hz bucketing.
@@ -81,12 +71,5 @@ class StreamAnalyzer {
   float psdAcc_[kWelchSegLen / 2 + 1];
   uint32_t nSeg_ = 0;
 };
-
-// Shared DSP helpers (ported from analysis.cpp), exposed for reuse/testing.
-void  madgwickUpdateIMU(float q[4], float gx, float gy, float gz,
-                        float ax, float ay, float az, float dt, float beta);
-void  initQuatFromAccel(float q[4], float ax, float ay, float az);
-void  quatFromRollPitch(float q[4], float roll, float pitch);
-float verticalAccel(const float q[4], float ax, float ay, float az);
 
 #endif  // WAVE_ANALYSIS_H

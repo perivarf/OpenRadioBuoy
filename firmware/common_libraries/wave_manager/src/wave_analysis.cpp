@@ -4,115 +4,16 @@
 #include <string.h>
 
 /*
-  Ported from ORB_test/src/analysis.cpp (Madgwick / FFT / Welch / wave parameters)
-  and ORB_test/tools/postprocess.py (KalmanAngle). Reduced to a single on-device
-  orientation method selected by wave_orientation_method to fit RAM. The offline
-  postprocess still recomputes all three methods from the raw imu.csv.
+  Ported from ORB_test/src/analysis.cpp, reduced to a single on-device orientation
+  method to fit RAM - selected at compile time at the bottom of wave_config.h. The
+  offline postprocess still recomputes all three methods from the raw imu.csv.
+
+  What is left here is the wave chain itself (FFT / Welch / spectral moments) plus
+  the few lines in ingest() that turn a row into a vertical acceleration. The
+  filters themselves live next door and stay free of Arduino and of this file's
+  units: madgwick.{h,cpp}, kalman.{h,cpp} and rotation.{h,cpp} (the quaternion
+  primitives they share).
 */
-
-// -----------------------------------------------------------------------------
-// Orientation helpers (exposed via the header for reuse/testing).
-// -----------------------------------------------------------------------------
-
-// Madgwick 6-axis AHRS (IMU variant): update q=[w,x,y,z] from gyro (rad/s) and
-// accel (any unit; normalised internally) over dt (s).
-void madgwickUpdateIMU(float q[4], float gx, float gy, float gz,
-                       float ax, float ay, float az, float dt, float beta) {
-  float q0 = q[0], q1 = q[1], q2 = q[2], q3 = q[3];
-
-  float qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
-  float qDot2 = 0.5f * (q0 * gx + q2 * gz - q3 * gy);
-  float qDot3 = 0.5f * (q0 * gy - q1 * gz + q3 * gx);
-  float qDot4 = 0.5f * (q0 * gz + q1 * gy - q2 * gx);
-
-  if (!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
-    float recipNorm = 1.0f / sqrtf(ax * ax + ay * ay + az * az);
-    ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
-
-    float _2q0 = 2.0f * q0, _2q1 = 2.0f * q1, _2q2 = 2.0f * q2, _2q3 = 2.0f * q3;
-    float _4q0 = 4.0f * q0, _4q1 = 4.0f * q1, _4q2 = 4.0f * q2;
-    float _8q1 = 8.0f * q1, _8q2 = 8.0f * q2;
-    float q0q0 = q0 * q0, q1q1 = q1 * q1, q2q2 = q2 * q2, q3q3 = q3 * q3;
-
-    float s0 = _4q0 * q2q2 + _2q2 * ax + _4q0 * q1q1 - _2q1 * ay;
-    float s1 = _4q1 * q3q3 - _2q3 * ax + 4.0f * q0q0 * q1 - _2q0 * ay - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
-    float s2 = 4.0f * q0q0 * q2 + _2q0 * ax + _4q2 * q3q3 - _2q3 * ay - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az;
-    float s3 = 4.0f * q1q1 * q3 - _2q1 * ax + 4.0f * q2q2 * q3 - _2q2 * ay;
-    recipNorm = 1.0f / sqrtf(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);
-    s0 *= recipNorm; s1 *= recipNorm; s2 *= recipNorm; s3 *= recipNorm;
-
-    qDot1 -= beta * s0;
-    qDot2 -= beta * s1;
-    qDot3 -= beta * s2;
-    qDot4 -= beta * s3;
-  }
-
-  q0 += qDot1 * dt;
-  q1 += qDot2 * dt;
-  q2 += qDot3 * dt;
-  q3 += qDot4 * dt;
-
-  float recipNorm = 1.0f / sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-  q[0] = q0 * recipNorm; q[1] = q1 * recipNorm; q[2] = q2 * recipNorm; q[3] = q3 * recipNorm;
-}
-
-// Init quaternion from one accel sample (gravity -> roll/pitch, yaw=0).
-void initQuatFromAccel(float q[4], float ax, float ay, float az) {
-  float roll = atan2f(ay, az);
-  float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
-  float cr = cosf(roll * 0.5f), sr = sinf(roll * 0.5f);
-  float cp = cosf(pitch * 0.5f), sp = sinf(pitch * 0.5f);
-  q[0] = cp * cr; q[1] = cp * sr; q[2] = sp * cr; q[3] = -sp * sr;
-}
-
-// Quaternion [w,x,y,z] from roll/pitch (yaw=0) - same convention as
-// initQuatFromAccel, used for the Kalman orientation.
-void quatFromRollPitch(float q[4], float roll, float pitch) {
-  float cr = cosf(roll * 0.5f), sr = sinf(roll * 0.5f);
-  float cp = cosf(pitch * 0.5f), sp = sinf(pitch * 0.5f);
-  q[0] = cp * cr; q[1] = cp * sr; q[2] = sp * cr; q[3] = -sp * sr;
-}
-
-// Vertical linear accel (m/s^2): rotate body accel to world Z, subtract gravity.
-float verticalAccel(const float q[4], float ax, float ay, float az) {
-  float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
-  float wZ = 2.0f * (qx * qz - qw * qy) * ax +
-             2.0f * (qy * qz + qw * qx) * ay +
-             (1.0f - 2.0f * (qx * qx + qy * qy)) * az;
-  return wZ - kGravity;
-}
-
-// -----------------------------------------------------------------------------
-// KalmanAngle (Lauszus 2-state), translated from postprocess.py.
-// -----------------------------------------------------------------------------
-void KalmanAngle::reset(float angle) {
-  angle_ = angle;
-  bias_ = 0.0f;
-  P_[0][0] = P_[0][1] = P_[1][0] = P_[1][1] = 0.0f;
-}
-
-float KalmanAngle::update(float newAngle, float newRate, float dt) {
-  // Prediction (integrate gyro, subtract estimated bias).
-  float rate = newRate - bias_;
-  angle_ += dt * rate;
-  P_[0][0] += dt * (dt * P_[1][1] - P_[0][1] - P_[1][0] + kKalmanQAngle);
-  P_[0][1] -= dt * P_[1][1];
-  P_[1][0] -= dt * P_[1][1];
-  P_[1][1] += kKalmanQBias * dt;
-  // Correction from the accel measurement.
-  float s = P_[0][0] + kKalmanR;
-  float k0 = P_[0][0] / s;
-  float k1 = P_[1][0] / s;
-  float y = newAngle - angle_;
-  angle_ += k0 * y;
-  bias_ += k1 * y;
-  float p00 = P_[0][0], p01 = P_[0][1];
-  P_[0][0] -= k0 * p00;
-  P_[0][1] -= k0 * p01;
-  P_[1][0] -= k1 * p00;
-  P_[1][1] -= k1 * p01;
-  return angle_;
-}
 
 // -----------------------------------------------------------------------------
 // FFT + Welch (file-local, ported from analysis.cpp). Single shared scratch.
@@ -193,9 +94,8 @@ static inline float lowFreqTaper(float f) {
 // StreamAnalyzer
 // -----------------------------------------------------------------------------
 void StreamAnalyzer::begin(void) {
-  q_[0] = 1.0f; q_[1] = q_[2] = q_[3] = 0.0f;
-  kroll_.reset(0.0f); kpitch_.reset(0.0f);
-  haveQ_ = false; prevT_ = 0;
+  ahrs_.reset();
+  haveT_ = false; prevT_ = 0;
   curBucket_ = -1; bSum_ = 0.0; bN_ = 0;
   n10_ = nData_ = nBrake_ = nWarm_ = 0;
   segFill_ = 0; nSeg_ = 0;
@@ -221,47 +121,43 @@ void StreamAnalyzer::ingest(ImuRow &r) {
   nData_++;
   if (r.braking) nBrake_++;
 
+  // Interval since the previous row; 0 on the first row of the capture, which is
+  // the cue to seed the attitude from gravity instead of integrating.
   long t = (long)r.winStartMs;
-  float ax = r.ax, ay = r.ay, az = r.az;      // mg, body
-  float gx = r.gx * kMdps2Rads;
-  float gy = r.gy * kMdps2Rads;
-  float gz = r.gz * kMdps2Rads;
-
-  // Accel tilt (measurement for Kalman): roll about x, pitch about y.
-  float rollAcc = atan2f(ay, az);
-  float pitchAcc = atan2f(-ax, sqrtf(ay * ay + az * az));
-
-  float dt = 0.0f;
-  if (!haveQ_) {
-    initQuatFromAccel(q_, ax, ay, az);
-    kroll_.reset(rollAcc);
-    kpitch_.reset(pitchAcc);
-    haveQ_ = true;
-  } else {
-    dt = (float)(t - prevT_) / 1000.0f;
-    if (dt > 0.0f) {
-      madgwickUpdateIMU(q_, gx, gy, gz, ax, ay, az, dt, kMadgwickBeta);
-      kroll_.update(rollAcc, gx, dt);    // gyro rate about x
-      kpitch_.update(pitchAcc, gy, dt);  // gyro rate about y
-    }
-  }
+  float dt = haveT_ ? (float)(t - prevT_) / 1000.0f : 0.0f;
+  const bool firstRow = !haveT_;
   prevT_ = t;
+  haveT_ = true;
 
-  // Vertical accel (m/s^2) for the SELECTED method, plus SFLP for logging.
-  float axm = ax * kMg2Ms2, aym = ay * kMg2Ms2, azm = az * kMg2Ms2;
-  float vSel;
+  // Orientation -> vertical accel (m/s^2). ImuRow carries accel in mg and gyro in
+  // mdps, so the unit conversions live here; the AHRS takes SI (m/s^2 and rad/s).
+  // The accel unit is not cosmetic: KalmanAhrs' adaptive R weighs |a| against
+  // gravity, so in mg every sample would look like a 100 g slam and R would stay
+  // pinned high. Madgwick normalises and is scale-free, so it sees no difference -
+  // which is why this stays filter-agnostic. Only the selected branch is compiled.
+  const float ax = r.ax * kMg2Ms2;
+  const float ay = r.ay * kMg2Ms2;
+  const float az = r.az * kMg2Ms2;
+
   float qSel[4];
-  if (wave_orientation_method == WaveOrientation::Sflp) {
-    // SFLP azn is already gravity-compensated (world/NED Z), in mg.
-    vSel = r.azn * kMg2Ms2;
+  float vSel;
+  if constexpr (wave_use_sflp) {
     qSel[0] = r.qw; qSel[1] = r.qx; qSel[2] = r.qy; qSel[3] = r.qz;
-  } else if (wave_orientation_method == WaveOrientation::Kalman) {
-    quatFromRollPitch(qSel, kroll_.angle(), kpitch_.angle());
-    vSel = verticalAccel(qSel, axm, aym, azm);
-  } else {  // Madgwick
-    qSel[0] = q_[0]; qSel[1] = q_[1]; qSel[2] = q_[2]; qSel[3] = q_[3];
-    vSel = verticalAccel(qSel, axm, aym, azm);
+    vSel = r.azn * kMg2Ms2;          // already gravity-compensated (world/NED Z)
+  } else {
+    if (firstRow) {
+      ahrs_.initFromAccel(ax, ay, az);
+    } else if (dt > 0.0f) {
+      ahrs_.update(r.gx * kMdps2Rads, r.gy * kMdps2Rads, r.gz * kMdps2Rads,
+                   ax, ay, az, dt);
+    }
+    const float *q = ahrs_.quaternion();
+    qSel[0] = q[0]; qSel[1] = q[1]; qSel[2] = q[2]; qSel[3] = q[3];
+    vSel = verticalAccel(qSel, ax, ay, az, kGravity);
   }
+
+  // SFLP is logged alongside the selected method regardless of which one runs, so
+  // the offline postprocess has the on-chip reference in every imu.csv.
   float vSflp = r.azn * kMg2Ms2;
 
   if (!isfinite(vSel)) vSel = 0.0f;
