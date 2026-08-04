@@ -59,7 +59,7 @@ struct UBX_PVT{
 */
 static constexpr uint8_t  GPS_I2C_ADDR                   {0x42};
 static constexpr uint32_t GPS_I2C_CLOCK                  {100000};  // DDC tolerates up to 400 kHz
-static constexpr uint16_t GPS_nav_rate_hz                {5};
+static constexpr uint16_t GPS_nav_rate_hz                {10};
 static constexpr uint16_t GPS_nav_period_ms              {1000 / GPS_nav_rate_hz};
 static constexpr uint16_t GPS_pvt_frame_size             {100};     // header 6 + payload 92 + checksum 2
 static constexpr uint32_t GPS_probe_timeout              {3000};    // how long begin() retries the MON-VER probe

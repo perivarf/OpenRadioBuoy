@@ -18,10 +18,11 @@
 
   push/eval are separate on purpose, and that separation is the whole point of a
   DECIMATING FIR: the input side is a plain store, run at the input rate, while the
-  convolution is only evaluated at the far rarer output samples. At 960 Hz in and
-  100 Hz out that is 65 multiplies 100 times a second instead of 960 - the
-  difference between affordable and not on a soft-float 48 MHz core. Do not merge
-  them into a single filter() call.
+  convolution is only evaluated at the far rarer output samples. At a decimation of
+  D that is 65 multiplies per OUTPUT sample rather than per input sample - the
+  difference between affordable and not on a soft-float 48 MHz core, and the reason
+  lowering the row rate barely helps while lowering the ODR does. Do not merge them
+  into a single filter() call.
 */
 
 static constexpr uint16_t kFirNtap = 129;              // matches fir.py's NTAP

@@ -26,9 +26,10 @@
   fed the same columns. Carrying the quaternions back by the same amount makes every
   column in a row refer to one moment.
 
-  The numbers line up exactly: kFirHalf = 64 raw samples and kAhrsDiv = 4 give 16
-  AHRS steps, so the delay is a whole number of pushes and no interpolation is
-  needed. wave_config.h asserts that (kFirHalf % kAhrsDiv == 0).
+  The AHRS steps once per raw sample, so the delay is kFirHalf pushes exactly - the
+  FIR's group delay in its own units, with no conversion and no residual phase error.
+  That is the reason the AHRS has no rate divider: a divided AHRS would make this a
+  second decimation with its own divisibility constraint to get wrong.
 
   The SFLP quaternion runs at its own on-chip rate (kSflpOdrHz, 120 Hz) and is
   pushed in here zero-order-held at the AHRS cadence. That is deliberate: one ring

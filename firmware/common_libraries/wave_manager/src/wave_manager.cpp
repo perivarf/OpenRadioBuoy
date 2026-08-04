@@ -113,8 +113,13 @@ uint8_t WaveManager::takeReading(void) {
   }
 
   if (csvActive_) {
-    imuFile_.sync();  imuFile_.close();
-    gpsFile_.sync();  gpsFile_.close();
+    // truncate() at the current position hands back the clusters pre-allocation
+    // reserved but the capture did not use, and sets the directory entry to the real
+    // length. Without it every session folder would claim its full reservation and
+    // the tail would read as garbage. Safe to call whether or not preAllocate
+    // succeeded: with no reservation the position already is the end of the file.
+    imuFile_.truncate();  imuFile_.sync();  imuFile_.close();
+    gpsFile_.truncate();  gpsFile_.sync();  gpsFile_.close();
     // sessionFile_ stays open: summary + rename happen in processReading.
   }
   captureEnd_ = now();
@@ -151,6 +156,22 @@ bool WaveManager::startSession(void) {
   if (!imuFile_ || !gpsFile_ || !sessionFile_) {
     if (debug_serial) Serial.println("WaveManager: could not open session files");
     return false;
+  }
+
+  // Reserve both streaming files contiguously BEFORE the first byte goes in -
+  // preAllocate() refuses once a cluster exists. See wave_config.h for why this is
+  // what keeps the FIFO alive. A failure is not fatal: the file simply falls back to
+  // growing cluster by cluster, which is the behaviour this replaces, so the capture
+  // still runs and only the overflow risk returns.
+  const uint32_t durationS = wave_measurement_duration / s_2_ms;
+  const uint32_t imuBytes  = (uint32_t)kOutputRateHz * durationS * wave_imu_row_bytes_max;
+  const uint32_t gpsBytes  = durationS * wave_gps_row_bytes_max;  // <= 1 row per fix per second
+  if (!imuFile_.preAllocate(imuBytes) && debug_serial) {
+    Serial.print("WaveManager: imu preAllocate failed, "); Serial.print(imuBytes);
+    Serial.println(" B - card may be full or fragmented");
+  }
+  if (!gpsFile_.preAllocate(gpsBytes) && debug_serial) {
+    Serial.println("WaveManager: gps preAllocate failed");
   }
 
   imuFile_.println(kImuCsvHeader);
@@ -229,12 +250,21 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("lpf2_cutoff_hz,");     f.println(kLpf2CutoffHz, 2);
   f.print("sflp_odr_hz,");        f.println(kSflpOdrHz, 1);
   f.print("sflp_game_rot_tag,");  f.println(kSflpGameRotationTag);
+  // fifo_watermark only means something when INT1 drives the drain - it described
+  // nothing at all until the interrupt path was ported, so record which one ran.
+  f.print("imu_wake,");           f.println(kImuUseInt1 ? "int1_watermark" : "poll");
   f.print("fifo_watermark,");     f.println(kFifoWatermark);
 
   // --- windowing (raw ODR -> imu.csv rows) ---
   f.print("output_rate_hz,");     f.println(kOutputRateHz);
   f.print("window_ms,");          f.println(kWindowMs);
   f.print("csv_sync_rows,");      f.println(wave_csv_sync_rows);
+  // What the imu file reserved up front. Read this next to fifo_ovf in imu.csv: a
+  // capture that overflows despite a successful reservation has a stall that is not
+  // cluster allocation, which is a different hunt.
+  f.print("imu_prealloc_bytes,");
+  f.println((uint32_t)kOutputRateHz * (wave_measurement_duration / s_2_ms) *
+            wave_imu_row_bytes_max);
 
   // --- decimation ---
   // row_decimation is the single key that separates a build-1 capture (boxcar means,
@@ -266,7 +296,6 @@ void WaveManager::writeSessionConfig(File &f) {
   // stepped at is no longer output_rate_hz and has to be recorded separately -
   // offline cannot reproduce the device attitude without it.
   f.print("ahrs_rate_hz,");       f.println(kAhrsRateHz, 2);
-  f.print("ahrs_div,");           f.println(kAhrsDiv);
   f.print("ahrs_rate_cap_hz,");   f.println(kAhrsRateCapHz);
   // The quaternions are held, not filtered, but they ARE carried back by the stage-1
   // group delay so every column in a row describes one instant. See quat_delay.h.
@@ -432,6 +461,13 @@ uint8_t WaveManager::processReading(void) {
       // Windows where no raw sample landed on the centre, so the FIR was read at the
       // window edge instead. Non-zero means FIFO gaps - judge a capture by it.
       af.print("fir_late_eval_windows,"); af.println(imu_.firLateEvalCount());
+      // Times the FIFO filled during this capture. In FIFO_MODE each one is a hard
+      // gap: collection stopped until update() drained and restarted it, so the time
+      // axis is compressed by the whole outage. sampleTms_ counts received samples,
+      // not elapsed time, so the gap is smeared across the record rather than left
+      // as a hole - which puts false low-frequency energy exactly where omega^-4
+      // amplifies it. Treat non-zero as grounds for distrusting Hs, not a footnote.
+      af.print("fifo_overflows,"); af.println(imu_.overflowTotal());
       af.print("welch_segments,");   af.println(analyzer_.segments());
       af.print("welch_seglen,");     af.println((int)kWelchSegLen);
       af.print("Hs,"); af.println(params.hs, 3);

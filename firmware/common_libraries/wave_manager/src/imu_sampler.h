@@ -17,7 +17,7 @@
   the window, carried back by the decimating FIR's group delay (kFirS1DelayS, 66.7 ms
   at 960 Hz). That includes the quaternions, which are not filtered but ARE delayed
   by the same amount - see quat_delay.h for why those are two different decisions.
-  The row's timestamp, winStartMs, still names the window on the plain 10 ms grid; it
+  The row's timestamp, winStartMs, still names the window on the plain kWindowMs grid; it
   is a label for the window, not a claim about which instant the values describe.
 */
 struct ImuRow {
@@ -47,8 +47,9 @@ using ImuRowSink = void (*)(const ImuRow &);
   its neighbour is filtered.
 
   Cost note: a decimating FIR is paid for at its OUTPUT rate. push() is a store, run
-  at 960 Hz; eval() is the expensive part and runs at 100 Hz. That is what makes ten
-  of them affordable - see fir.h.
+  at kImuOdrHz; eval() is the expensive part and runs at kOutputRateHz. That is what
+  makes ten of them affordable, and it also means lowering the ROW rate does not make
+  them cheaper by much - lowering the ODR does - see fir.h.
 */
 class FirRowBank {
  public:
@@ -80,8 +81,10 @@ class FirRowBank {
 /*
   IMU driver for the LSM6DSV family. Ported from ORB_test/src/Imu, adapted for the
   buoy: shares the global Arduino SPI object (already brought up by sd_writer on
-  SPI1) instead of owning its own bus, and drains the FIFO by polling its fill
-  level - no INT1 pin, since the interrupt line is not routed on this PCB.
+  SPI1) instead of owning its own bus, and drains the FIFO by polling its fill level.
+  INT1 is routed on the PCB but unused: no pin for it is defined in common_config.h
+  and nothing attaches to it, so the drain cadence is the main loop's, not the
+  sensor's. Wiring it up is the obvious lever if polling ever proves too coarse.
 
   This class owns the AHRS. It has to: the raw samples exist nowhere else, and
   running the orientation filter on window means integrated the gyro at a resolution
@@ -111,11 +114,34 @@ class ImuSampler {
 
   uint32_t overflowCount() const { return nOverflow_; }
 
+  // FIFO fills for the WHOLE capture, cleared only by resetWindowing. nOverflow_ is
+  // the debug print's own counter and is zeroed every time it prints, so it cannot
+  // answer "was this capture clean?" - this one can, and goes to ana.csv.
+  uint32_t overflowTotal() const { return nOverflowTotal_; }
+
   // Windows where no raw sample landed on the centre and the FIR had to be read at
   // the window edge instead. Non-zero means FIFO gaps; logged to ana.csv.
   uint32_t firLateEvalCount() const { return nFirLateEval_; }
 
  private:
+  // INT1 watermark plumbing. attachInterrupt takes a plain function, so the ISR is a
+  // static trampoline that finds the one instance through s_self - the same pattern
+  // WaveManager uses for its row sink, and the one ORB_test's Imu uses here. The ISR
+  // does nothing but set the flag; all work happens in update().
+  static ImuSampler *s_self;
+  static void isrTrampoline();
+  volatile bool fifoFlag_ = false;
+  uint32_t lastDrainMs_ = 0;   // deadline for the INT1 gate; see kFifoPollFallbackMs
+
+  // Raw auto-incrementing register burst on the shared SPI bus (ORB_test's
+  // Imu::imuBurstRead). One CS-low transfer for len consecutive registers.
+  void imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len);
+
+  // Pop one FIFO word atomically: tag + 6 payload bytes in a single transfer.
+  // Returns tag_sensor. See the definition for why the split the driver does is
+  // not merely slower but wrong under FIFO pressure.
+  uint8_t readFifoWord(uint8_t payload[6]);
+
   void closeWindow();
 
   // Evaluate the FIR bank + read the delayed quaternions into pendingRow_.
@@ -129,6 +155,7 @@ class ImuSampler {
   ImuRowSink rowSink_ = nullptr;
 
   uint32_t nOverflow_ = 0;
+  uint32_t nOverflowTotal_ = 0;
   uint32_t nFirLateEval_ = 0;
 
   // Debug-rate counters (accumulated per print interval, then reset). The magnitude
@@ -137,11 +164,6 @@ class ImuSampler {
   uint32_t dbgLastPrint_ = 0;
   uint32_t nAccDbg_ = 0, nGyrDbg_ = 0;
   double   sumAccMag2_ = 0.0, sumGyrMag2_ = 0.0;
-  // Microseconds spent in the AHRS update and in the FIR evaluation since the last
-  // print. These are the two new loads in the drain loop and the reason FIFO
-  // overflow is the thing to watch after this change, so they are measured rather
-  // than estimated: the print reports them as a percentage of wall time.
-  uint32_t usAhrs_ = 0, usFir_ = 0;
 
   // Windowing state: kWindowMs windows off a monotonic accel counter.
   uint32_t sessionStartMs_ = 0;
@@ -158,12 +180,11 @@ class ImuSampler {
   uint16_t brakeRun_ = 0;
   float    latestQw_ = 1, latestQx_ = 0, latestQy_ = 0, latestQz_ = 0;
 
-  // AHRS on the raw stream, capped at kAhrsRateCapHz. latestG*_ pairs the gyro with
-  // the accel sample that drives the update - they arrive as separate FIFO tags, so
-  // the freshest gyro word is the best available match (one sample of skew at most).
+  // AHRS on the raw stream, one update per accel sample. latestG*_ pairs the gyro
+  // with the accel sample that drives the update - they arrive as separate FIFO
+  // tags, so the freshest gyro word is the best available match (one sample of skew).
   WaveAhrs ahrs_ = makeWaveAhrs();
   bool     ahrsSeeded_ = false;
-  uint16_t ahrsN_ = 0;
   float    latestGx_ = 0, latestGy_ = 0, latestGz_ = 0;
 
   FirRowBank              fir_{kFirCoeffsStage1};

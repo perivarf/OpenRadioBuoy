@@ -36,6 +36,10 @@ static constexpr uint32_t SPI_MISO_PIN   {PA6};
 static constexpr uint32_t SPI_SCK_PIN    {PA5};
 static constexpr uint32_t SPI_CS_SD_PIN  {PA4};
 static constexpr uint32_t SPI_CS_IMU_PIN {PB3};
+// INT1 on the IMU (sensor pin 4). Not part of the SPI bus - the sensor drives it to
+// say the FIFO has reached its watermark, so the drain does not have to poll for it.
+// Same net as ORB_test's kLsmInt1; the rest of this pinout matches that board too.
+static constexpr uint32_t INT1_IMU_PIN   {PB12};
 static constexpr uint32_t I2C_SDA_PIN    {PA11};
 static constexpr uint32_t I2C_SCL_PIN    {PA12};
 
