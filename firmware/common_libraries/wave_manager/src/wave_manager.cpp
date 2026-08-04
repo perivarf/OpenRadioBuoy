@@ -10,10 +10,18 @@ WaveManager wave_manager;
 WaveManager *WaveManager::s_self = nullptr;
 
 // imu.csv column contract, identical to ORB_test Logger so postprocess.py can read
-// captures back offline.
+// captures back offline. vacc_fir/vacc_sflp_fir are appended at the END: postprocess
+// looks columns up by name (read_imu_rows), so trailing additions read both ways.
+//
+// Semantics changed at wave_build_seq 2: ax..gz and ax_ned..az_ned are now the
+// FIR-decimated value at the window centre, not the window mean, and the quaternions
+// are delayed to match (see ImuRow). vacc_madgwick/vacc_sflp are the UNFILTERED
+// values at that same instant; vacc_fir/vacc_sflp_fir are the filtered ones. cfg.csv
+// carries row_decimation/ahrs_rate_hz so an old and a new capture cannot be confused.
 static const char *kImuCsvHeader =
     "win_start_ms,n,ax_mg,ay_mg,az_mg,ax_ned,ay_ned,az_ned,gx_mdps,gy_mdps,gz_mdps,"
-    "qw,qx,qy,qz,braking,mqw,mqx,mqy,mqz,vacc_madgwick,vacc_sflp,sflp_nan,fifo_ovf";
+    "qw,qx,qy,qz,braking,mqw,mqx,mqy,mqz,vacc_madgwick,vacc_sflp,sflp_nan,fifo_ovf,"
+    "vacc_fir,vacc_sflp_fir";
 
 void WaveManager::begin(void) {
   s_self = this;
@@ -38,12 +46,12 @@ void WaveManager::sleep(void) {
 // -----------------------------------------------------------------------------
 // Row sink: analyse the window, then (optionally) append it to imu.csv.
 // -----------------------------------------------------------------------------
-void WaveManager::rowSinkTrampoline(ImuRow &r) {
+void WaveManager::rowSinkTrampoline(const ImuRow &r) {
   if (s_self) s_self->onRow(r);
 }
 
-void WaveManager::onRow(ImuRow &r) {
-  analyzer_.ingest(r);  // fills r.mq*/r.vacc* before we log the row
+void WaveManager::onRow(const ImuRow &r) {
+  analyzer_.ingest(r);  // the row arrives complete; the analyzer only consumes it
   rowCount_++;
 
   if (!csvActive_) return;
@@ -57,7 +65,8 @@ void WaveManager::onRow(ImuRow &r) {
   imuFile_.print(r.mqw, 5); imuFile_.print(','); imuFile_.print(r.mqx, 5); imuFile_.print(','); imuFile_.print(r.mqy, 5); imuFile_.print(','); imuFile_.print(r.mqz, 5); imuFile_.print(',');
   imuFile_.print(r.vaccMadgwick, 5); imuFile_.print(','); imuFile_.print(r.vaccSflp, 5); imuFile_.print(',');
   imuFile_.print(r.sflpNan); imuFile_.print(',');
-  imuFile_.println(r.fifoOvf);
+  imuFile_.print(r.fifoOvf); imuFile_.print(',');
+  imuFile_.print(r.vaccFir, 5); imuFile_.print(','); imuFile_.println(r.vaccSflpFir, 5);
 
   if (++rowsSinceSync_ >= wave_csv_sync_rows) {
     imuFile_.sync();  // periodic flush; NOT per row (that would stall the FIFO)
@@ -227,6 +236,22 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("window_ms,");          f.println(kWindowMs);
   f.print("csv_sync_rows,");      f.println(wave_csv_sync_rows);
 
+  // --- decimation ---
+  // row_decimation is the single key that separates a build-1 capture (boxcar means,
+  // AHRS stepped on the 100 Hz rows) from a build-2 one (FIR, AHRS on the raw
+  // stream). Anything reading these folders should branch on it, not on a date.
+  f.print("row_decimation,fir");  f.println();
+  f.print("fir_ntap,");           f.println(kFirNtap);
+  f.print("fir_s1_cutoff_hz,");   f.println(kFirS1CutoffHz, 3);
+  f.print("fir_s2_cutoff_hz,");   f.println(kFirS2CutoffHz, 3);
+  f.print("fir_s1_delay_s,");     f.println(kFirS1DelayS, 6);
+  f.print("fir_s2_delay_s,");     f.println(kFirS2DelayS, 6);
+  f.print("fir_s1_center_ms,");   f.println(kFirS1CenterMs);
+  f.print("fir_s2_center_ms,");   f.println(kFirS2CenterMs);
+  // The device runs the filters causally, so the logged series lag by the group
+  // delays above. Offline comparisons must either shift or use compensate=False.
+  f.print("fir_compensate,0");    f.println();
+
   // --- brake detection ---
   f.print("brake_g_thresh,");     f.println(kBrakeGThreshold, 3);
   f.print("brake_thresh_mg2,");   f.println((float)kBrakeThresholdMg2, 1);
@@ -237,6 +262,17 @@ void WaveManager::writeSessionConfig(File &f) {
   // Echoed from ses.csv (same analyzer, so they cannot disagree): without it the
   // tuning below is ambiguous, since only one method actually ran.
   f.print("orientation_name,");   f.println(analyzer_.orientationName());
+  // The AHRS runs on the RAW stream now, not on the rows, so the rate it was
+  // stepped at is no longer output_rate_hz and has to be recorded separately -
+  // offline cannot reproduce the device attitude without it.
+  f.print("ahrs_rate_hz,");       f.println(kAhrsRateHz, 2);
+  f.print("ahrs_div,");           f.println(kAhrsDiv);
+  f.print("ahrs_rate_cap_hz,");   f.println(kAhrsRateCapHz);
+  // The quaternions are held, not filtered, but they ARE carried back by the stage-1
+  // group delay so every column in a row describes one instant. See quat_delay.h.
+  f.print("quat_decimation,hold"); f.println();
+  f.print("quat_delay_s,");       f.println(kFirS1DelayS, 6);
+  f.print("quat_delay_steps,");   f.println(kQuatDelaySteps);
   f.print("madgwick_beta,");      f.println(kMadgwickBeta, 4);
   // The full Kalman tuning, because R is adaptive: r0 alone does not say what the
   // filter did, the lambdas and dt_ref do. Written whichever filter ran, like
@@ -386,6 +422,9 @@ uint8_t WaveManager::processReading(void) {
       af.print("warmup_rows,");      af.println(analyzer_.warmupRows());
       af.print("brake_windows,");    af.println(analyzer_.brakeRows());
       af.print("vacc10hz_samples,"); af.println(analyzer_.samples10Hz());
+      // Windows where no raw sample landed on the centre, so the FIR was read at the
+      // window edge instead. Non-zero means FIFO gaps - judge a capture by it.
+      af.print("fir_late_eval_windows,"); af.println(imu_.firLateEvalCount());
       af.print("welch_segments,");   af.println(analyzer_.segments());
       af.print("welch_seglen,");     af.println((int)kWelchSegLen);
       af.print("Hs,"); af.println(params.hs, 3);

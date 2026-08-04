@@ -56,8 +56,8 @@ class WaveManager {
 
  private:
   static WaveManager *s_self;
-  static void rowSinkTrampoline(ImuRow &r);
-  void onRow(ImuRow &r);
+  static void rowSinkTrampoline(const ImuRow &r);
+  void onRow(const ImuRow &r);
 
   // Session logging (ORB_test Logger style): one timestamped directory per capture.
   bool startSession(void);          // build stamp, mkdir _tmp, open imu/gps/ses, headers

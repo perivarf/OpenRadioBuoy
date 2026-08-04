@@ -1,5 +1,6 @@
 #include "imu_sampler.h"
 #include "config.h"   // SPI_CS_IMU_PIN and the shared SPI pin definitions
+#include "rotation.h" // verticalAccel
 #include <math.h>
 
 /*
@@ -7,9 +8,50 @@
    - shares the global Arduino SPI object (sd_writer already called SPI.begin() on
      SPI1) instead of owning a private SPIClass;
    - no INT1 interrupt: update() polls and drains whatever the FIFO holds, so no
-     dedicated interrupt pin is needed.
+     dedicated interrupt pin is needed;
+   - the AHRS and the decimation filter run HERE, on the raw FIFO stream, instead of
+     downstream on window means. The raw samples exist nowhere else, so this is the
+     only place the gyro can be integrated at the rate it was measured at and the
+     only place an antialias filter can see what it is supposed to remove.
 */
 
+// -----------------------------------------------------------------------------
+// FirRowBank
+// -----------------------------------------------------------------------------
+void FirRowBank::reset(void) {
+  ax_.reset(); ay_.reset(); az_.reset();
+  nx_.reset(); ny_.reset(); nz_.reset();
+  gx_.reset(); gy_.reset(); gz_.reset();
+  vacc_.reset();
+}
+
+void FirRowBank::push(float ax, float ay, float az,
+                      float nx, float ny, float nz,
+                      float gx, float gy, float gz, float vacc) {
+  ax_.push(ax); ay_.push(ay); az_.push(az);
+  nx_.push(nx); ny_.push(ny); nz_.push(nz);
+  gx_.push(gx); gy_.push(gy); gz_.push(gz);
+  vacc_.push(vacc);
+}
+
+void FirRowBank::eval(ImuRow &r) const {
+  r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
+  r.axn = nx_.eval(); r.ayn = ny_.eval(); r.azn = nz_.eval();
+  r.gx = gx_.eval(); r.gy = gy_.eval(); r.gz = gz_.eval();
+  r.vaccFir = vacc_.eval();
+  // The SFLP vertical accel is the world-Z channel in m/s^2; filtering azn and
+  // scaling is identical to filtering the scaled series (the filter is linear), so
+  // there is no eleventh delay line for it.
+  r.vaccSflpFir = r.azn * kMg2Ms2;
+  // Unfiltered counterparts, read straight off the delay lines' centre taps - the
+  // same instant the filtered values are centred on, at no extra cost.
+  r.vaccMadgwick = vacc_.center();
+  r.vaccSflp = nz_.center() * kMg2Ms2;
+}
+
+// -----------------------------------------------------------------------------
+// ImuSampler
+// -----------------------------------------------------------------------------
 ImuSampler::ImuSampler()
     : imu_(&SPI, (int)SPI_CS_IMU_PIN, kImuSpiHz) {}
 
@@ -62,47 +104,71 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   sampleTms_ = 0.0;
   samplePeriodMs_ = 1000.0 / kAccelOdrHz;
   curWinIdx_ = -1;
-  winNAcc_ = winNGyr_ = 0;
+  winNAcc_ = 0;
   winBraking_ = false;
   winSflpNan_ = false;
   winFifoOvf_ = false;
+  winFirDone_ = false;
   brakeRun_ = 0;
-  winSumAx_ = winSumAy_ = winSumAz_ = 0;
-  winSumNx_ = winSumNy_ = winSumNz_ = 0;
-  winSumGx_ = winSumGy_ = winSumGz_ = 0;
+  // The SFLP quaternion was NOT cleared here before, so the first rows of a capture
+  // could carry the previous capture's attitude into q*, ax_ned..az_ned and the
+  // brake flag until the first 0x13 word arrived. Identity is the honest start.
+  latestQw_ = 1; latestQx_ = latestQy_ = latestQz_ = 0;
+  latestGx_ = latestGy_ = latestGz_ = 0;
+  // The AHRS re-seeds from gravity on the first accel sample (ahrsSeeded_), which is
+  // also where the quaternion delay line gets filled.
+  ahrs_.reset();
+  ahrsSeeded_ = false;
+  ahrsN_ = 0;
+  fir_.reset();
   dbgLastPrint_ = captureStartMs;
   nAccDbg_ = nGyrDbg_ = 0;
-  sumAccMag_ = sumGyrMag_ = 0.0;
+  sumAccMag2_ = sumGyrMag2_ = 0.0;
 }
 
-// Close the current window -> build one ImuRow (means) and hand it to the row sink.
+// Evaluate the decimation filters and read the delay-matched quaternions into the
+// row being assembled. Everything written here refers to one instant: the centre of
+// the current window, carried back by the FIR group delay.
+void ImuSampler::latchRowValues() {
+  const uint32_t t0 = micros();
+  fir_.eval(pendingRow_);
+  usFir_ += micros() - t0;
+  float mq[4], sq[4];
+  qDelay_.read(mq, sq);
+  pendingRow_.mqw = mq[0]; pendingRow_.mqx = mq[1];
+  pendingRow_.mqy = mq[2]; pendingRow_.mqz = mq[3];
+  pendingRow_.qw = sq[0]; pendingRow_.qx = sq[1];
+  pendingRow_.qy = sq[2]; pendingRow_.qz = sq[3];
+  if (!isfinite(pendingRow_.vaccFir)) pendingRow_.vaccFir = 0.0f;
+  if (!isfinite(pendingRow_.vaccSflpFir)) pendingRow_.vaccSflpFir = 0.0f;
+  if (!isfinite(pendingRow_.vaccMadgwick)) pendingRow_.vaccMadgwick = 0.0f;
+  if (!isfinite(pendingRow_.vaccSflp)) pendingRow_.vaccSflp = 0.0f;
+  winFirDone_ = true;
+}
+
+// Close the current window -> finish the ImuRow and hand it to the row sink.
 void ImuSampler::closeWindow() {
   if (winNAcc_ == 0) return;
-  ImuRow r;
-  r.winStartMs = (uint32_t)curWinIdx_ * kWindowMs;
-  r.n = winNAcc_;
-  r.ax = (float)(winSumAx_ / winNAcc_);
-  r.ay = (float)(winSumAy_ / winNAcc_);
-  r.az = (float)(winSumAz_ / winNAcc_);
-  r.axn = (float)(winSumNx_ / winNAcc_);
-  r.ayn = (float)(winSumNy_ / winNAcc_);
-  r.azn = (float)(winSumNz_ / winNAcc_);
-  uint16_t ng = winNGyr_ ? winNGyr_ : 1;  // avoid /0 if gyro missing
-  r.gx = (float)(winSumGx_ / ng);
-  r.gy = (float)(winSumGy_ / ng);
-  r.gz = (float)(winSumGz_ / ng);
-  r.qw = latestQw_; r.qx = latestQx_; r.qy = latestQy_; r.qz = latestQz_;
-  r.braking = winBraking_ ? 1 : 0;
-  r.mqw = 1.0f; r.mqx = 0.0f; r.mqy = 0.0f; r.mqz = 0.0f;
-  r.vaccMadgwick = 0.0f; r.vaccSflp = 0.0f;
-  r.sflpNan = winSflpNan_ ? 1 : 0;
-  r.fifoOvf = winFifoOvf_ ? 1 : 0;
-  if (rowSink_) rowSink_(r);
+  // No raw sample reached the window centre - a FIFO gap. Read the filters at the
+  // window edge instead of dropping the row: the filtered value is still valid, it
+  // is just centred up to kWindowMs late. Counted so a capture can be judged.
+  if (!winFirDone_) {
+    latchRowValues();
+    nFirLateEval_++;
+  }
+  pendingRow_.winStartMs = (uint32_t)curWinIdx_ * kWindowMs;
+  pendingRow_.n = winNAcc_;
+  pendingRow_.braking = winBraking_ ? 1 : 0;
+  pendingRow_.sflpNan = winSflpNan_ ? 1 : 0;
+  pendingRow_.fifoOvf = winFifoOvf_ ? 1 : 0;
+  if (rowSink_) rowSink_(pendingRow_);
 }
 
 // Drain all pending FIFO words. Three tags are batched together: accel (2), gyro
-// (1) and SFLP game rotation / quaternion (0x13). Accel/gyro are window-aggregated
-// (~100 Hz), the quaternion is taken as the latest in the window.
+// (1) and SFLP game rotation / quaternion (0x13). The accel tag is the clock: it
+// drives windowing, the AHRS, and all ten decimation filters, so every delay line
+// advances exactly once per accel sample and they can never drift apart. Gyro and
+// SFLP words only latch their latest value for the accel branch to pair with.
 void ImuSampler::update(Print &dbg) {
   uint8_t full = 0;
   imu_.FIFO_Get_Full_Status(&full);
@@ -120,7 +186,10 @@ void ImuSampler::update(Print &dbg) {
     if (tag == 2) {  // accel (mg)
       int32_t a[3];
       imu_.FIFO_Get_X_Axes(a);
-      sumAccMag_ += sqrt((double)a[0] * a[0] + (double)a[1] * a[1] + (double)a[2] * a[2]);
+      // Squared magnitude only; the sqrt is taken once per debug print. Rooting per
+      // sample cost ~960 double sqrt/s here and as many again in the gyro branch,
+      // for a line of serial output.
+      sumAccMag2_ += (double)a[0] * a[0] + (double)a[1] * a[1] + (double)a[2] * a[2];
       nAccDbg_++;
       // Windowing: samples arrive in FIFO bursts but represent evenly spaced points
       // in time. A running, monotonic clock (sampleTms_ += samplePeriodMs_) gives a
@@ -132,15 +201,13 @@ void ImuSampler::update(Print &dbg) {
       if (widx != curWinIdx_) {
         closeWindow();
         curWinIdx_ = widx;
-        winNAcc_ = winNGyr_ = 0;
+        winNAcc_ = 0;
         winBraking_ = false;
         winSflpNan_ = false;
         winFifoOvf_ = false;
-        winSumAx_ = winSumAy_ = winSumAz_ = 0;
-        winSumNx_ = winSumNy_ = winSumNz_ = 0;
-        winSumGx_ = winSumGy_ = winSumGz_ = 0;
+        winFirDone_ = false;
       }
-      winSumAx_ += a[0]; winSumAy_ += a[1]; winSumAz_ += a[2]; winNAcc_++;
+      winNAcc_++;
       // Brake flag with debounce: LINEAR accel (gravity removed) must stay over
       // threshold for kBrakeMinSamples in a row. Rotate body accel to world/NED
       // with the SFLP quaternion (world = R(q).a_body), then subtract gravity.
@@ -150,7 +217,6 @@ void ImuSampler::update(Print &dbg) {
       float wY = 2 * (qx * qy + qw * qz) * ax + (1 - 2 * (qx * qx + qz * qz)) * ay + 2 * (qy * qz - qw * qx) * az;
       float wZ = 2 * (qx * qz - qw * qy) * ax + 2 * (qy * qz + qw * qx) * ay + (1 - 2 * (qx * qx + qy * qy)) * az;
       wZ -= 1000.0f;  // remove 1 g gravity
-      winSumNx_ += wX; winSumNy_ += wY; winSumNz_ += wZ;
       double aMag2 = (double)wX * wX + (double)wY * wY + (double)wZ * wZ;
       if (aMag2 > kBrakeThresholdMg2) {
         if (brakeRun_ < 0xFFFF) brakeRun_++;
@@ -158,14 +224,56 @@ void ImuSampler::update(Print &dbg) {
       } else {
         brakeRun_ = 0;
       }
+
+      // ---- AHRS on the raw stream ----
+      // Accel and gyro arrive as separate FIFO tags, so the update is paired with
+      // the freshest gyro word: at most one sample of skew (1.04 ms @ 960 Hz).
+      // The AHRS takes SI units - KalmanAhrs' adaptive R weighs |a| against gravity,
+      // so in mg every sample would look like a 100 g slam. Madgwick normalises and
+      // does not care, which is why this stays filter-agnostic.
+      const float axS = ax * kMg2Ms2, ayS = ay * kMg2Ms2, azS = az * kMg2Ms2;
+      const float sflpQ[4] = {latestQw_, latestQx_, latestQy_, latestQz_};
+      if (!ahrsSeeded_) {
+        ahrs_.initFromAccel(axS, ayS, azS);
+        ahrsSeeded_ = true;
+        ahrsN_ = 0;
+        qDelay_.reset(ahrs_.quaternion(), sflpQ);
+      } else if (++ahrsN_ >= kAhrsDiv) {
+        const uint32_t t0 = micros();
+        ahrs_.update(latestGx_ * kMdps2Rads, latestGy_ * kMdps2Rads, latestGz_ * kMdps2Rads,
+                     axS, ayS, azS, (float)(kAhrsDiv * samplePeriodMs_) * 1.0e-3f);
+        usAhrs_ += micros() - t0;
+        ahrsN_ = 0;
+        // The attitude is not filtered, but it is carried back by the same group
+        // delay the FIR imposes on ax..gz, so the whole row describes one instant.
+        qDelay_.push(ahrs_.quaternion(), sflpQ);
+      }
+
+      // The vertical accel is recomputed on EVERY raw sample from the latest
+      // quaternion: the attitude is slow, but the acceleration is the signal that
+      // has to keep its full bandwidth going into the antialias filter.
+      const float vacc = wave_use_sflp
+                             ? (wZ * kMg2Ms2)
+                             : verticalAccel(ahrs_.quaternion(), axS, ayS, azS, kGravity);
+      fir_.push(ax, ay, az, wX, wY, wZ,
+                latestGx_, latestGy_, latestGz_, vacc);
+
+      // Output sample: the first raw sample to reach the window centre. Same
+      // convention as fir.py's dec//2 - the value sits in the middle of the window
+      // it represents. 960/100 = 9.6 is not an integer decimation, so the output
+      // grid stays time-driven and the residual jitter is at most half a raw period.
+      if (!winFirDone_ && tms >= (uint32_t)curWinIdx_ * kWindowMs + kFirS1CenterMs) {
+        latchRowValues();
+      }
+
       sampleTms_ += samplePeriodMs_;
       accelIdx_++;
     } else if (tag == 1) {  // gyro (mdps)
       int32_t g[3];
       imu_.FIFO_Get_G_Axes(g);
-      sumGyrMag_ += sqrt((double)g[0] * g[0] + (double)g[1] * g[1] + (double)g[2] * g[2]);
+      sumGyrMag2_ += (double)g[0] * g[0] + (double)g[1] * g[1] + (double)g[2] * g[2];
       nGyrDbg_++;
-      winSumGx_ += g[0]; winSumGy_ += g[1]; winSumGz_ += g[2]; winNGyr_++;
+      latestGx_ = (float)g[0]; latestGy_ = (float)g[1]; latestGz_ = (float)g[2];
     } else if (tag == kSflpGameRotationTag) {  // quaternion [x,y,z,w]
       float q[4];
       imu_.FIFO_Get_Rotation_Vector(q);
@@ -204,14 +312,21 @@ void ImuSampler::debugPrintStatus(Print &dbg) {
   double elapsedS = (now - dbgLastPrint_) / 1000.0;
   double accHz = elapsedS > 0 ? nAccDbg_ / elapsedS : 0.0;
   double gyrHz = elapsedS > 0 ? nGyrDbg_ / elapsedS : 0.0;
-  double avgAcc = nAccDbg_ ? sumAccMag_ / nAccDbg_ : 0.0;
-  double avgGyr = nGyrDbg_ ? sumGyrMag_ / nGyrDbg_ : 0.0;
+  // RMS, not the mean of the magnitudes - the per-sample sqrt is what was removed.
+  // For a near-constant |a| (which is the case here: ~1 g) the two agree closely,
+  // and the number is only ever read as a sanity check.
+  double avgAcc = nAccDbg_ ? sqrt(sumAccMag2_ / nAccDbg_) : 0.0;
+  double avgGyr = nGyrDbg_ ? sqrt(sumGyrMag2_ / nGyrDbg_) : 0.0;
 
   dbg.print("[IMU] Accel: "); dbg.print(accHz, 0);
   dbg.print(" Hz, |a| = ");   dbg.print(avgAcc, 1);
   dbg.print(" mg  |  Gyro: "); dbg.print(gyrHz, 0);
   dbg.print(" Hz, |g| = ");   dbg.print(avgGyr, 1);
-  dbg.print(" mdps");
+  dbg.print(" mdps  |  cpu: ahrs ");
+  dbg.print(elapsedS > 0 ? usAhrs_ / (elapsedS * 1.0e4) : 0.0, 1);   // us/s -> %
+  dbg.print("% fir ");
+  dbg.print(elapsedS > 0 ? usFir_ / (elapsedS * 1.0e4) : 0.0, 1);
+  dbg.print("%");
   if (nOverflow_ > 0) {
     dbg.print("  [WARN] FIFO overflow x"); dbg.print(nOverflow_);
     nOverflow_ = 0;
@@ -219,6 +334,7 @@ void ImuSampler::debugPrintStatus(Print &dbg) {
   dbg.println();
 
   nAccDbg_ = nGyrDbg_ = 0;
-  sumAccMag_ = sumGyrMag_ = 0.0;
+  sumAccMag2_ = sumGyrMag2_ = 0.0;
+  usAhrs_ = usFir_ = 0;
   dbgLastPrint_ = now;
 }

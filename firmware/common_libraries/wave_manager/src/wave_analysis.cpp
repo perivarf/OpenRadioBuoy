@@ -9,10 +9,10 @@
   offline postprocess still recomputes all three methods from the raw imu.csv.
 
   What is left here is the wave chain itself (FFT / Welch / spectral moments) plus
-  the few lines in ingest() that turn a row into a vertical acceleration. The
-  filters themselves live next door and stay free of Arduino and of this file's
-  units: madgwick.{h,cpp}, kalman.{h,cpp} and rotation.{h,cpp} (the quaternion
-  primitives they share).
+  the second decimation stage in ingest(). The orientation filter moved to
+  ImuSampler, where the raw stream is; the building blocks it uses stay free of
+  Arduino and of this file's units: madgwick.{h,cpp}, kalman.{h,cpp}, rotation.{h,cpp}
+  (the quaternion primitives they share) and fir.{h,cpp}.
 */
 
 // -----------------------------------------------------------------------------
@@ -94,9 +94,8 @@ static inline float lowFreqTaper(float f) {
 // StreamAnalyzer
 // -----------------------------------------------------------------------------
 void StreamAnalyzer::begin(void) {
-  ahrs_.reset();
-  haveT_ = false; prevT_ = 0;
-  curBucket_ = -1; bSum_ = 0.0; bN_ = 0;
+  fir2_.reset();
+  curBucket_ = -1; bucketDone_ = false;
   n10_ = nData_ = nBrake_ = nWarm_ = 0;
   segFill_ = 0; nSeg_ = 0;
   for (int k = 0; k <= kWelchSegLen / 2; k++) psdAcc_[k] = 0.0f;
@@ -117,88 +116,54 @@ void StreamAnalyzer::pushWelch(float sample) {
   }
 }
 
-void StreamAnalyzer::ingest(ImuRow &r) {
+void StreamAnalyzer::ingest(const ImuRow &r) {
   nData_++;
   if (r.braking) nBrake_++;
 
-  // Interval since the previous row; 0 on the first row of the capture, which is
-  // the cue to seed the attitude from gravity instead of integrating.
   long t = (long)r.winStartMs;
-  float dt = haveT_ ? (float)(t - prevT_) / 1000.0f : 0.0f;
-  const bool firstRow = !haveT_;
-  prevT_ = t;
-  haveT_ = true;
 
-  // Orientation -> vertical accel (m/s^2). ImuRow carries accel in mg and gyro in
-  // mdps, so the unit conversions live here; the AHRS takes SI (m/s^2 and rad/s).
-  // The accel unit is not cosmetic: KalmanAhrs' adaptive R weighs |a| against
-  // gravity, so in mg every sample would look like a 100 g slam and R would stay
-  // pinned high. Madgwick normalises and is scale-free, so it sees no difference -
-  // which is why this stays filter-agnostic. Only the selected branch is compiled.
-  const float ax = r.ax * kMg2Ms2;
-  const float ay = r.ay * kMg2Ms2;
-  const float az = r.az * kMg2Ms2;
+  // The row already carries the vertical acceleration, computed per RAW sample by
+  // ImuSampler and decimated to this rate through stage 1. Which series it is -
+  // the software AHRS or the chip's SFLP - was decided there by wave_use_sflp; both
+  // are logged either way, so imu.csv keeps the reference.
+  const float v = isfinite(r.vaccFir) ? r.vaccFir : 0.0f;
 
-  float qSel[4];
-  float vSel;
-  if constexpr (wave_use_sflp) {
-    qSel[0] = r.qw; qSel[1] = r.qx; qSel[2] = r.qy; qSel[3] = r.qz;
-    vSel = r.azn * kMg2Ms2;          // already gravity-compensated (world/NED Z)
-  } else {
-    if (firstRow) {
-      ahrs_.initFromAccel(ax, ay, az);
-    } else if (dt > 0.0f) {
-      ahrs_.update(r.gx * kMdps2Rads, r.gy * kMdps2Rads, r.gz * kMdps2Rads,
-                   ax, ay, az, dt);
-    }
-    const float *q = ahrs_.quaternion();
-    qSel[0] = q[0]; qSel[1] = q[1]; qSel[2] = q[2]; qSel[3] = q[3];
-    vSel = verticalAccel(qSel, ax, ay, az, kGravity);
-  }
+  // Stage 2 is fed on EVERY row, warm-up included. The delay line has to be full by
+  // the time the first Welch sample is taken, otherwise the spectrum opens with a
+  // filter transient - so the warm-up gate below sits between the filter and Welch,
+  // not in front of the filter.
+  fir2_.push(v);
 
-  // SFLP is logged alongside the selected method regardless of which one runs, so
-  // the offline postprocess has the on-chip reference in every imu.csv.
-  float vSflp = r.azn * kMg2Ms2;
-
-  if (!isfinite(vSel)) vSel = 0.0f;
-  if (!isfinite(vSflp)) vSflp = 0.0f;
-
-  // Write orientation result back into the row -> logged to imu.csv.
-  r.mqw = qSel[0]; r.mqx = qSel[1]; r.mqy = qSel[2]; r.mqz = qSel[3];
-  r.vaccMadgwick = vSel; r.vaccSflp = vSflp;
-
-  // AHRS warm-up: the filter above has been updated (and the row is logged by the
-  // caller), but the orientation has not converged yet, so the vertical accel is
-  // biased. Keep those rows out of the bucketing/Welch chain -> no effect on the
-  // PSD or on Hs/Tz/Tc/Tp.
+  // Warm-up: the AHRS has not converged yet (and the FIR is still filling), so the
+  // vertical accel is biased. The rows are still logged by the caller; they are just
+  // kept out of the Welch chain -> no effect on the PSD or on Hs/Tz/Tc/Tp.
   if (t < (long)wave_measurement_filter_warm_up) {
     nWarm_++;
     return;
   }
 
-  // Average to 10 Hz buckets (100 ms) -> streaming Welch.
+  // Decimate to kVaccFsHz. Same convention as stage 1 and as fir.py's dec//2: the
+  // output for a bucket is evaluated at the bucket's CENTRE, on the first row to
+  // reach it, so the value sits in the middle of the interval it represents. Rows
+  // can be missing (a window with no accel samples emits nothing), hence "first row
+  // at or past the centre" rather than an exact timestamp match.
   long bucket = t / kVacc10HzBucketMs;
   if (bucket != curBucket_) {
-    if (bN_ > 0) {
-      pushWelch((float)(bSum_ / bN_));
-      n10_++;
-    }
     curBucket_ = bucket;
-    bSum_ = 0.0;
-    bN_ = 0;
+    bucketDone_ = false;
   }
-  bSum_ += vSel;
-  bN_++;
+  if (!bucketDone_ && t >= bucket * (long)kVacc10HzBucketMs + (long)kFirS2CenterMs) {
+    float s = fir2_.eval();
+    pushWelch(isfinite(s) ? s : 0.0f);
+    n10_++;
+    bucketDone_ = true;
+  }
 }
 
 bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
-  // Flush the last partial bucket.
-  if (bN_ > 0) {
-    pushWelch((float)(bSum_ / bN_));
-    n10_++;
-    bN_ = 0;
-  }
-
+  // No partial bucket to flush any more: a decimated sample is either evaluated at
+  // its bucket centre or not at all. At worst the final bucket is dropped - one
+  // sample in ~18000, far below a Welch segment.
   params = {-1.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0, 0.0, 0.0};
   for (size_t j = 0; j < welch_bins; j++) spectrumOut[j] = 0;
   if (nSeg_ == 0) return false;

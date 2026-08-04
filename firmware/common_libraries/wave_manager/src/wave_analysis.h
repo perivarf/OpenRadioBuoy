@@ -5,17 +5,23 @@
 #include "config.h"        // common_config.h: welch_bins (wire-format bin count)
 #include "wave_config.h"
 #include "imu_sampler.h"   // ImuRow
-#include "rotation.h"      // verticalAccel (the AHRS itself comes via wave_config.h)
+#include "fir.h"           // FirDecimator - the second decimation stage
+#include "fir_coeffs.h"    // kFirCoeffsStage2
 
 /*
   Streaming wave analysis, ported from ORB_test/src/analysis.{h,cpp} and reduced to
   a single on-device orientation method (Madgwick / Kalman / SFLP) to fit RAM. Which
   one is a compile-time choice made at the bottom of wave_config.h. The chain is:
 
-    orientation (AHRS) -> vertical linear accel -> 10 Hz bucketing ->
+    vertical linear accel (already computed per RAW sample by ImuSampler and
+    FIR-decimated into the row) -> FIR decimation to kVaccFsHz ->
     streaming Welch PSD -> acc->elevation (/omega^4) with low-frequency taper ->
     spectral moments m0/m2/m4 -> Hs = 4*sqrt(m0), Tz = sqrt(m0/m2), Tc = sqrt(m2/m4),
     Tp = 1/f_peak.
+
+  The orientation filter used to live here, stepped once per 100 Hz row. It now runs
+  in ImuSampler on the raw FIFO stream, where the gyro can be integrated at the rate
+  it was actually measured at; this class is the wave chain and nothing else.
 
   Welch keeps a single kWelchSegLen segment (75% overlap) and accumulates the PSD,
   so only ~one segment lives in RAM regardless of capture length.
@@ -29,8 +35,8 @@ struct WaveParams {
 
 class StreamAnalyzer {
  public:
-  void begin(void);           // reset all state for a new capture
-  void ingest(ImuRow &r);     // per row: fill r.mq*/r.vacc*, accumulate Welch
+  void begin(void);              // reset all state for a new capture
+  void ingest(const ImuRow &r);  // per row: decimate to kVaccFsHz, accumulate Welch
 
   // Finalise: average the PSD, derive wave parameters, fill the quantised spectrum
   // bins (welch_bin_min..welch_bin_max). Returns false if no usable segment.
@@ -51,16 +57,13 @@ class StreamAnalyzer {
  private:
   void pushWelch(float sample);  // push one 10 Hz sample into the segment
 
-  // Orientation. The AHRS selected in wave_config.h, held by value; unused when
-  // wave_use_sflp is set, since the chip has then already done the fusion.
-  WaveAhrs ahrs_ = makeWaveAhrs();
-  bool haveT_ = false;   // a previous row exists: dt is meaningful and the AHRS is seeded
-  long prevT_ = 0;
-
-  // 10 Hz bucketing.
+  // Second decimation stage: kOutputRateHz rows -> kVaccFsHz into Welch. Replaces
+  // the 100 ms boxcar mean this class used to take. Fed on EVERY row, including the
+  // warm-up ones - otherwise the delay line is still half full of zeros when the
+  // first Welch sample is taken and the spectrum starts with a filter transient.
+  FirDecimator fir2_{kFirCoeffsStage2};
   long curBucket_ = -1;
-  double bSum_ = 0.0;
-  uint32_t bN_ = 0;
+  bool bucketDone_ = false;   // this bucket's centre has been reached and evaluated
 
   // Counters.
   uint32_t n10_ = 0, nData_ = 0, nBrake_ = 0, nWarm_ = 0;
