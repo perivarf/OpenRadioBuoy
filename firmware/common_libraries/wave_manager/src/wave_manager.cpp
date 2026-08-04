@@ -309,8 +309,15 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("welch_bin_min,");      f.println((uint32_t)welch_bin_min);
   f.print("welch_bin_max,");      f.println((uint32_t)welch_bin_max);
   f.print("welch_bins,");         f.println((uint32_t)welch_bins);
-  f.print("spec_f_min_hz,");      f.println(welch_bin_min * kPsdDfHz, 5);
-  f.print("spec_f_max_hz,");      f.println((welch_bin_max - 1) * kPsdDfHz, 5);
+  // A wire bin is the average of spec_bin_group PSD bins, so the array length alone
+  // no longer determines the frequency axis. These three keys do, and they are the
+  // only record of it: f_j = spec_f_min_hz + j * spec_bin_width_hz. Changed meaning
+  // at wave_build_seq 2 - spec_f_min/max_hz are now wire-bin CENTRES, and they used
+  // to be PSD-bin centres back when the mapping was 1:1.
+  f.print("spec_bin_group,");     f.println((uint32_t)kSpecBinGroup);
+  f.print("spec_bin_width_hz,");  f.println(kSpecBinWidthHz, 6);
+  f.print("spec_f_min_hz,");      f.println(kSpecFMinHz, 5);
+  f.print("spec_f_max_hz,");      f.println(kSpecFMaxHz, 5);
   f.print("scale_factor,");       f.println(scale_factor);
 }
 

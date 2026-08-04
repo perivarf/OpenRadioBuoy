@@ -308,24 +308,47 @@ static_assert(kTaperF1 < kTaperF2 && kTaperF2 <= kWaveFMax, "need kTaperF1 < kTa
 // drifter-side physics and belongs here, next to the seglen and fs that give the bins
 // a frequency at all.
 //
-// Sized for a fetch-limited fjord, where the peak sits at 0.15-0.6 Hz. Open-ocean
-// swell below ~0.05 Hz simply is not present there, so bins spent on it are wasted
-// payload; the old 0.044-0.308 Hz window instead cut off the common moderate-wind
-// cases at the top.
-//   bin  5 =  5 * 0.009766 = 0.0488 Hz -> 20.5 s   (taper^2 = 0.98, effectively full)
-//   bin 61 = 61 * 0.009766 = 0.5957 Hz ->  1.7 s   (welch_bin_max is exclusive)
-static constexpr size_t welch_bin_min {5};
-static constexpr size_t welch_bin_max {62};
+// The transmitted resolution is NOT the analysis resolution. Each wire bin is the
+// BAND AVERAGE of kSpecBinGroup consecutive PSD bins, which decouples the two: the
+// moments and Tp keep the full kPsdDfHz, while the message spans the whole wave band
+// without the payload growing with it. Covering 0-1 Hz as a raw 1:1 slice would take
+// 103 bins; at group 2 it takes 51, i.e. LESS than the 57 the old 0.049-0.596 Hz
+// window cost.
+//
+// Averaging, not decimating, is what makes this lossless in the sense that matters:
+// sum_j Shat_j * (G*df) == sum_k S_k * df, so the integral under the transmitted
+// curve still equals the integral under the PSD. Picking every G-th bin instead would
+// throw away (G-1)/G of the energy and give a shape that depends on where the peak
+// happened to land. The averaging also cuts each wire bin's variance by sqrt(G), so
+// the shipped spectrum is smoother than a raw slice rather than coarser.
+//
+//   wire bin  0 = PSD bins   0-1, centre 0.0049 Hz  (taper^2 = 0 here; see below)
+//   wire bin 50 = PSD bins 100-101, centre 0.9814 Hz
+//   band covered: 0 .. 102 * 0.009766 = 0.9961 Hz
+//
+// The bottom bins are deliberately kept even though lowFreqTaper zeroes everything
+// below kTaperF1 = 0.03 Hz: a spectrum plotted from 0 is easier to read than one that
+// starts at an arbitrary offset, and it costs 1.5 wire bins.
+static constexpr size_t kSpecBinGroup {2};
+static constexpr size_t welch_bin_min {0};
+static constexpr size_t welch_bin_max {102};
 
 static_assert(welch_bin_max > welch_bin_min, "empty transmitted bin range");
-static_assert(welch_bin_max - welch_bin_min == welch_bins,
-              "transmitted bin range must match welch_bins, the shared wire-format "
-              "count in common_config.h - update both or the base station misparses");
+static_assert(welch_bin_max - welch_bin_min == welch_bins * kSpecBinGroup,
+              "transmitted bin range must be welch_bins groups of kSpecBinGroup PSD "
+              "bins - welch_bins is the shared wire-format count in common_config.h, "
+              "so update both or the base station misparses");
 static_assert(welch_bin_max <= kWelchSegLen / 2 + 1,
               "transmitted bins must fit inside the one-sided PSD");
 static_assert((welch_bin_max - 1) * kPsdDfHz <= kWaveFMax,
               "top transmitted bin must lie inside the analysed band, otherwise it is "
               "normalised against a peak that was never allowed to see it");
+
+// Frequency axis of the transmitted spectrum, as the receiver must reconstruct it:
+//   f_j = kSpecFMinHz + j * kSpecBinWidthHz,  j = 0 .. welch_bins-1
+static constexpr float kSpecBinWidthHz = kSpecBinGroup * kPsdDfHz;          // 0.019531 Hz
+static constexpr float kSpecFMinHz     = (welch_bin_min + 0.5f * (kSpecBinGroup - 1)) * kPsdDfHz;
+static constexpr float kSpecFMaxHz     = kSpecFMinHz + (welch_bins - 1) * kSpecBinWidthHz;
 
 enum class WindowType { Hann, Hamming };
 static constexpr WindowType kWelchWindow = WindowType::Hann;

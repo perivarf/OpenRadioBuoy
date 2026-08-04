@@ -196,15 +196,31 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
   // Quantise the transmitted spectrum: elevation PSD over bins welch_bin_min..max,
   // normalised to the peak (shape) so it fits uint16; the absolute peak rides in
   // params.maxValue.
+  //
+  // Each wire bin is the BAND AVERAGE of kSpecBinGroup consecutive PSD bins, not a
+  // 1:1 copy - that is what lets welch_bins span the whole wave band without the
+  // payload growing to match (see wave_config.h). Averaging keeps the integral:
+  // sum_j Shat_j * (G*df) == sum_k S_k * df. Normalising against the UNAVERAGED
+  // peakEta is deliberate and keeps the absolute scale reconstructible on the far
+  // side as value/65535 * maxValue; the cost is that no wire bin quite reaches
+  // 65535, since averaging the peak bin with its neighbour lowers it.
   if (peakEta > 0.0f) {
     for (size_t j = 0; j < welch_bins; j++) {
-      int k = (int)welch_bin_min + (int)j;
-      float f = k * df;
-      float taper = lowFreqTaper(f);
-      float w = 2.0f * (float)M_PI * f;
-      float psdEta = (psdAcc_[k] * invSeg) / (w * w * w * w) * (taper * taper);
-      if (psdEta < 0.0f) psdEta = 0.0f;
-      float norm = psdEta / peakEta;         // 0..1
+      float acc = 0.0f;
+      for (size_t g = 0; g < kSpecBinGroup; g++) {
+        const int k = (int)welch_bin_min + (int)(j * kSpecBinGroup + g);
+        // k == 0 is DC: f = 0 makes omega^4 zero and the elevation PSD undefined.
+        // The moment loop above sidesteps it by starting at k = 1; this loop has to
+        // do the same now that welch_bin_min reaches down to 0. The bin is zero by
+        // construction anyway - lowFreqTaper kills everything below kTaperF1.
+        if (k == 0) continue;
+        const float f = k * df;
+        const float taper = lowFreqTaper(f);
+        const float w = 2.0f * (float)M_PI * f;
+        const float psdEta = (psdAcc_[k] * invSeg) / (w * w * w * w) * (taper * taper);
+        if (psdEta > 0.0f) acc += psdEta;
+      }
+      float norm = (acc / (float)kSpecBinGroup) / peakEta;
       if (norm > 1.0f) norm = 1.0f;
       spectrumOut[j] = (uint16_t)lroundf(norm * 65535.0f);
     }

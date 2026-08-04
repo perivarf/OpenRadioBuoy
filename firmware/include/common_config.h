@@ -61,11 +61,16 @@ static constexpr uint8_t  max_number_of_thermometres {1};
 // wave_analysis_Reading, drives the parse loop and fixes wave_message_size.
 //
 // WHICH frequencies those bins cover is drifter-side physics and lives next to the
-// Welch settings in wave_manager/wave_config.h (welch_bin_min/max): a bin index means
-// nothing without the segment length and sample rate behind f = k*fs/N, and the base
-// station has neither and needs neither. wave_config.h static_asserts its bin range
-// against this count, so the two cannot drift apart silently.
-static constexpr size_t welch_bins {57};
+// Welch settings in wave_manager/wave_config.h (welch_bin_min/max + kSpecBinGroup):
+// a bin index means nothing without the segment length and sample rate behind
+// f = k*fs/N, and the base station has neither and needs neither. wave_config.h
+// static_asserts its bin range against this count, so the two cannot drift apart
+// silently.
+//
+// 57 -> 51 at wave_build_seq 2. Each wire bin became the average of two PSD bins
+// instead of a single one, which let the message span the whole 0-1 Hz wave band
+// (it covered 0.049-0.596 Hz before) on FEWER bins, not more.
+static constexpr size_t welch_bins {51};
 
 // Shared wave-analysis run parameters
 static constexpr bool     base_enable_wave_analysis           {true};
