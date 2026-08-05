@@ -9,19 +9,35 @@
 WaveManager wave_manager;
 WaveManager *WaveManager::s_self = nullptr;
 
-// imu.csv column contract, identical to ORB_test Logger so postprocess.py can read
-// captures back offline. vacc_fir/vacc_sflp_fir are appended at the END: postprocess
-// looks columns up by name (read_imu_rows), so trailing additions read both ways.
+// imu.csv column contract. Naming convention, so a capture can be read without
+// consulting the firmware to find out which orientation a column came from:
+//   unsuffixed  = the SELECTED filter (WaveAhrs, or SFLP when wave_use_sflp)
+//   _sflp       = the on-chip SFLP game-rotation fusion
+//   _fir        = FIR-decimated; without it, the unfiltered value at the same instant
+// The filter's NAME belongs in cfg.csv (wave_orientation_name), not in a column name:
+// WaveAhrs is a compile-time choice, so "vacc_madgwick" was a lie the moment it was
+// set to KalmanAhrs.
 //
-// Semantics changed at wave_build_seq 2: ax..gz and ax_ned..az_ned are now the
+// RENAMED at wave_build_seq 3 (columns kept their ORDER, only names changed):
+//   ax_ned..az_ned -> ax_ned_sflp..az_ned_sflp  (they always were SFLP-rotated)
+//   qw..qz         -> qw_sflp..qz_sflp
+//   mqw..mqz       -> qw..qz                    (the selected filter)
+//   vacc_madgwick  -> vacc
+// The absence of "mqw" is what tells a reader it has a build_seq 3+ file; postprocess
+// looks columns up by name and branches on exactly that. Note the one hazard this
+// rename creates and an append never did: an OLD postprocess reading a NEW capture
+// silently takes the selected filter's quaternion for the SFLP one (tilt diagnostics
+// only - the vertical accel it uses comes from az_ned*, which it will not find at all).
+//
+// Semantics changed at wave_build_seq 2: ax..gz and the NED triple are the
 // FIR-decimated value at the window centre, not the window mean, and the quaternions
-// are delayed to match (see ImuRow). vacc_madgwick/vacc_sflp are the UNFILTERED
-// values at that same instant; vacc_fir/vacc_sflp_fir are the filtered ones. cfg.csv
-// carries row_decimation/ahrs_rate_hz so an old and a new capture cannot be confused.
+// are delayed to match (see ImuRow). vacc/vacc_sflp are the UNFILTERED values at that
+// same instant; vacc_fir/vacc_sflp_fir are the filtered ones. cfg.csv carries
+// row_decimation/ahrs_rate_hz so an old and a new capture cannot be confused.
 static const char *kImuCsvHeader =
-    "win_start_ms,n,ax_mg,ay_mg,az_mg,ax_ned,ay_ned,az_ned,gx_mdps,gy_mdps,gz_mdps,"
-    "qw,qx,qy,qz,braking,mqw,mqx,mqy,mqz,vacc_madgwick,vacc_sflp,sflp_nan,fifo_ovf,"
-    "vacc_fir,vacc_sflp_fir";
+    "win_start_ms,n,ax_mg,ay_mg,az_mg,ax_ned_sflp,ay_ned_sflp,az_ned_sflp,"
+    "gx_mdps,gy_mdps,gz_mdps,qw_sflp,qx_sflp,qy_sflp,qz_sflp,braking,"
+    "qw,qx,qy,qz,vacc,vacc_sflp,sflp_nan,fifo_ovf,vacc_fir,vacc_sflp_fir";
 
 void WaveManager::begin(void) {
   s_self = this;
@@ -58,12 +74,12 @@ void WaveManager::onRow(const ImuRow &r) {
   imuFile_.print(r.winStartMs); imuFile_.print(',');
   imuFile_.print(r.n);          imuFile_.print(',');
   imuFile_.print(r.ax, 3); imuFile_.print(','); imuFile_.print(r.ay, 3); imuFile_.print(','); imuFile_.print(r.az, 3); imuFile_.print(',');
-  imuFile_.print(r.axn, 3); imuFile_.print(','); imuFile_.print(r.ayn, 3); imuFile_.print(','); imuFile_.print(r.azn, 3); imuFile_.print(',');
+  imuFile_.print(r.axnSflp, 3); imuFile_.print(','); imuFile_.print(r.aynSflp, 3); imuFile_.print(','); imuFile_.print(r.aznSflp, 3); imuFile_.print(',');
   imuFile_.print(r.gx, 3); imuFile_.print(','); imuFile_.print(r.gy, 3); imuFile_.print(','); imuFile_.print(r.gz, 3); imuFile_.print(',');
-  imuFile_.print(r.qw, 5); imuFile_.print(','); imuFile_.print(r.qx, 5); imuFile_.print(','); imuFile_.print(r.qy, 5); imuFile_.print(','); imuFile_.print(r.qz, 5); imuFile_.print(',');
+  imuFile_.print(r.qwSflp, 5); imuFile_.print(','); imuFile_.print(r.qxSflp, 5); imuFile_.print(','); imuFile_.print(r.qySflp, 5); imuFile_.print(','); imuFile_.print(r.qzSflp, 5); imuFile_.print(',');
   imuFile_.print(r.braking); imuFile_.print(',');
-  imuFile_.print(r.mqw, 5); imuFile_.print(','); imuFile_.print(r.mqx, 5); imuFile_.print(','); imuFile_.print(r.mqy, 5); imuFile_.print(','); imuFile_.print(r.mqz, 5); imuFile_.print(',');
-  imuFile_.print(r.vaccMadgwick, 5); imuFile_.print(','); imuFile_.print(r.vaccSflp, 5); imuFile_.print(',');
+  imuFile_.print(r.qw, 5); imuFile_.print(','); imuFile_.print(r.qx, 5); imuFile_.print(','); imuFile_.print(r.qy, 5); imuFile_.print(','); imuFile_.print(r.qz, 5); imuFile_.print(',');
+  imuFile_.print(r.vacc, 5); imuFile_.print(','); imuFile_.print(r.vaccSflp, 5); imuFile_.print(',');
   imuFile_.print(r.sflpNan); imuFile_.print(',');
   imuFile_.print(r.fifoOvf); imuFile_.print(',');
   imuFile_.print(r.vaccFir, 5); imuFile_.print(','); imuFile_.println(r.vaccSflpFir, 5);

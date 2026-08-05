@@ -79,7 +79,10 @@ static constexpr char     wave_log_dir[]     = "waves";  // parent dir for sessi
 // to the code that produced it (mirrors ORB_test kBuildSeq). Bump on release.
 // 2: AHRS moved to the raw stream and the boxcar means became FIR decimation. Both
 //    the row semantics and the column set changed - see kImuCsvHeader.
-static constexpr uint16_t wave_build_seq     = 2;
+// 3: imu.csv columns renamed so each one names its orientation source: _sflp for the
+//    on-chip fusion, unsuffixed for the selected filter (mqw..mqz became qw..qz). No
+//    values or column ORDER changed - see kImuCsvHeader.
+static constexpr uint16_t wave_build_seq     = 3;
 
 // -----------------------------------------------------------------------------
 // IMU: datarate (ODR) + power mode for accel AND gyro.

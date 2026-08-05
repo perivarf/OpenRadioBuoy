@@ -42,16 +42,16 @@ void FirRowBank::push(float ax, float ay, float az,
 
 void FirRowBank::eval(ImuRow &r) const {
   r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
-  r.axn = nx_.eval(); r.ayn = ny_.eval(); r.azn = nz_.eval();
+  r.axnSflp = nx_.eval(); r.aynSflp = ny_.eval(); r.aznSflp = nz_.eval();
   r.gx = gx_.eval(); r.gy = gy_.eval(); r.gz = gz_.eval();
   r.vaccFir = vacc_.eval();
-  // The SFLP vertical accel is the world-Z channel in m/s^2; filtering azn and
+  // The SFLP vertical accel is the world-Z channel in m/s^2; filtering aznSflp and
   // scaling is identical to filtering the scaled series (the filter is linear), so
   // there is no eleventh delay line for it.
-  r.vaccSflpFir = r.azn * kMg2Ms2;
+  r.vaccSflpFir = r.aznSflp * kMg2Ms2;
   // Unfiltered counterparts, read straight off the delay lines' centre taps - the
   // same instant the filtered values are centred on, at no extra cost.
-  r.vaccMadgwick = vacc_.center();
+  r.vacc = vacc_.center();
   r.vaccSflp = nz_.center() * kMg2Ms2;
 }
 
@@ -167,7 +167,7 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   winFirDone_ = false;
   brakeRun_ = 0;
   // The SFLP quaternion was NOT cleared here before, so the first rows of a capture
-  // could carry the previous capture's attitude into q*, ax_ned..az_ned and the
+  // could carry the previous capture's attitude into q*_sflp, ax_ned_sflp..az_ned_sflp and the
   // brake flag until the first 0x13 word arrived. Identity is the honest start.
   latestQw_ = 1; latestQx_ = latestQy_ = latestQz_ = 0;
   latestGx_ = latestGy_ = latestGz_ = 0;
@@ -188,13 +188,13 @@ void ImuSampler::latchRowValues() {
   fir_.eval(pendingRow_);
   float mq[4], sq[4];
   qDelay_.read(mq, sq);
-  pendingRow_.mqw = mq[0]; pendingRow_.mqx = mq[1];
-  pendingRow_.mqy = mq[2]; pendingRow_.mqz = mq[3];
-  pendingRow_.qw = sq[0]; pendingRow_.qx = sq[1];
-  pendingRow_.qy = sq[2]; pendingRow_.qz = sq[3];
+  pendingRow_.qw = mq[0]; pendingRow_.qx = mq[1];
+  pendingRow_.qy = mq[2]; pendingRow_.qz = mq[3];
+  pendingRow_.qwSflp = sq[0]; pendingRow_.qxSflp = sq[1];
+  pendingRow_.qySflp = sq[2]; pendingRow_.qzSflp = sq[3];
   if (!isfinite(pendingRow_.vaccFir)) pendingRow_.vaccFir = 0.0f;
   if (!isfinite(pendingRow_.vaccSflpFir)) pendingRow_.vaccSflpFir = 0.0f;
-  if (!isfinite(pendingRow_.vaccMadgwick)) pendingRow_.vaccMadgwick = 0.0f;
+  if (!isfinite(pendingRow_.vacc)) pendingRow_.vacc = 0.0f;
   if (!isfinite(pendingRow_.vaccSflp)) pendingRow_.vaccSflp = 0.0f;
   winFirDone_ = true;
 }
@@ -437,7 +437,7 @@ void ImuSampler::update(Print &dbg) {
       float q[4];
       payloadToQuat(payload, q);
       // NaN guard: a corrupt FIFO word decodes to an invalid half-float and the
-      // w = sqrt(1 - sumsq) reconstruction yields NaN; one NaN poisons az_ned and the
+      // w = sqrt(1 - sumsq) reconstruction yields NaN; one NaN poisons az_ned_sflp and the
       // whole SFLP spectrum. Keep the last valid quaternion instead.
       if (isfinite(q[0]) && isfinite(q[1]) && isfinite(q[2]) && isfinite(q[3])) {
         latestQx_ = q[0]; latestQy_ = q[1]; latestQz_ = q[2]; latestQw_ = q[3];

@@ -54,7 +54,7 @@ class FirDecimator {
   // The UNFILTERED input sample that eval() is centred on, i.e. the one kFirHalf
   // pushes back. Free: the delay line already holds it. Logging it next to eval()
   // gives a filtered/unfiltered pair on one time base, which is what makes the
-  // vacc_madgwick vs vacc_fir comparison in the capture logs meaningful rather than
+  // vacc vs vacc_fir comparison in the capture logs meaningful rather than
   // a comparison of two different instants.
   float center(void) const { return z_[(uint16_t)((idx_ + kFirHalf) % kFirNtap)]; }
 

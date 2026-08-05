@@ -21,18 +21,21 @@
   is a label for the window, not a claim about which instant the values describe.
 */
 struct ImuRow {
-  uint32_t winStartMs;              // window start, relative ms from capture start
-  uint16_t n;                       // accel samples in the window (quality metric only)
-  float ax, ay, az;                 // FIR-decimated accel (mg, body frame)
-  float axn, ayn, azn;              // FIR-decimated linear accel (mg, world/NED, gravity removed)
-  float gx, gy, gz;                 // FIR-decimated gyro (mdps)
-  float qw, qx, qy, qz;             // on-chip SFLP quaternion, delay-matched to the above
-  uint8_t braking;                  // 1 if linear |a| > threshold long enough
-  uint8_t fifoOvf;                  // 1 if the FIFO overflowed while this window was open
-  float mqw, mqx, mqy, mqz;         // Madgwick/Kalman quaternion, delay-matched to the above
-  float vaccMadgwick, vaccSflp;     // UNFILTERED vertical linear accel (m/s^2) at the same instant
-  float vaccFir, vaccSflpFir;       // the same two series, FIR-decimated
-  uint8_t sflpNan;                  // 1 if a NaN SFLP quaternion was rejected in the window
+  uint32_t winStartMs;                  // window start, relative ms from capture start
+  uint16_t n;                           // accel samples in the window (quality metric only)
+  float ax, ay, az;                     // FIR-decimated accel (mg, body frame)
+  float axnSflp, aynSflp, aznSflp;      // FIR-decimated linear accel rotated by the SFLP
+                                        // quaternion (mg, world frame, gravity removed)
+  float gx, gy, gz;                     // FIR-decimated gyro (mdps)
+  float qwSflp, qxSflp, qySflp, qzSflp; // on-chip SFLP quaternion, delay-matched to the above
+  uint8_t braking;                      // 1 if linear |a| > threshold long enough
+  uint8_t fifoOvf;                      // 1 if the FIFO overflowed while this window was open
+  float qw, qx, qy, qz;                 // the SELECTED WaveAhrs (Madgwick/Kalman) quaternion,
+                                        // delay-matched to the above
+  float vacc, vaccSflp;                 // UNFILTERED vertical linear accel (m/s^2) at the same
+                                        // instant: selected method, and SFLP
+  float vaccFir, vaccSflpFir;           // the same two series, FIR-decimated
+  uint8_t sflpNan;                      // 1 if a NaN SFLP quaternion was rejected in the window
 };
 
 // Callback invoked when a window closes. Const again: the row leaves ImuSampler
