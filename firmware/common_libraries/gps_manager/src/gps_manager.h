@@ -106,6 +106,11 @@ class GPS_Manager{
     void update(void);
     bool freshFix(void) const { return freshFix_; };
 
+    // True between a successful begin() and the next shutdownGPS(). update() is a
+    // no-op outside that window, so a caller that waits on a fix (wave_manager)
+    // can give up immediately instead of polling a receiver that cannot answer.
+    bool ready(void) const { return initialized; };
+
     // Latest decoded solution, for fix quality checks and debug output
     const UBX_PVT & lastFix(void) const { return pvt; };
   private:

@@ -42,7 +42,14 @@ class WaveManager {
   void sleep(void);
 
   // Capture IMU data for wave_measurement_duration, streaming each window into the
-  // analyzer (and, when logging is enabled, to imu.csv). Returns 0 on success.
+  // analyzer (and, when logging is enabled, to imu.csv).
+  //   0 = capture ran
+  //   1 = no IMU (begin() failed) - nothing was sampled
+  //   2 = no GNSS fix within wave_gps_fix_timeout, and wave_measurement_require_gps
+  //       is set - capture deliberately skipped. With the flag clear the capture runs
+  //       anyway and this is never returned; ses.csv records gps_fix_at_start 0.
+  // Both non-zero codes mean the analyzer holds nothing, so the caller must not go
+  // on to processReading().
   uint8_t takeReading(void);
 
   // Finalise the Welch spectrum -> wave params, push a WaveResult, write spec/ana.
@@ -82,6 +89,7 @@ class WaveManager {
   void writeSessionConfig(File &f); // cfg.csv: every constant the capture depends on
   void writeSessionSummary(bool ok, const WaveParams &params);  // stop UTC, duration, rows, params
   void serviceGps(uint32_t relMs);  // drive gps_manager.update(); log a gps.csv row per fix
+  bool waitForGpsFix(void);         // block up to wave_gps_fix_timeout for a valid PVT
 
   ImuSampler imu_;
   StreamAnalyzer analyzer_;
@@ -99,6 +107,11 @@ class WaveManager {
   char     logStamp_[16]   = "00000000_000000";  // YYYYMMDD_HHMMSS
   char     sessionDir_[40] = "";                  // waves/<stamp>_tmp
   uint32_t gpsRowsWritten_ = 0;
+  // Whether the capture started with a valid fix. Logged to ses.csv: with
+  // wave_measurement_require_gps false a capture can legitimately run without one,
+  // and this is what separates that from a receiver that failed - both leave gps.csv
+  // holding nothing but its header line.
+  bool     gpsFixAtStart_ = false;
 
   uint16_t readingID_ = 0;
   uint32_t rowCount_ = 0;

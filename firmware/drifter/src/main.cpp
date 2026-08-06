@@ -327,15 +327,23 @@ void task_measure_waves() {
   }
 
   IWatchdog.reload();
-  wave_manager.wake();
+  wave_manager.wake();  // restarts the GNSS engine for the drift track
 
   // Blocking capture over wave_measurement_duration; the watchdog is reloaded inside.
-  wave_manager.takeReading();
+  // Waits up to wave_gps_fix_timeout for a fix first and returns 2 if none arrives -
+  // a capture with no position is skipped outright, so nothing was sampled and there
+  // is no spectrum to finalise.
+  uint8_t wave_status = wave_manager.takeReading();
   IWatchdog.reload();
 
-  // Finalise the Welch spectrum -> wave parameters and enqueue a result for transmit.
-  wave_manager.processReading();
-  IWatchdog.reload();
+  if (wave_status == 0){
+    // Finalise the Welch spectrum -> wave parameters and enqueue a result for transmit.
+    wave_manager.processReading();
+    IWatchdog.reload();
+  } else if (debug_serial){
+    mySerial.print("Wave measurement skipped, takeReading status ");
+    mySerial.println(wave_status);
+  }
 
   wave_manager.sleep();
 

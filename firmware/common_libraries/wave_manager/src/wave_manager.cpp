@@ -53,11 +53,69 @@ void WaveManager::begin(void) {
 
 void WaveManager::wake(void) {
   if (imuOk_) imu_.resetFifo();
+
+  // Restart the GNSS engine. task_measure_gps_temp leaves the receiver in a
+  // controlled GNSS stop (shutdownGPS -> initialized = false), and update() is a
+  // no-op in that state - which is why gps.csv held nothing but its header line in
+  // every capture up to build_seq 3, in spite of serviceGps() running for the whole
+  // half hour. begin() is bounded (~3.5 s worst case) and reloads the watchdog
+  // itself, and it runs before the FIFO stream starts, so it cannot starve a drain.
+  gps_manager.begin();
 }
 
 void WaveManager::sleep(void) {
   // The LSM6DSV keeps streaming into its FIFO; nothing to actively power down here.
   // Between captures the FIFO is simply left to overwrite (reset at next capture).
+  //
+  // The GPS is the part that does cost power: put it back into the controlled GNSS
+  // stop wake() brings it out of, so a capture does not leave the receiver tracking
+  // through the whole sleep window. Called on the abort path too (see main.cpp).
+  gps_manager.shutdownGPS();
+}
+
+// Wait for the receiver to produce a valid solution, and report whether it did.
+// Reports ONLY that - whether a missing fix ends the capture is
+// wave_measurement_require_gps, and that decision belongs to takeReading. This
+// function is also what fills gps_fix_at_start in ses.csv, so it must answer the
+// factual question even in the builds that carry on without one.
+//
+// Called before any file is opened, so an abort leaves no session directory, no
+// reading ID and no ~28 MB reservation behind.
+//
+// "Valid" is a FRESH gnssFixOK solution (UBX_PVT::valid, i.e. fixType >= 2): pvt
+// survives across captures, so lastFix() alone would pass instantly on a stale fix
+// from the previous measurement.
+bool WaveManager::waitForGpsFix(void) {
+  // No receiver in this build - there is nothing to wait for and nothing to report.
+  if (!enable_GPS) return false;
+
+  if (!gps_manager.ready()) {
+    if (debug_serial) Serial.println("WaveManager: GPS did not init - no fix this capture");
+    return false;
+  }
+
+  const uint32_t start = millis();
+  while (millis() - start < wave_gps_fix_timeout) {
+    gps_manager.update();
+    if (gps_manager.freshFix() && gps_manager.lastFix().valid) {
+      if (debug_serial) {
+        Serial.print("WaveManager: GPS fix after ");
+        Serial.print(millis() - start);
+        Serial.print(" ms, sats ");
+        Serial.println(gps_manager.lastFix().numSV);
+      }
+      return true;
+    }
+    IWatchdog.reload();
+    delay(10);  // the poll is rate-limited to GPS_nav_period_ms; do not spin
+  }
+
+  if (debug_serial) {
+    Serial.print("WaveManager: no GPS fix in ");
+    Serial.print(wave_gps_fix_timeout);
+    Serial.println(" ms");
+  }
+  return false;
 }
 
 // -----------------------------------------------------------------------------
@@ -143,6 +201,20 @@ void WaveManager::onRow(const ImuRow &r) {
 // -----------------------------------------------------------------------------
 uint8_t WaveManager::takeReading(void) {
   if (!imuOk_) return 1;
+
+  // Deliberately the FIRST thing after the IMU check: an abort must not consume a
+  // reading ID, create a session folder or reserve the clusters, so a run that never
+  // sees the sky leaves the card exactly as it was. The wait runs whatever
+  // wave_measurement_require_gps says - the answer is logged as gps_fix_at_start
+  // either way, and only the ABORT is conditional. enable_GPS wins over the
+  // requirement: demanding a fix from a build with no receiver would abort forever.
+  gpsFixAtStart_ = waitForGpsFix();
+  if (!gpsFixAtStart_ && wave_measurement_require_gps && enable_GPS) {
+    if (debug_serial) {
+      Serial.println("WaveManager: capture skipped - wave_measurement_require_gps");
+    }
+    return 2;
+  }
 
   readingID_++;
   rowCount_ = 0;
@@ -308,6 +380,11 @@ void WaveManager::writeSessionAnchor(void) {
   sessionFile_.print("build_seq,");       sessionFile_.println(wave_build_seq);
   sessionFile_.print("reading_id,");      sessionFile_.println(readingID_);
   sessionFile_.print("orientation_name,");sessionFile_.println(analyzer_.orientationName());
+  // Whether the capture began with a position. Zero here is the one thing that
+  // explains an empty gps.csv without guesswork - and with
+  // wave_measurement_require_gps false it is a capture that ran on purpose, not a
+  // failed one.
+  sessionFile_.print("gps_fix_at_start,"); sessionFile_.println(gpsFixAtStart_ ? 1 : 0);
   sessionFile_.print("start_utc_epoch,"); sessionFile_.println((uint32_t)captureStart_);
   sessionFile_.print("start_utc_iso,");   sessionFile_.println(iso);
   sessionFile_.sync();  // do not close: summary is appended at stop
@@ -332,6 +409,11 @@ void WaveManager::writeSessionConfig(File &f) {
   // AHRS settling window: logged to imu.csv/gps.csv but excluded from Welch/PSD, so
   // postprocess must skip the same leading rows to reproduce the on-device Hs.
   f.print("filter_warm_up_ms,");  f.println(wave_measurement_filter_warm_up);
+  // With gps_fix_required set, a folder only exists if the fix arrived inside this
+  // budget - which is what makes a MISSING capture a timeout rather than a crash.
+  // Without it the pair explains the opposite case: a folder whose gps.csv is empty.
+  f.print("gps_fix_timeout_ms,"); f.println(wave_gps_fix_timeout);
+  f.print("gps_fix_required,");   f.println((wave_measurement_require_gps && enable_GPS) ? 1 : 0);
 
   // --- IMU front end ---
   f.print("imu_odr_hz,");         f.println(kImuOdrHz);

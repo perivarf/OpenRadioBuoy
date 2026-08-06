@@ -85,6 +85,32 @@ static constexpr char     wave_log_dir[]     = "waves";  // parent dir for sessi
 //    values or column ORDER changed - see kImuCsvHeader.
 static constexpr uint16_t wave_build_seq     = 3;
 
+// How long takeReading() waits for a valid GNSS solution before it gives up and
+// aborts the capture. A wave record with no position is not worth the half hour and
+// the ~28 MB of card it costs - Hs without a location cannot be assigned to a sea
+// state - so a timeout here skips the whole measurement rather than logging a drift
+// track that stays empty. The receiver is left in a controlled GNSS stop between
+// measurements, so this budget has to cover the hot start (seconds with ephemeris in
+// battery-backed RAM, up to a minute or two after a long stop or a cold antenna).
+// Charged against the capture, not on top of it: the wait runs before the FIFO
+// stream starts, so nothing is being sampled while it ticks.
+static constexpr uint32_t wave_gps_fix_timeout {120000};  // ms
+
+// Whether that timeout ABORTS the capture or merely ends the wait. True is the
+// deployment setting: a position is part of the measurement, and half an hour of IMU
+// that cannot be placed on a map is not worth the card space. False keeps the IMU
+// chain running with an empty drift track, which is what a bench or a harbour test
+// wants - there the point is the spectrum, not where it was measured.
+//
+// The wait itself runs either way: a fix that arrives at second 90 still gives the
+// capture a position and a correct RTC stamp, and there is nothing else to do with
+// that time - the FIFO stream has not started yet. Set wave_gps_fix_timeout to 0 to
+// skip the wait entirely.
+//
+// enable_GPS (config.h) overrules this: requiring a fix from a build with no receiver
+// would abort every capture forever, so a false enable_GPS wins.
+static constexpr bool wave_measurement_require_gps {true};
+
 // -----------------------------------------------------------------------------
 // IMU: datarate (ODR) + power mode for accel AND gyro.
 // -----------------------------------------------------------------------------
