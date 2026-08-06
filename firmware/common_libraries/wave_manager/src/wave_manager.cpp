@@ -180,7 +180,7 @@ bool WaveManager::startSession(void) {
   // growing cluster by cluster, which is the behaviour this replaces, so the capture
   // still runs and only the overflow risk returns.
   const uint32_t durationS = wave_measurement_duration / s_2_ms;
-  const uint32_t imuBytes  = (uint32_t)kOutputRateHz * durationS * wave_imu_row_bytes_max;
+  const uint32_t imuBytes  = (uint32_t)kRowOdrHz * durationS * wave_imu_row_bytes_max;
   const uint32_t gpsBytes  = durationS * wave_gps_row_bytes_max;  // <= 1 row per fix per second
   if (!imuFile_.preAllocate(imuBytes) && debug_serial) {
     Serial.print("WaveManager: imu preAllocate failed, "); Serial.print(imuBytes);
@@ -272,14 +272,17 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("fifo_watermark,");     f.println(kFifoWatermark);
 
   // --- windowing (raw ODR -> imu.csv rows) ---
-  f.print("output_rate_hz,");     f.println(kOutputRateHz);
-  f.print("window_ms,");          f.println(kWindowMs);
+  // cfg.csv KEYS are deliberately left alone by the kRowOdrHz/kWelchInputOdrHz
+  // rename: postprocess.py and firmware_test.py look them up by name, and old
+  // captures have to stay comparable with new ones.
+  f.print("output_rate_hz,");     f.println(kRowOdrHz);
+  f.print("window_ms,");          f.println(kRowPeriodMs);
   f.print("csv_sync_rows,");      f.println(wave_csv_sync_rows);
   // What the imu file reserved up front. Read this next to fifo_ovf in imu.csv: a
   // capture that overflows despite a successful reservation has a stall that is not
   // cluster allocation, which is a different hunt.
   f.print("imu_prealloc_bytes,");
-  f.println((uint32_t)kOutputRateHz * (wave_measurement_duration / s_2_ms) *
+  f.println((uint32_t)kRowOdrHz * (wave_measurement_duration / s_2_ms) *
             wave_imu_row_bytes_max);
 
   // --- decimation ---
@@ -311,8 +314,8 @@ void WaveManager::writeSessionConfig(File &f) {
   // The AHRS runs on the RAW stream now, not on the rows, so the rate it was
   // stepped at is no longer output_rate_hz and has to be recorded separately -
   // offline cannot reproduce the device attitude without it.
-  f.print("ahrs_rate_hz,");       f.println(kAhrsRateHz, 2);
-  f.print("ahrs_rate_cap_hz,");   f.println(kAhrsRateCapHz);
+  f.print("ahrs_rate_hz,");       f.println(kAhrsInputOdrHz, 2);
+  f.print("ahrs_rate_cap_hz,");   f.println(kAhrsInputOdrCapHz);
   // The quaternions are held, not filtered, but they ARE carried back by the stage-1
   // group delay so every column in a row describes one instant. See quat_delay.h.
   f.print("quat_decimation,hold"); f.println();
@@ -335,8 +338,10 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("gravity,");            f.println(kGravity, 5);
   f.print("mg_to_ms2,");          f.println(kMg2Ms2, 8);
   f.print("mdps_to_rads,");       f.println(kMdps2Rads, 8);
-  f.print("vacc_bucket_ms,");     f.println(kVacc10HzBucketMs);
-  f.print("vacc_fs_hz,");         f.println(kVaccFsHz, 3);
+  f.print("vacc_bucket_ms,");     f.println(kWelchInputPeriodMs);
+  // Cast is load-bearing: kWelchInputOdrHz is an integer now, and println(int, 3)
+  // would print it in BASE 3 rather than with three decimals.
+  f.print("vacc_fs_hz,");         f.println((float)kWelchInputOdrHz, 3);
 
   // --- Welch spectrum + acc->elevation taper ---
   f.print("welch_seglen,");       f.println(kWelchSegLen);
@@ -447,7 +452,7 @@ uint8_t WaveManager::processReading(void) {
     if (sf) {
       sf.println("f_hz,psd_acc,psd_eta");
       const int N = kWelchSegLen;
-      const float df = kVaccFsHz / N;
+      const float df = (float)kWelchInputOdrHz / N;
       const float invSeg = analyzer_.segments() > 0 ? 1.0f / (float)analyzer_.segments() : 0.0f;
       const float *psd = analyzer_.psd();
       for (int k = 1; k <= N / 2; k++) {
@@ -556,3 +561,73 @@ size_t WaveManager::updateTransmitMessage(void) {
   wave_analysis_results.pop_front();
   return offset;
 }
+
+#if DEBUG_WAVE_MSG
+// Synthetic result for bench testing - see DEBUG_WAVE_MSG in wave_config.h.
+void WaveManager::enqueueFakeResult(void) {
+  WaveResult res{};
+  res.reading_ID = ++readingID_;
+
+  // Deliberately NOT round numbers, and all distinct: if the fixed-point scaling or
+  // the field ORDER is wrong on the receiving side, distinct odd values say so
+  // immediately, where 1.0/2.0/3.0 could line up plausibly after a swap.
+  res.Hs        = 1.37f;   // m
+  res.Tc        = 2.53f;   // s
+  res.Tp        = 6.91f;   // s
+  res.Tz        = 4.29f;   // s
+  res.max_value = 0.0842f; // peak elevation PSD (m^2/Hz)
+
+  // A single smooth peak, encoded exactly as finalize() does: the wire value is
+  // binEta/peakEta * 65535, so the far side reconstructs value/65535 * max_value.
+  // Peak placed off-centre so a mirrored or off-by-one bin axis is visible.
+  const float peakBin = 0.35f * (float)welch_bins;
+  const float width   = 0.12f * (float)welch_bins;
+  for (size_t j = 0; j < welch_bins; j++) {
+    const float d = ((float)j - peakBin) / width;
+    const float norm = expf(-0.5f * d * d);
+    res.wave_spectrum[j] = (uint16_t)lroundf(norm * 65535.0f);
+  }
+
+  res.timestamp_end   = now();
+  res.timestamp_start = res.timestamp_end -
+                        (time_t)(wave_measurement_duration / s_2_ms);
+
+  // Same bound handling as processReading: the deque is fixed-size, and dropping the
+  // OLDEST keeps the freshest results when transmit cannot keep up.
+  if (wave_analysis_results.full()) wave_analysis_results.pop_back();
+  wave_analysis_results.push_front(res);
+}
+
+// What is about to go on the air, in physical units - so a scaling or field-order
+// mistake in updateTransmitMessage is visible against these numbers rather than only
+// after decoding on the base station.
+void WaveManager::printPendingResult(Print &out) const {
+  if (wave_analysis_results.empty()) return;
+  const WaveResult &r = wave_analysis_results.front();
+
+  out.print(F("  wave result #"));  out.println(r.reading_ID);
+  out.print(F("    Hs "));  out.print(r.Hs, 3);  out.print(F(" m   Tc "));
+  out.print(r.Tc, 3);       out.print(F(" s   Tp "));
+  out.print(r.Tp, 3);       out.print(F(" s   Tz "));
+  out.print(r.Tz, 3);       out.println(F(" s"));
+  out.print(F("    max_value "));  out.print(r.max_value, 6);
+  out.print(F(" m^2/Hz   span "));
+  out.print((uint32_t)(r.timestamp_end - r.timestamp_start));  out.println(F(" s"));
+
+  // The wire format is a normalised uint16 per bin; the base station reconstructs
+  // value/65535 * max_value. Both are printed so the raw payload can be checked
+  // against the decoded value without doing the arithmetic by hand.
+  out.print(F("    PSD, "));  out.print((uint32_t)welch_bins);
+  out.print(F(" bins of "));  out.print(kSpecBinWidthHz, 6);
+  out.println(F(" Hz (f_hz raw psd_eta):"));
+  for (size_t j = 0; j < welch_bins; j++) {
+    const float f = ((float)welch_bin_min
+                     + (float)j * (float)kSpecBinGroup
+                     + 0.5f * (float)(kSpecBinGroup - 1)) * kPsdDfHz;
+    out.print(F("      "));      out.print(f, 4);
+    out.print(' ');              out.print(r.wave_spectrum[j]);
+    out.print(' ');
+    out.println(r.wave_spectrum[j] / 65535.0f * r.max_value, 6);
+  }
+}
+#endif  // DEBUG_WAVE_MSG

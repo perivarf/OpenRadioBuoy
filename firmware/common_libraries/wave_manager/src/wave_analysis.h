@@ -14,7 +14,7 @@
   one is a compile-time choice made at the bottom of wave_config.h. The chain is:
 
     vertical linear accel (already computed per RAW sample by ImuSampler and
-    FIR-decimated into the row) -> FIR decimation to kVaccFsHz ->
+    FIR-decimated into the row) -> FIR decimation to kWelchInputOdrHz ->
     streaming Welch PSD -> acc->elevation (/omega^4) with low-frequency taper ->
     spectral moments m0/m2/m4 -> Hs = 4*sqrt(m0), Tz = sqrt(m0/m2), Tc = sqrt(m2/m4),
     Tp = 1/f_peak.
@@ -36,7 +36,7 @@ struct WaveParams {
 class StreamAnalyzer {
  public:
   void begin(void);              // reset all state for a new capture
-  void ingest(const ImuRow &r);  // per row: decimate to kVaccFsHz, accumulate Welch
+  void ingest(const ImuRow &r);  // per row: decimate to kWelchInputOdrHz, accumulate Welch
 
   // Finalise: average the PSD, derive wave parameters, fill the quantised spectrum
   // bins (welch_bin_min..welch_bin_max). Returns false if no usable segment.
@@ -57,7 +57,7 @@ class StreamAnalyzer {
  private:
   void pushWelch(float sample);  // push one 10 Hz sample into the segment
 
-  // Second decimation stage: kOutputRateHz rows -> kVaccFsHz into Welch. Replaces
+  // Second decimation stage: kRowOdrHz rows -> kWelchInputOdrHz into Welch. Replaces
   // the 100 ms boxcar mean this class used to take. Fed on EVERY row, including the
   // warm-up ones - otherwise the delay line is still half full of zeros when the
   // first Welch sample is taken and the spectrum starts with a filter transient.

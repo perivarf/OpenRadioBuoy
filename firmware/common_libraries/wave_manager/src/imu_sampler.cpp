@@ -293,12 +293,12 @@ void ImuSampler::closeWindow() {
   if (winNAcc_ == 0) return;
   // No raw sample reached the window centre - a FIFO gap. Read the filters at the
   // window edge instead of dropping the row: the filtered value is still valid, it
-  // is just centred up to kWindowMs late. Counted so a capture can be judged.
+  // is just centred up to kRowPeriodMs late. Counted so a capture can be judged.
   if (!winFirDone_) {
     latchRowValues();
     nFirLateEval_++;
   }
-  pendingRow_.winStartMs = (uint32_t)curWinIdx_ * kWindowMs;
+  pendingRow_.winStartMs = (uint32_t)curWinIdx_ * kRowPeriodMs;
   pendingRow_.n = winNAcc_;
   pendingRow_.braking = winBraking_ ? 1 : 0;
   pendingRow_.sflpNan = winSflpNan_ ? 1 : 0;
@@ -352,10 +352,10 @@ void ImuSampler::update(Print &dbg) {
       nAccDbg_++;
       // Windowing: samples arrive in FIFO bursts but represent evenly spaced points
       // in time. A running, monotonic clock (sampleTms_ += samplePeriodMs_) gives a
-      // steady kWindowMs binning; samplePeriodMs_ self-calibrates below so the axis
+      // steady kRowPeriodMs binning; samplePeriodMs_ self-calibrates below so the axis
       // tracks the wall clock without drift.
       uint32_t tms = (uint32_t)sampleTms_;
-      int32_t widx = (int32_t)(tms / kWindowMs);
+      int32_t widx = (int32_t)(tms / kRowPeriodMs);
       if (!logStarted_) { logStarted_ = true; curWinIdx_ = widx; }
       if (widx != curWinIdx_) {
         closeWindow();
@@ -421,7 +421,7 @@ void ImuSampler::update(Print &dbg) {
       // convention as fir.py's dec//2 - the value sits in the middle of the window
       // it represents. 960/100 = 9.6 is not an integer decimation, so the output
       // grid stays time-driven and the residual jitter is at most half a raw period.
-      if (!winFirDone_ && tms >= (uint32_t)curWinIdx_ * kWindowMs + kFirS1CenterMs) {
+      if (!winFirDone_ && tms >= (uint32_t)curWinIdx_ * kRowPeriodMs + kFirS1CenterMs) {
         latchRowValues();
       }
 

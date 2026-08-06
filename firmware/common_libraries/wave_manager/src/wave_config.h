@@ -228,25 +228,63 @@ static constexpr uint8_t kFifoDataOutTagReg = 0x78;
 static constexpr uint16_t kAccelOdrHz = kImuOdrHz;
 
 // -----------------------------------------------------------------------------
-// Windowing (FIR-decimated IMU rows -> imu.csv), 50 Hz.
+// THE RATE CHAIN. Every rate below is named for what CONSUMES it, and no rate
+// carries its own value in its name - a constant called kVacc10HzBucketMs stops
+// being true the moment someone edits it, and the offline mirror had already
+// drifted into exactly that lie.
+//
+//   kImuOdrHz         raw accel/gyro out of the FIFO
+//     -> kAhrsInputOdrHz   the orientation filter (= kImuOdrHz, undivided)
+//     -> kRowOdrHz         FIR stage 1; the rows written to imu.csv
+//     -> kWelchInputOdrHz  FIR stage 2; the series fed to Welch
+//
+// Each stage states its ODR and DERIVES its period, never both independently, so
+// the two can no longer disagree. The static_asserts by the FIR tables below are
+// what make an illegal decimation a build error rather than a slow time-base drift
+// that only shows up as a wrong Hs months later.
+// -----------------------------------------------------------------------------
+
+// -----------------------------------------------------------------------------
+// Row rate (FIR-decimated IMU rows -> imu.csv).
 //
 // This is the row rate written to SD, and it is chosen for the CARD, not for the
 // analysis: halving it halves the bytes per second, the number of clusters the file
 // walks, and the per-row formatting work in the drain loop - all of which sit
 // between the FIFO and the next chance to drain it. The wave chain is unaffected
-// either way, since stage 2 decimates to kVaccFsHz = 10 Hz regardless.
+// either way, since stage 2 decimates to kWelchInputOdrHz regardless.
 //
-// What it does cost: rows are the only record of anything above 5 Hz, so an offline
-// re-analysis at a wider band is no longer possible from a capture. That band was
-// already out of reach - LPF2 sits at kLpf2CutoffHz = 4.8 Hz - so the loss is
+// What it does cost: rows are the only record of anything above kRowOdrHz/2, so an
+// offline re-analysis at a wider band is no longer possible from a capture. That band
+// was already out of reach - LPF2 sits at kLpf2CutoffHz = 4.8 Hz - so the loss is
 // bookkeeping, not signal. Stage 1's cutoff follows automatically (fs_out/2).
 // -----------------------------------------------------------------------------
-static constexpr uint16_t kOutputRateHz = 100;
-static constexpr uint16_t kWindowMs     = 1000 / kOutputRateHz;
+static constexpr uint16_t kRowOdrHz    = 100;
+static constexpr uint16_t kRowPeriodMs = 1000 / kRowOdrHz;
+static_assert(1000 % kRowOdrHz == 0,
+              "kRowOdrHz must divide 1000 - the row grid is kept in whole ms");
 
 // IMU debug: how often update() prints the effective accel/gyro sample rate + mean
 // magnitudes (ms). Only emitted when debug_serial is set. 0 disables the printout.
 static constexpr uint32_t imu_debug_print_period = {10*s_2_ms};  // 10 s
+
+// -----------------------------------------------------------------------------
+// Bench test: synthetic wave message.
+//
+// Enqueues a fabricated WaveResult on a short timer instead of running a capture,
+// so the serialise -> LoRa -> SD path can be exercised in seconds rather than after
+// a full wave_measurement_duration. What is faked is ONLY the source of the result:
+// updateTransmitMessage, LORA.sendData and sd_writer.logByteArray are the production
+// ones, which is the whole point - a test that re-implemented the packing would
+// prove nothing about the packing that ships.
+//
+// A BUILD FLAG, not a constant to edit: -DDEBUG_WAVE_MSG=1 (env orb_drifter_test_wave).
+// A bool in this header would eventually be committed as true; an #if cannot be,
+// because the production env never defines it and the code is not compiled at all.
+// -----------------------------------------------------------------------------
+#ifndef DEBUG_WAVE_MSG
+#define DEBUG_WAVE_MSG 0
+#endif
+static constexpr uint32_t debug_wave_msg_period = {30*s_2_ms};  // 30 s between fakes
 
 // -----------------------------------------------------------------------------
 // Brake detection (linear |a| over threshold long enough within a window).
@@ -264,8 +302,12 @@ static constexpr uint16_t kBrakeMinSamples =
 // -----------------------------------------------------------------------------
 static constexpr float    kMadgwickBeta      = 0.05f;
 static constexpr float    kGravity           = 9.80665f;
-static constexpr uint16_t kVacc10HzBucketMs  = 100;
-static constexpr float    kVaccFsHz          = 1000.0f / kVacc10HzBucketMs;   // 10 Hz
+// Welch input rate: the end of the chain. ODR is what is SET here; the period is
+// derived, so the two cannot drift apart the way kVacc10HzBucketMs/kVaccFsHz could.
+static constexpr uint16_t kWelchInputOdrHz    = 10;
+static constexpr uint16_t kWelchInputPeriodMs = 1000 / kWelchInputOdrHz;
+static_assert(1000 % kWelchInputOdrHz == 0,
+              "kWelchInputOdrHz must divide 1000 - the bucket grid is kept in whole ms");
 static constexpr float    kMg2Ms2            = kGravity / 1000.0f;            // mg -> m/s^2
 static constexpr float    kMdps2Rads         = 1.0e-3f * (float)M_PI / 180.0f; // mdps -> rad/s
 
@@ -279,23 +321,23 @@ static constexpr float    kMdps2Rads         = 1.0e-3f * (float)M_PI / 180.0f; /
 // number of AHRS steps) and its own way of being wrong. One rate is cheaper to
 // reason about than two, and it makes the quaternion delay a plain sample count.
 //
-// kAhrsRateCapHz is therefore a CEILING, not a divider - the rate above which the
+// kAhrsInputOdrCapHz is therefore a CEILING, not a divider - the rate above which the
 // orientation filter stops fitting in the CPU budget. KalmanAhrs is ~20x dearer per
 // update than Madgwick (6-state MEKF, two 6x6 matmuls in predict + Joseph form in
 // correct), so the cap is set for Madgwick: ~18 % of a soft-float 48 MHz core at
 // 960 Hz. Building with KalmanAhrs at this ODR does not fit and never did - drop
 // kImuOdrHz instead, which the assert below forces you to do deliberately.
 // -----------------------------------------------------------------------------
-static constexpr uint16_t kAhrsRateCapHz = 960;
-static constexpr float    kAhrsRateHz    = (float)kImuOdrHz;
-static_assert(kImuOdrHz <= kAhrsRateCapHz,
-              "the AHRS runs on every raw sample - kImuOdrHz above kAhrsRateCapHz does "
+static constexpr uint16_t kAhrsInputOdrCapHz = 960;
+static constexpr float    kAhrsInputOdrHz    = (float)kImuOdrHz;
+static_assert(kImuOdrHz <= kAhrsInputOdrCapHz,
+              "the AHRS runs on every raw sample - kImuOdrHz above kAhrsInputOdrCapHz does "
               "not fit the CPU budget; lower the ODR rather than re-introducing a divider");
 
 // -----------------------------------------------------------------------------
 // FIR decimation. Two stages replace what used to be two boxcar means:
-//   stage 1: raw ODR -> kOutputRateHz  (the ax..gz/vacc columns written to imu.csv)
-//   stage 2: kOutputRateHz -> kVaccFsHz (the series fed to Welch)
+//   stage 1: kImuOdrHz -> kRowOdrHz        (the ax..gz/vacc columns in imu.csv)
+//   stage 2: kRowOdrHz  -> kWelchInputOdrHz (the series fed to Welch)
 //
 // A mean over D samples IS an FIR filter, but a poor one: its response leaks badly
 // between the nulls, so everything above Nyquist folds into the wave band. The tap
@@ -303,11 +345,17 @@ static_assert(kImuOdrHz <= kAhrsRateCapHz,
 // same firwin_lowpass() that postprocess.py uses offline - device and offline filter
 // with identical numbers rather than two implementations that drift apart.
 //
-// Stage 1 is generally NOT an integer decimation (kImuOdrHz/kOutputRateHz = 9.6 at the
-// rates shipped so far). The output grid therefore stays time-driven - the kWindowMs
+// Stage 1 is generally NOT an integer decimation (kImuOdrHz/kRowOdrHz = 4.8 at the
+// rates shipped so far). The output grid therefore stays time-driven - the kRowPeriodMs
 // windows that already exist - and the FIR is evaluated on the raw sample nearest the
 // window centre. Residual jitter is at most half a raw period, and winStartMs stays
-// exactly on the kWindowMs grid.
+// exactly on the kRowPeriodMs grid.
+//
+// Stage 2 is different and MUST be exact: kWelchInputPeriodMs has to be a whole number
+// of rows, or the bucket centres slide against the row grid and the decimation drifts
+// in time. That is asserted below - the offline mirror only warns about the same
+// condition (fir.py), so a configuration the device rejects at compile time can still
+// be analysed silently offline.
 // -----------------------------------------------------------------------------
 // kFirNtap and kFirHalf (the group delay in samples) come from fir.h - they are
 // geometry of the filter itself, not of the buoy, and the filter must be buildable on
@@ -323,33 +371,37 @@ static_assert(kImuOdrHz <= kAhrsRateCapHz,
 // the arithmetic below is exact for every rate on the grid (10*960/100 = 96,
 // 10*480/50 = 96, ...). A ratio with no table selects nullptr, and the assert says so
 // at compile time rather than letting the wrong coefficients through.
-static constexpr float    kFirS1CutoffHz  = 0.5f * kOutputRateHz;   // fs_out/2, fir.py's convention
-static constexpr float    kFirS2CutoffHz  = 0.5f * kVaccFsHz;
-static constexpr uint16_t kFirS2Decim     = kVacc10HzBucketMs / kWindowMs;  // rows per bucket
-static constexpr uint16_t kFirS2CenterMs  = (kFirS2Decim / 2) * kWindowMs;  // = fir.py's dec//2
-static constexpr uint16_t kFirS1CenterMs  = kWindowMs / 2;                  // same convention
+static constexpr float    kFirS1CutoffHz  = 0.5f * kRowOdrHz;   // fs_out/2, fir.py's convention
+static constexpr float    kFirS2CutoffHz  = 0.5f * kWelchInputOdrHz;
+static constexpr uint16_t kFirS2Decim     = kWelchInputPeriodMs / kRowPeriodMs;  // rows per bucket
+static constexpr uint16_t kFirS2CenterMs  = (kFirS2Decim / 2) * kRowPeriodMs;  // = fir.py's dec//2
+static constexpr uint16_t kFirS1CenterMs  = kRowPeriodMs / 2;                  // same convention
 static constexpr float    kFirS1DelayS    = (float)kFirHalf / (float)kImuOdrHz;
-static constexpr float    kFirS2DelayS    = (float)kFirHalf / (float)kOutputRateHz;
+static constexpr float    kFirS2DelayS    = (float)kFirHalf / (float)kRowOdrHz;
 
-static constexpr uint16_t kFirS1DecimX10 = (uint16_t)((10u * kImuOdrHz) / kOutputRateHz);
+static constexpr uint16_t kFirS1DecimX10 = (uint16_t)((10u * kImuOdrHz) / kRowOdrHz);
 static constexpr uint16_t kFirS2DecimX10 = (uint16_t)(10u * kFirS2Decim);
 static constexpr const float *kFirCoeffsStage1 = firTapsForDecimX10(kFirS1DecimX10);
 static constexpr const float *kFirCoeffsStage2 = firTapsForDecimX10(kFirS2DecimX10);
 
-static_assert(10u * kImuOdrHz % kOutputRateHz == 0,
-              "kImuOdrHz/kOutputRateHz must land on a whole tenth - the table key is 10*D");
+static_assert(10u * kImuOdrHz % kRowOdrHz == 0,
+              "kImuOdrHz/kRowOdrHz must land on a whole tenth - the table key is 10*D");
 static_assert(kFirCoeffsStage1 != nullptr,
-              "no FIR table for kImuOdrHz/kOutputRateHz - add the ratio to DEFAULT_DECIM "
+              "no FIR table for kImuOdrHz/kRowOdrHz - add the ratio to DEFAULT_DECIM "
               "in ORB_test/tools/gen_fir_table.py and regenerate fir_coeffs.h");
 static_assert(kFirCoeffsStage2 != nullptr,
-              "no FIR table for kOutputRateHz/kVaccFsHz - add the ratio to DEFAULT_DECIM "
+              "no FIR table for kRowOdrHz/kWelchInputOdrHz - add the ratio to DEFAULT_DECIM "
               "in ORB_test/tools/gen_fir_table.py and regenerate fir_coeffs.h");
 
 static_assert(kFirNtap % 2 == 1,
               "odd tap count - the group delay must be a whole number of samples");
-static_assert(kVacc10HzBucketMs % kWindowMs == 0,
+static_assert(kWelchInputPeriodMs % kRowPeriodMs == 0,
               "stage 2 must decimate a whole number of rows - fir.py assumes the same");
-static_assert(wave_measurement_filter_warm_up > (uint32_t)kFirNtap * kWindowMs + 2000,
+static_assert(kRowOdrHz <= kImuOdrHz,
+              "the row rate is a DECIMATION of the raw stream - it cannot exceed kImuOdrHz");
+static_assert(kWelchInputOdrHz <= kRowOdrHz,
+              "the Welch input is a DECIMATION of the rows - it cannot exceed kRowOdrHz");
+static_assert(wave_measurement_filter_warm_up > (uint32_t)kFirNtap * kRowPeriodMs + 2000,
               "warm-up must cover FIR start-up (1.29 s) plus AHRS convergence");
 
 // ---- Orientation delay ----
@@ -378,7 +430,7 @@ static constexpr uint16_t kWelchSegLen     = 1024;
 static constexpr uint16_t kWelchOverlapDiv = 4;      // step = seglen/4 => 75% overlap
 static_assert((kWelchSegLen & (kWelchSegLen - 1)) == 0, "kWelchSegLen must be a power of two");
 
-static constexpr float kPsdDfHz = kVaccFsHz / kWelchSegLen;  // 0.009766 Hz per bin
+static constexpr float kPsdDfHz = (float)kWelchInputOdrHz / kWelchSegLen;  // 0.009766 Hz per bin
 
 // Upper edge of the analysed band: the moment integration (m0/m2/m4) and the peak
 // search both stop here. It is a physical limit, not anti-aliasing - Nyquist for a
@@ -500,7 +552,8 @@ static constexpr WindowType kWelchWindow = WindowType::Hann;
 //
 // Rate invariance interacts with this, and the AHRS rate is now kImuOdrHz itself.
 // dtRef = 20 ms is the rate the ORIGINAL sweep ran at, so its factor is exactly 1.
-// The AHRS runs on the raw stream at kAhrsRateHz = 960 Hz, where the factor is
+// The AHRS runs on the raw stream at kAhrsInputOdrHz (= kImuOdrHz). The worked
+// example below was written when that was 960 Hz, where the factor is
 // dtRef/dt = 0.020*960 = 19.2, so the EFFECTIVE R on the device is 19.2*r0. The
 // 2026-08-04 sweep ran on 100 Hz rows (factor 2), so its plateau of 1e-3..1e-2 is
 // an effective R of 2e-3..2e-2 - and 19.2*1e-3 = 1.9e-2 sits at the TOP EDGE of
@@ -509,7 +562,9 @@ static constexpr WindowType kWelchWindow = WindowType::Hann;
 // not automatically wrong - but a Kalman build at this ODR should re-sweep r0
 // downward (3e-4 puts the effective R back near the plateau centre) rather than
 // assume the number above still applies. r0 cannot be reasoned about at all without
-// knowing kAhrsRateHz.
+// knowing kAhrsInputOdrHz - which is the point: at the ODR shipped today, 480 Hz,
+// the factor is 9.6 rather than 19.2, so the example's arithmetic has to be redone
+// for whatever kImuOdrHz is set to, not read off as a constant.
 //
 // Fixed-R history, since it is the mistake worth not repeating: the first version
 // of KalmanAhrs had r constant and left a flat 8.5e-4 (m/s^2)^2/Hz tilt-leakage

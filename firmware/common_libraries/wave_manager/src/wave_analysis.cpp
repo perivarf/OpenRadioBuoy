@@ -79,7 +79,7 @@ static void accumSegment(const float *seg, float *psdAcc) {
   for (int k = 0; k <= N / 2; k++) {
     float mag2 = gRe[k] * gRe[k] + gIm[k] * gIm[k];
     float scale = (k == 0 || k == N / 2) ? 1.0f : 2.0f;
-    psdAcc[k] += scale * mag2 / (kVaccFsHz * (float)gS2);
+    psdAcc[k] += scale * mag2 / ((float)kWelchInputOdrHz * (float)gS2);
   }
 }
 
@@ -142,17 +142,17 @@ void StreamAnalyzer::ingest(const ImuRow &r) {
     return;
   }
 
-  // Decimate to kVaccFsHz. Same convention as stage 1 and as fir.py's dec//2: the
+  // Decimate to kWelchInputOdrHz. Same convention as stage 1 and as fir.py's dec//2: the
   // output for a bucket is evaluated at the bucket's CENTRE, on the first row to
   // reach it, so the value sits in the middle of the interval it represents. Rows
   // can be missing (a window with no accel samples emits nothing), hence "first row
   // at or past the centre" rather than an exact timestamp match.
-  long bucket = t / kVacc10HzBucketMs;
+  long bucket = t / kWelchInputPeriodMs;
   if (bucket != curBucket_) {
     curBucket_ = bucket;
     bucketDone_ = false;
   }
-  if (!bucketDone_ && t >= bucket * (long)kVacc10HzBucketMs + (long)kFirS2CenterMs) {
+  if (!bucketDone_ && t >= bucket * (long)kWelchInputPeriodMs + (long)kFirS2CenterMs) {
     float s = fir2_.eval();
     pushWelch(isfinite(s) ? s : 0.0f);
     n10_++;
@@ -169,7 +169,7 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
   if (nSeg_ == 0) return false;
 
   const int N = kWelchSegLen;
-  const float df = kVaccFsHz / N;
+  const float df = (float)kWelchInputOdrHz / N;
   const float invSeg = 1.0f / (float)nSeg_;
 
   // Spectral moments + peak, over the elevation PSD (acc PSD / omega^4 * taper^2).

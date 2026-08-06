@@ -52,6 +52,17 @@ class WaveManager {
   // Serialise the front result into msgB ('W' ... 'E'), pop it, return the length.
   size_t updateTransmitMessage(void);
 
+#if DEBUG_WAVE_MSG
+  // Bench only (see DEBUG_WAVE_MSG in wave_config.h): push a synthetic result onto
+  // the SAME deque processReading feeds, so everything downstream runs unmodified.
+  void enqueueFakeResult(void);
+
+  // Dump the result that is about to be transmitted. Takes the stream as an argument
+  // rather than using Serial, because on the drifter Serial is never begun - the
+  // console is main.cpp's mySerial. Does NOT pop: call it before updateTransmitMessage.
+  void printPendingResult(Print &out) const;
+#endif
+
   byte msgB[wave_message_size];
 
  private:

@@ -423,6 +423,11 @@ void task_transmit() {
   // Wave analysis data (if any). Independent of the thermo queue: a wave result
   // rides along opportunistically whenever the base station is still listening.
   while (LORA.available && !wave_manager.wave_analysis_results.empty()){
+#if DEBUG_WAVE_MSG
+    // BEFORE updateTransmitMessage, which pops the result off the queue. mySerial,
+    // not Serial: Serial is never begun on the drifter.
+    wave_manager.printPendingResult(mySerial);
+#endif
     size_t wave_len = wave_manager.updateTransmitMessage();
     if (debug_serial){ mySerial.print("Sending W: "); mySerial.print(wave_len); mySerial.println(" bytes"); }
     message_data = LORA.sendData(wave_manager.msgB, (uint8_t)wave_len, 10000);
@@ -492,14 +497,37 @@ void loop() {
   //Debug print enable wave analysis and measurement period, and time since last measurement
 
 
+#if DEBUG_WAVE_MSG
+  // Bench mode: no capture at all. A synthetic result is queued on a short timer and
+  // then travels the PRODUCTION path (updateTransmitMessage -> LORA.sendData ->
+  // sd_writer). enable_wave_analysis is deliberately not consulted - the point is to
+  // test the message without configuring the buoy for a measurement campaign.
+  if (millis_time_corrected(sleep_cycles_wave_measurement) - wave_measurement_timer > debug_wave_msg_period){
+      wave_manager.enqueueFakeResult();
+      if (debug_serial){
+        mySerial.print(F("DEBUG_WAVE_MSG: queued fake result, queue depth "));
+        mySerial.println((uint32_t)wave_manager.wave_analysis_results.size());
+      }
+      sleep_cycles_wave_measurement = 0;
+      wave_measurement_timer = millis();
+  }
+#else
   if (LORA.enable_wave_analysis &&
       millis_time_corrected(sleep_cycles_wave_measurement) - wave_measurement_timer > LORA.measurement_period_wave_analysis){
       task_measure_waves();
   }
+#endif
 
   // Transmission protocol
-  if ((millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period) && 
-      (gps_manager.GPSReadings.size() > packet_count_send_treshold)) {  
+  bool transmission_due = millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period;
+  bool have_payload     = gps_manager.GPSReadings.size() > packet_count_send_treshold;
+#if DEBUG_WAVE_MSG
+  // The GPS threshold is the production trigger, but a bench unit indoors never gets
+  // a fix - so a pending wave result has to be reason enough to transmit, or the
+  // fake message would sit in the queue forever and test nothing.
+  have_payload = have_payload || !wave_manager.wave_analysis_results.empty();
+#endif
+  if (transmission_due && have_payload) {
         task_transmit();
   }
 

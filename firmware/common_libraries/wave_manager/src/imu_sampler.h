@@ -10,14 +10,14 @@
 #include "quat_delay.h"
 
 /*
-  One IMU row per kWindowMs, ported from ORB_test Imu.h.
+  One IMU row per kRowPeriodMs, ported from ORB_test Imu.h.
   Shared type: ImuSampler produces it, the analyzer and CSV logger consume it.
 
   ONE TIME BASE PER ROW. Every value here describes the same instant: the centre of
   the window, carried back by the decimating FIR's group delay (kFirS1DelayS, 66.7 ms
   at 960 Hz). That includes the quaternions, which are not filtered but ARE delayed
   by the same amount - see quat_delay.h for why those are two different decisions.
-  The row's timestamp, winStartMs, still names the window on the plain kWindowMs grid; it
+  The row's timestamp, winStartMs, still names the window on the plain kRowPeriodMs grid; it
   is a label for the window, not a claim about which instant the values describe.
 */
 struct ImuRow {
@@ -50,7 +50,7 @@ using ImuRowSink = void (*)(const ImuRow &);
   its neighbour is filtered.
 
   Cost note: a decimating FIR is paid for at its OUTPUT rate. push() is a store, run
-  at kImuOdrHz; eval() is the expensive part and runs at kOutputRateHz. That is what
+  at kImuOdrHz; eval() is the expensive part and runs at kRowOdrHz. That is what
   makes ten of them affordable, and it also means lowering the ROW rate does not make
   them cheaper by much - lowering the ODR does - see fir.h.
 */
@@ -168,7 +168,7 @@ class ImuSampler {
   uint32_t nAccDbg_ = 0, nGyrDbg_ = 0;
   double   sumAccMag2_ = 0.0, sumGyrMag2_ = 0.0;
 
-  // Windowing state: kWindowMs windows off a monotonic accel counter.
+  // Windowing state: kRowPeriodMs windows off a monotonic accel counter.
   uint32_t sessionStartMs_ = 0;
   bool     logStarted_ = false;
   uint32_t accelIdx_ = 0;
