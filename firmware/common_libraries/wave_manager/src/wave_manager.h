@@ -69,6 +69,11 @@ class WaveManager {
   static WaveManager *s_self;
   static void rowSinkTrampoline(const ImuRow &r);
   void onRow(const ImuRow &r);
+  // bool: false means the block did not reach the card in full, which the sampler
+  // turns into kRawFlagWriteFail on the next sync record. See onRawBlock.
+  static bool rawSinkTrampoline(const uint8_t *data, uint16_t len);
+  bool onRawBlock(const uint8_t *data, uint16_t len);
+  void writeRawHeader(void);        // kRawHeaderBytes: magic, rates, sensitivities
 
   // Session logging (ORB_test Logger style): one timestamped directory per capture.
   bool startSession(void);          // build stamp, mkdir _tmp, open imu/gps/ses, headers
@@ -87,7 +92,9 @@ class WaveManager {
   File     imuFile_;
   File     gpsFile_;
   File     sessionFile_;
-  bool     csvActive_ = false;
+  File     rawFile_;               // <stamp>_raw.bin, only when wave_raw_log
+  bool     csvActive_ = false;     // session opened (gps/ses/spec/ana), all log modes
+  bool     imuCsvActive_ = false;  // imu.csv specifically - false in WaveLogMode::Raw
   uint16_t rowsSinceSync_ = 0;
   char     logStamp_[16]   = "00000000_000000";  // YYYYMMDD_HHMMSS
   char     sessionDir_[40] = "";                  // waves/<stamp>_tmp

@@ -74,6 +74,7 @@ static constexpr char     wave_log_dir[]     = "waves";  // parent dir for sessi
 #define WAVE_SPEC_PREFIX     "spec"
 #define WAVE_ANA_PREFIX      "ana"
 #define WAVE_CFG_PREFIX      "cfg"
+#define WAVE_RAW_PREFIX      "raw"
 
 // Firmware build sequence, written to the session anchor so a log can be tied back
 // to the code that produced it (mirrors ORB_test kBuildSeq). Bump on release.
@@ -87,7 +88,7 @@ static constexpr uint16_t wave_build_seq     = 3;
 // -----------------------------------------------------------------------------
 // IMU: datarate (ODR) + power mode for accel AND gyro.
 // -----------------------------------------------------------------------------
-static constexpr uint16_t kImuOdrHz    = 480;   // 120/240/480/960 Hz
+static constexpr uint16_t kImuOdrHz    = 960;   // 120/240/480/960 Hz
 static constexpr uint8_t  kImuLowPower = 0;     // 1 = low power (ODR<=240), 0 = high performance
 static_assert(kImuOdrHz == 120 || kImuOdrHz == 240 || kImuOdrHz == 480 || kImuOdrHz == 960,
               "kImuOdrHz must be 120, 240, 480 or 960 Hz");
@@ -266,6 +267,91 @@ static_assert(1000 % kRowOdrHz == 0,
 // IMU debug: how often update() prints the effective accel/gyro sample rate + mean
 // magnitudes (ms). Only emitted when debug_serial is set. 0 disables the printout.
 static constexpr uint32_t imu_debug_print_period = {10*s_2_ms};  // 10 s
+
+// -----------------------------------------------------------------------------
+// Raw IMU log (<stamp>_raw.bin): every FIFO word, verbatim.
+//
+// imu.csv is the DECIMATED record - one row per kRowPeriodMs, after FIR stage 1. This
+// file is the undecimated one: the 6-byte payload of every FIFO word exactly as the
+// sensor produced it, so an offline re-analysis sees the samples the device saw
+// rather than a filtered summary of them. That is what wave_config.h's row-rate note
+// says was given up, and it is what makes the offline AHRS comparable to the on-board
+// one, which runs at kAhrsInputOdrHz rather than at the row rate.
+//
+// NOT decoded on the way out: no mg, no mdps, no half-float expansion. Decoding is
+// lossy in the sense that matters here - it bakes in the sensitivity constants, and
+// those are in the header, so the far side can redo it. It is also the expensive part,
+// and this runs inside the FIFO drain.
+//
+// TIME. There is no timestamp per word, deliberately: at kImuOdrHz = 480 the sample
+// period is 2.08 ms, so a whole-millisecond stamp would be COARSER than the data it
+// labels, while costing 4 bytes on a 7-byte record. The order of the words is the time
+// axis; a sync record per drain pins it to the clock with sub-ms resolution and makes
+// gaps explicit. sampleTms_ is a double that self-calibrates against the wall clock
+// (see ImuSampler), so the reconstructed axis is drift-free.
+//
+// LAYOUT, little-endian throughout:
+//   header, kRawHeaderBytes once at the top
+//   word   1 B tag_sensor + 6 B payload                       = kRawWordBytes
+//   sync   1 B kRawSyncTag + u32 t_us + u32 accel_n
+//                          + u32 millis + u16 n_words + u16 flags = kRawSyncBytes
+// A reader dispatches on the tag: kRawSyncTag means kRawSyncBytes, anything else means
+// kRawWordBytes. The two can never collide - tag_sensor is the top 5 bits of the FIFO
+// tag byte (see readFifoWord), so a sensor tag is at most 0x1F.
+// -----------------------------------------------------------------------------
+// Which of the two IMU logs a capture writes. They are independent files, not two
+// formats of one thing: imu.csv is the DECIMATED record the offline chain reads
+// (postprocess.py -> read_imu_rows, and everything built on it), raw.bin is the
+// undecimated one. Rates measured on a real capture: 15.7 kB/s and 8.6 kB/s.
+//
+// Csv  - what shipped before raw.bin existed.
+// Raw  - raw.bin only. Nothing offline reads it yet except rawlog.py, so this mode
+//        needs raw_to_csv.py in the loop before the usual tools work again.
+// Both - use this for the first raw captures: it is the only configuration where the
+//        reconstruction can be checked against the device's own imu.csv sample for
+//        sample, on the same capture.
+//
+// The on-board wave analysis is unaffected by all three - it consumes rows through the
+// row sink and never reads imu.csv - so ses/cfg/spec/ana are written regardless.
+// Note the two-level gate: wave_log_csv above is the MASTER switch for session logging
+// (no session directory at all when false, in any mode); wave_log_mode only chooses
+// which of the two IMU logs that session contains.
+// Madgwick 480 + SFLP 240 + BOTH gives overflows.
+enum class WaveLogMode : uint8_t { Csv = 0, Raw = 1, Both = 2 };
+static constexpr WaveLogMode wave_log_mode = WaveLogMode::Raw;
+
+static constexpr bool wave_mode_imu_csv(void) {
+  return wave_log_mode == WaveLogMode::Csv || wave_log_mode == WaveLogMode::Both;
+}
+static constexpr bool wave_mode_imu_raw(void) {
+  return wave_log_mode == WaveLogMode::Raw || wave_log_mode == WaveLogMode::Both;
+}
+static constexpr uint32_t kRawMagic          = 0x4257524FUL;  // "ORWB" little-endian
+static constexpr uint8_t  kRawFormatVersion  = 1;
+static constexpr uint8_t  kRawSyncTag        = 0xFF;
+static constexpr uint8_t  kRawWordBytes      = 7;
+static constexpr uint8_t  kRawSyncBytes      = 17;
+static constexpr uint8_t  kRawHeaderBytes    = 32;
+static constexpr uint16_t kRawBlockBytes     = 512;   // SD block; buffered, not per word
+static_assert(kRawSyncTag > 0x1F,
+              "the sync tag must not collide with a FIFO tag_sensor (top 5 bits)");
+static_assert(kRawBlockBytes >= kRawSyncBytes + kRawWordBytes,
+              "raw block must hold at least a sync record plus one word");
+
+// Sync-record flag bits. Adding bits does NOT need kRawFormatVersion bumped: the field
+// is already a uint16 in v1, and a decoder that does not know a bit ignores it.
+//
+// The two failures are not the same kind of thing, and the difference is the reason
+// both exist. FifoOvf means the SENSOR overwrote words: the file is intact, a stretch
+// of time is missing from it, and the time axis is compressed there. WriteFail means
+// THIS FILE lost bytes - and because the format is a byte stream where a record may
+// straddle a block, losing a partial block does not merely lose data, it desynchronises
+// every byte after it: the decoder reads a payload byte as a tag and keeps going. So a
+// capture with FifoOvf is usable with care; one with WriteFail is not trustworthy past
+// the flag, which is exactly why it must be recorded IN the stream rather than only in
+// ana.csv - the damage is positional.
+static constexpr uint16_t kRawFlagFifoOvf   = 0x0001;
+static constexpr uint16_t kRawFlagWriteFail = 0x0002;
 
 // -----------------------------------------------------------------------------
 // Bench test: synthetic wave message.

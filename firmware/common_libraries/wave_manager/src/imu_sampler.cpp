@@ -238,6 +238,86 @@ uint8_t ImuSampler::readFifoWord(uint8_t payload[6]) {
   return (uint8_t)(w[0] >> 3);
 }
 
+// -----------------------------------------------------------------------------
+// Raw log. Little-endian, layout documented at wave_raw_log in wave_config.h.
+// -----------------------------------------------------------------------------
+void ImuSampler::rawAppend(const uint8_t *p, uint8_t n) {
+  if (!rawSink_) return;
+  for (uint8_t i = 0; i < n; i++) {
+    rawBuf_[rawLen_++] = p[i];
+    if (rawLen_ >= kRawBlockBytes) {
+      // The buffer is dropped either way - there is nowhere to hold it, and stalling
+      // the drain to retry is the one thing guaranteed to overflow the FIFO. What is
+      // NOT dropped is the knowledge that it happened.
+      if (!rawSink_(rawBuf_, rawLen_)) {
+        nRawWriteFail_++;
+        rawWriteFailPending_ = true;
+      }
+      rawLen_ = 0;
+    }
+  }
+}
+
+// The FIFO word exactly as it came off the bus - no decoding, no scaling. The
+// sensitivity constants that would be baked in by decoding are in the file header
+// instead, so the far side can apply them (and a later correction to them does not
+// invalidate captures already on the card).
+void ImuSampler::rawEmitWord(uint8_t tag, const uint8_t payload[6]) {
+  if (!rawSink_) return;
+  uint8_t rec[kRawWordBytes];
+  rec[0] = tag;
+  for (uint8_t i = 0; i < 6; i++) rec[i + 1] = payload[i];
+  rawAppend(rec, kRawWordBytes);
+}
+
+// One per drain, written BEFORE that drain's words. Pins the sample axis to the
+// clock: t_us is the fractional sample time (sampleTms_ is a self-calibrating
+// double), accel_n is the cumulative accel count so a gap is arithmetic rather than
+// guesswork, and millis is when the drain actually ran - which is the measurement
+// that says whether SD stalls are threatening the FIFO.
+void ImuSampler::rawEmitSync(uint16_t nWords, uint16_t flags) {
+  if (!rawSink_) return;
+  uint8_t rec[kRawSyncBytes];
+  uint8_t o = 0;
+  rec[o++] = kRawSyncTag;
+  const uint32_t tUs = (uint32_t)(sampleTms_ * 1000.0);
+  const uint32_t ms  = millis();
+  const uint32_t vals[3] = {tUs, accelIdx_, ms};
+  for (uint8_t v = 0; v < 3; v++) {
+    rec[o++] = (uint8_t)(vals[v]);
+    rec[o++] = (uint8_t)(vals[v] >> 8);
+    rec[o++] = (uint8_t)(vals[v] >> 16);
+    rec[o++] = (uint8_t)(vals[v] >> 24);
+  }
+  // Fold in any block lost since the last sync. This is the only place the loss can
+  // be reported IN the stream, and it must be reported there: ana.csv can say a
+  // capture lost blocks, but not WHERE - and where is the whole question, because
+  // everything after the first loss is misaligned.
+  if (rawWriteFailPending_) flags |= kRawFlagWriteFail;
+  const uint16_t vals16[2] = {nWords, flags};
+  for (uint8_t v = 0; v < 2; v++) {
+    rec[o++] = (uint8_t)(vals16[v]);
+    rec[o++] = (uint8_t)(vals16[v] >> 8);
+  }
+  const uint32_t failBefore = nRawWriteFail_;
+  rawAppend(rec, kRawSyncBytes);
+  // Clear only if appending the report did not itself lose a block. When it did, the
+  // flag stays pending and the NEXT sync carries it - one record late in the file, but
+  // never silently dropped. Late-but-present is the right way round: the decoder's job
+  // is to stop trusting the tail, and it still does.
+  if (nRawWriteFail_ == failBefore) rawWriteFailPending_ = false;
+}
+
+void ImuSampler::flushRaw(void) {
+  if (rawSink_ && rawLen_ > 0) {
+    if (!rawSink_(rawBuf_, rawLen_)) {
+      nRawWriteFail_++;
+      rawWriteFailPending_ = true;  // no sync will follow; ana.csv is the only record
+    }
+    rawLen_ = 0;
+  }
+}
+
 // Payload -> three int16 in LSB order. The driver truncates its own conversion to
 // int32 (FIFO_Get_X_Axes returns whole mg), which throws away the sub-LSB range the
 // sensitivity actually provides; decoding here keeps it in float.
@@ -339,9 +419,15 @@ void ImuSampler::update(Print &dbg) {
   uint16_t nSamples = 0;
   imu_.FIFO_Get_Num_Samples(&nSamples);
 
+  // Sync record first, so the words that follow it are the ones it describes.
+  rawEmitSync(nSamples, full ? kRawFlagFifoOvf : 0);
+
   for (uint16_t i = 0; i < nSamples; i++) {
     uint8_t payload[6];
     const uint8_t tag = readFifoWord(payload);   // tag + data, one transfer
+    // EVERY word, including tags this code does not decode: the raw log is a record
+    // of what the sensor produced, not of what the wave chain happens to consume.
+    rawEmitWord(tag, payload);
     if (tag == 2) {  // accel (mg)
       float a[3];
       payloadToAxes(payload, kAccSensMgPerLsb, a);

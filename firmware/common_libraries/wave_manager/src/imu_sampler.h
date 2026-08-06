@@ -43,6 +43,15 @@ struct ImuRow {
 // back-fill the orientation fields; the AHRS now lives here, on the raw stream.
 using ImuRowSink = void (*)(const ImuRow &);
 
+// Raw-log sink: one filled block of <stamp>_raw.bin. See wave_raw_log in
+// wave_config.h for the record layout.
+//
+// Returns false if the block did not reach the card in full. The sampler cannot fix
+// that, but it must KNOW: a partial block desynchronises every byte after it, so the
+// next sync record carries kRawFlagWriteFail and the decoder can stop trusting the
+// file at the right place instead of quietly reading payload bytes as tags.
+using RawBlockSink = bool (*)(const uint8_t *data, uint16_t len);
+
 /*
   The ten series decimated per row. Which ten is not arbitrary: everything logged to
   imu.csv goes through the same filter, so an offline AHRS fed these columns sees the
@@ -115,6 +124,14 @@ class ImuSampler {
 
   void setRowSink(ImuRowSink sink) { rowSink_ = sink; }
 
+  // Raw log (wave_raw_log): the sink is handed whole blocks, never single records -
+  // a 7-byte write per FIFO word would put ~1200 SdFat calls a second inside the
+  // drain. At kRawBlockBytes it is ~20 a second instead.
+  void setRawSink(RawBlockSink sink) { rawSink_ = sink; }
+
+  // Push the partial block. Call at end of capture, or the tail is lost.
+  void flushRaw(void);
+
   uint32_t overflowCount() const { return nOverflow_; }
 
   // FIFO fills for the WHOLE capture, cleared only by resetWindowing. nOverflow_ is
@@ -125,6 +142,12 @@ class ImuSampler {
   // Windows where no raw sample landed on the centre and the FIR had to be read at
   // the window edge instead. Non-zero means FIFO gaps; logged to ana.csv.
   uint32_t firLateEvalCount() const { return nFirLateEval_; }
+
+  // Blocks the raw sink failed to write in full. Judge the FILE by this, the way
+  // overflowTotal() judges the CAPTURE: zero here with a non-zero overflowTotal is a
+  // rough but readable capture, whereas non-zero here means raw.bin is desynchronised
+  // past the first failure no matter how clean the sensor was.
+  uint32_t rawWriteFailCount() const { return nRawWriteFail_; }
 
  private:
   // INT1 watermark plumbing. attachInterrupt takes a plain function, so the ISR is a
@@ -154,8 +177,22 @@ class ImuSampler {
   // imu_debug_print_period ms (the ex-reportOncePerSecond, now interval-driven).
   void debugPrintStatus(Print &dbg);
 
+  // Raw log helpers. rawAppend flushes whenever the block is full, so a record may
+  // straddle a block boundary - the file is a byte stream, not an array of blocks.
+  void rawAppend(const uint8_t *p, uint8_t n);
+  void rawEmitWord(uint8_t tag, const uint8_t payload[6]);
+  void rawEmitSync(uint16_t nWords, uint16_t flags);
+
   LSM6DSV16XSensor imu_;
   ImuRowSink rowSink_ = nullptr;
+  RawBlockSink rawSink_ = nullptr;
+  uint8_t  rawBuf_[kRawBlockBytes];
+  uint16_t rawLen_ = 0;
+  uint32_t nRawWriteFail_ = 0;
+  // Sticky: set the moment a block is lost, cleared only once a sync record has
+  // actually carried it into the file. Without the stickiness the report could itself
+  // be the write that fails, and the loss would go unrecorded in the stream.
+  bool     rawWriteFailPending_ = false;
 
   uint32_t nOverflow_ = 0;
   uint32_t nOverflowTotal_ = 0;

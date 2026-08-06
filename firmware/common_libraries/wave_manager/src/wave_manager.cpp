@@ -1,6 +1,7 @@
 #include "wave_manager.h"
 
 #include <math.h>
+#include <string.h>
 #include <TimeLib.h>
 #include "IWatchdog.h"
 #include "parser_utils.h"
@@ -66,11 +67,58 @@ void WaveManager::rowSinkTrampoline(const ImuRow &r) {
   if (s_self) s_self->onRow(r);
 }
 
+bool WaveManager::rawSinkTrampoline(const uint8_t *data, uint16_t len) {
+  return s_self ? s_self->onRawBlock(data, len) : false;
+}
+
+// One filled block from the raw log. No sync() here on purpose: this runs inside the
+// FIFO drain, and a per-block flush to the card is exactly the stall the FIFO cannot
+// absorb. SdFat's own buffering plus the sync in stopSession is enough - a capture cut
+// by a reset loses the tail of the raw file, which is the same bargain imu.csv makes.
+//
+// The return value is not decoration. write() reports a SHORT write (card full, I/O
+// error) by returning fewer bytes, and discarding that was the difference between a
+// file that is missing a block and a file that LOOKS fine while every byte after the
+// gap is misparsed. The sampler turns a false into kRawFlagWriteFail on the next sync.
+bool WaveManager::onRawBlock(const uint8_t *data, uint16_t len) {
+  if (!rawFile_) return false;
+  return rawFile_.write(data, len) == (int)len;
+}
+
+// Self-describing header, so a capture can be decoded without the firmware that wrote
+// it - including the sensitivities, which is what turns the int16 payloads back into
+// mg and mdps. kRawHeaderBytes is fixed; the tail is reserved and zeroed.
+void WaveManager::writeRawHeader(void) {
+  uint8_t h[kRawHeaderBytes] = {0};
+  uint8_t o = 0;
+  auto put32 = [&](uint32_t v) {
+    h[o++] = (uint8_t)v;         h[o++] = (uint8_t)(v >> 8);
+    h[o++] = (uint8_t)(v >> 16); h[o++] = (uint8_t)(v >> 24);
+  };
+  auto put16 = [&](uint16_t v) { h[o++] = (uint8_t)v; h[o++] = (uint8_t)(v >> 8); };
+  auto putf  = [&](float f) { uint32_t b; memcpy(&b, &f, 4); put32(b); };
+
+  put32(kRawMagic);
+  h[o++] = kRawFormatVersion;
+  h[o++] = kRawWordBytes;
+  put16(wave_build_seq);
+  put16(kImuOdrHz);
+  put16((uint16_t)kSflpOdrHz);
+  putf(kAccSensMgPerLsb);          // int16 LSB -> mg
+  putf(kGyrSensMdpsPerLsb);        // int16 LSB -> mdps
+  put32((uint32_t)captureStart_);  // capture t=0 in UTC epoch seconds
+  put16(readingID_);
+  put16(kRawSyncBytes);
+  // Remaining bytes stay zero: reserved, and a reader must skip to kRawHeaderBytes
+  // rather than assume the fields end where this version stopped writing.
+  rawFile_.write(h, kRawHeaderBytes);
+}
+
 void WaveManager::onRow(const ImuRow &r) {
   analyzer_.ingest(r);  // the row arrives complete; the analyzer only consumes it
   rowCount_++;
 
-  if (!csvActive_) return;
+  if (!imuCsvActive_) return;   // Raw-only mode: the analyzer above still ran
   imuFile_.print(r.winStartMs); imuFile_.print(',');
   imuFile_.print(r.n);          imuFile_.print(',');
   imuFile_.print(r.ax, 3); imuFile_.print(','); imuFile_.print(r.ay, 3); imuFile_.print(','); imuFile_.print(r.az, 3); imuFile_.print(',');
@@ -109,6 +157,7 @@ uint8_t WaveManager::takeReading(void) {
   // first drain. csvActive_ spans take+process: spec/ana are added and the folder
   // renamed (_tmp -> final) in processReading -> stopSession.
   csvActive_ = false;
+  imuCsvActive_ = false;   // startSession sets it; a failed open must not leave it set
   if (wave_log_csv && sd_writer.active) {
     csvActive_ = startSession();
   }
@@ -134,8 +183,16 @@ uint8_t WaveManager::takeReading(void) {
     // length. Without it every session folder would claim its full reservation and
     // the tail would read as garbage. Safe to call whether or not preAllocate
     // succeeded: with no reservation the position already is the end of the file.
-    imuFile_.truncate();  imuFile_.sync();  imuFile_.close();
+    if (imuCsvActive_) { imuFile_.truncate(); imuFile_.sync(); imuFile_.close(); }
     gpsFile_.truncate();  gpsFile_.sync();  gpsFile_.close();
+    // The raw log's partial block has to be pushed BEFORE truncate(), or the tail is
+    // cut at the last full block and the final records are lost. Detaching the sink
+    // first stops a late drain from appending past the truncation point.
+    if (rawFile_) {
+      imu_.setRawSink(nullptr);
+      imu_.flushRaw();
+      rawFile_.truncate();  rawFile_.sync();  rawFile_.close();
+    }
     // sessionFile_ stays open: summary + rename happen in processReading.
   }
   captureEnd_ = now();
@@ -163,13 +220,16 @@ bool WaveManager::startSession(void) {
   }
 
   char nm[64];
-  snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_IMU_PREFIX);
-  imuFile_     = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
+  if (wave_mode_imu_csv()) {
+    snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_IMU_PREFIX);
+    imuFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
+    imuCsvActive_ = (bool)imuFile_;
+  }
   snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_GPS_PREFIX);
   gpsFile_     = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
   snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_SESSION_PREFIX);
   sessionFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
-  if (!imuFile_ || !gpsFile_ || !sessionFile_) {
+  if ((wave_mode_imu_csv() && !imuCsvActive_) || !gpsFile_ || !sessionFile_) {
     if (debug_serial) Serial.println("WaveManager: could not open session files");
     return false;
   }
@@ -182,7 +242,7 @@ bool WaveManager::startSession(void) {
   const uint32_t durationS = wave_measurement_duration / s_2_ms;
   const uint32_t imuBytes  = (uint32_t)kRowOdrHz * durationS * wave_imu_row_bytes_max;
   const uint32_t gpsBytes  = durationS * wave_gps_row_bytes_max;  // <= 1 row per fix per second
-  if (!imuFile_.preAllocate(imuBytes) && debug_serial) {
+  if (imuCsvActive_ && !imuFile_.preAllocate(imuBytes) && debug_serial) {
     Serial.print("WaveManager: imu preAllocate failed, "); Serial.print(imuBytes);
     Serial.println(" B - card may be full or fragmented");
   }
@@ -190,10 +250,34 @@ bool WaveManager::startSession(void) {
     Serial.println("WaveManager: gps preAllocate failed");
   }
 
-  imuFile_.println(kImuCsvHeader);
+  // Raw FIFO log. Opened last and treated as optional throughout: if it fails, the
+  // capture still runs and only the undecimated record is lost - the wave chain does
+  // not read this file. rawSink_ stays unset in that case, so the emit path costs a
+  // null check per word and nothing else.
+  if (wave_mode_imu_raw()) {
+    snprintf(nm, sizeof(nm), "%s/%s_%s.bin", sessionDir_, logStamp_, WAVE_RAW_PREFIX);
+    rawFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
+    if (rawFile_) {
+      // Word rate is accel + gyro + SFLP, each at its own ODR - the SFLP fusion runs
+      // at kSflpOdrHz, NOT at kImuOdrHz, so it is not simply 3x.
+      const uint32_t wordsPerS = 2u * kImuOdrHz + (uint32_t)kSflpOdrHz;
+      const uint32_t rawBytes  = kRawHeaderBytes + durationS *
+                                 (wordsPerS * kRawWordBytes + 16u * kRawSyncBytes);
+      if (!rawFile_.preAllocate(rawBytes) && debug_serial) {
+        Serial.print("WaveManager: raw preAllocate failed, "); Serial.print(rawBytes);
+        Serial.println(" B");
+      }
+      writeRawHeader();
+      imu_.setRawSink(&WaveManager::rawSinkTrampoline);
+    } else if (debug_serial) {
+      Serial.println("WaveManager: could not open raw log - continuing without it");
+    }
+  }
+
+  if (imuCsvActive_) { imuFile_.println(kImuCsvHeader); imuFile_.sync(); }
   gpsFile_.println("rel_ms,utc_epoch,lat_e7,lng_e7,gspeed_mms,head_e5,hacc_mm,fix,sats");
   sessionFile_.println("key,value");
-  imuFile_.sync(); gpsFile_.sync();
+  gpsFile_.sync();
   writeSessionAnchor();  // anchor keys (sessionFile_ kept open)
 
   // cfg.csv: write-once and close - the constants never change during a capture.
@@ -338,6 +422,8 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("gravity,");            f.println(kGravity, 5);
   f.print("mg_to_ms2,");          f.println(kMg2Ms2, 8);
   f.print("mdps_to_rads,");       f.println(kMdps2Rads, 8);
+  f.print("log_mode,");           f.println((uint8_t)wave_log_mode);  // 0=csv 1=raw 2=both
+  f.print("raw_format_version,"); f.println(kRawFormatVersion);
   f.print("vacc_bucket_ms,");     f.println(kWelchInputPeriodMs);
   // Cast is load-bearing: kWelchInputOdrHz is an integer now, and println(int, 3)
   // would print it in BASE 3 rather than with three decimals.
@@ -489,6 +575,12 @@ uint8_t WaveManager::processReading(void) {
       // as a hole - which puts false low-frequency energy exactly where omega^-4
       // amplifies it. Treat non-zero as grounds for distrusting Hs, not a footnote.
       af.print("fifo_overflows,"); af.println(imu_.overflowTotal());
+      // Blocks raw.bin lost. Distinct from fifo_overflows above: that one says the
+      // CAPTURE has holes, this one says the FILE does - and a byte-stream format
+      // misparses everything after a hole, so non-zero here condemns the raw log even
+      // when the capture itself was clean. Written in every log mode; it stays 0 when
+      // no raw log was open, which is what "nothing was lost" should look like.
+      af.print("raw_write_failures,"); af.println(imu_.rawWriteFailCount());
       af.print("welch_segments,");   af.println(analyzer_.segments());
       af.print("welch_seglen,");     af.println((int)kWelchSegLen);
       af.print("Hs,"); af.println(params.hs, 3);
