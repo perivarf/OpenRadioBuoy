@@ -47,9 +47,16 @@ struct StringMessage{
 
 
 
+/*
+  Signal quality of a link, in units of 1e4 * dB. Zero-initialised on purpose:
+  sendData only fills these in when the TxDone flag arrived, so a plain
+  `Message_Data m;` would otherwise be logged as stack garbage on a timeout.
+  Note that both are properties of the last RECEIVED packet - after a transmit
+  with no answer they are legitimately 0.
+*/
 struct Message_Data{
-  uint32_t RSSI;
-  uint32_t SNR;
+  uint32_t RSSI{0};
+  uint32_t SNR{0};
 };
 
 struct buoyInfo{

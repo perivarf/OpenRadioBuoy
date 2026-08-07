@@ -149,6 +149,19 @@ void setup() {
   */
   etl::error_handler::set_callback<etl_error_func>();
 
+#if DEBUG_WAVE_MSG
+  /*
+    Bench mode: the GPS is never brought up. A unit on a desk gets no fix, so the
+    wait-for-fix loop below would spin forever and the message path under test
+    would never be reached. Nothing in this build reads a position: the wave
+    capture is replaced by a synthetic result and task_measure_gps_temp is not
+    called, so timestamps stay boot-relative and that is fine.
+  */
+  sd_writer.logString("DEBUG_WAVE_MSG: GPS not started");
+  if (debug_serial){
+    mySerial.println(F("DEBUG_WAVE_MSG: skipping GPS init and fix wait"));
+  }
+#else
   sd_writer.logString("Beginning GPS");
 
   IWatchdog.reload();
@@ -180,9 +193,12 @@ void setup() {
   } else if (debug_serial){
     mySerial.println("WARNING: RTC not set - no valid GPS time yet (timestamps boot-relative)");
   }
+#endif
 
   /*
-    We need to read the attached thermistors for a buoy ID
+    We need to read the attached thermistors for a buoy ID. Kept in the bench build
+    too: it is what sets the thermo power pin, so the sleep() at the end of setup
+    would otherwise drive an unconfigured pin.
   */
   thermo_manager.begin(THERMO_DATA_PIN, THERMO_POWER_PIN);
 
@@ -193,6 +209,9 @@ void setup() {
   */
   wave_manager.begin();
 
+  // The deployment message is built from the GPS fix, so it has no meaning in the
+  // bench build where the receiver is never started.
+#if !DEBUG_WAVE_MSG
   gps_manager.getDeploymentMessage(LORA.WiO_ID);
   LORA.startup_timestamp = gps_manager.timestamp;
   IWatchdog.reload();
@@ -212,7 +231,8 @@ void setup() {
     sd_writer.logString(gps_manager.deploymentMessage, deployment_message_size);
     LORA.waitUntilReady();
   }
-  
+#endif
+
   LORA.lastTransmission = millis();
   if (IWatchdog.isReset() == true){
     //We check to see if the buoy crashed
@@ -231,7 +251,9 @@ void setup() {
     enabling them again in the loop. 
   */ 
   LowPower.begin();
-  gps_manager.shutdownGPS();
+#if !DEBUG_WAVE_MSG
+  gps_manager.shutdownGPS();  // nothing to shut down when begin() never ran
+#endif
   sd_writer.closeLog();
   thermo_manager.sleep();
   LORA.sleep();
@@ -496,28 +518,31 @@ void loop() {
 
   }
 
-  // Measurement loop (temperature and GPS)
+  // Measurement loop (temperature and GPS). Skipped entirely in the bench build:
+  // the GPS was never started, and a wave-message test has no use for either sensor.
+#if !DEBUG_WAVE_MSG
   if (millis_time_corrected(sleep_cycles_measurement) - measurement_timer > LORA.measurement_period){
       task_measure_gps_temp();
   }
+#endif
 
   // Wave measurement loop (IMU): independent gate, own enable flag and period.
   //Debug print enable wave analysis and measurement period, and time since last measurement
 
 
 #if DEBUG_WAVE_MSG
-  // Bench mode: no capture at all. A synthetic result is queued on a short timer and
-  // then travels the PRODUCTION path (updateTransmitMessage -> LORA.sendData ->
-  // sd_writer). enable_wave_analysis is deliberately not consulted - the point is to
-  // test the message without configuring the buoy for a measurement campaign.
-  if (millis_time_corrected(sleep_cycles_wave_measurement) - wave_measurement_timer > debug_wave_msg_period){
+  // Bench mode: no capture at all. A synthetic result is queued as soon as the queue
+  // runs dry and then travels the PRODUCTION path (updateTransmitMessage ->
+  // LORA.sendData -> sd_writer). enable_wave_analysis is deliberately not consulted -
+  // the point is to test the message without configuring the buoy for a measurement
+  // campaign. There is no timer: the transmit below empties the queue, so refilling it
+  // the moment it is empty gives back-to-back messages at the loop's own pace. One
+  // pending result is enough - queueing more would only test the queue.
+  if (wave_manager.wave_analysis_results.empty()){
       wave_manager.enqueueFakeResult();
       if (debug_serial){
-        mySerial.print(F("DEBUG_WAVE_MSG: queued fake result, queue depth "));
-        mySerial.println((uint32_t)wave_manager.wave_analysis_results.size());
+        mySerial.println(F("DEBUG_WAVE_MSG: queued fake result"));
       }
-      sleep_cycles_wave_measurement = 0;
-      wave_measurement_timer = millis();
   }
 #else
   if (LORA.enable_wave_analysis &&

@@ -382,12 +382,18 @@ static constexpr uint16_t kRawFlagWriteFail = 0x0002;
 // -----------------------------------------------------------------------------
 // Bench test: synthetic wave message.
 //
-// Enqueues a fabricated WaveResult on a short timer instead of running a capture,
-// so the serialise -> LoRa -> SD path can be exercised in seconds rather than after
-// a full wave_measurement_duration. What is faked is ONLY the source of the result:
+// Enqueues a fabricated WaveResult instead of running a capture, so the serialise ->
+// LoRa -> SD path can be exercised immediately rather than after a full
+// wave_measurement_duration. What is faked is ONLY the source of the result:
 // updateTransmitMessage, LORA.sendData and sd_writer.logByteArray are the production
 // ones, which is the whole point - a test that re-implemented the packing would
-// prove nothing about the packing that ships.
+// prove nothing about the packing that ships. The drifter loop refills the queue
+// whenever it is empty and keeps at most one result pending; there is no period to
+// configure here.
+//
+// The bench build also skips GPS entirely - no begin(), no fix wait, no GPS/thermo
+// measurement task - since a unit indoors never gets a fix and none of the faked
+// message depends on a position.
 //
 // A BUILD FLAG, not a constant to edit: -DDEBUG_WAVE_MSG=1 (env orb_drifter_test_wave).
 // A bool in this header would eventually be committed as true; an #if cannot be,
@@ -396,7 +402,6 @@ static constexpr uint16_t kRawFlagWriteFail = 0x0002;
 #ifndef DEBUG_WAVE_MSG
 #define DEBUG_WAVE_MSG 0
 #endif
-static constexpr uint32_t debug_wave_msg_period = {30*s_2_ms};  // 30 s between fakes
 
 // -----------------------------------------------------------------------------
 // Brake detection (linear |a| over threshold long enough within a window).

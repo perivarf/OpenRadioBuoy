@@ -46,7 +46,7 @@ static constexpr bool debug_SD                              {false};
 static constexpr bool transmitDeploymentMessage             {false};
 static constexpr bool debug_LED_enabled                     {false};
 static constexpr bool sleep_GPS                             {true};
-static constexpr bool perform_handshake                     {false}; //TRUE default
+static constexpr bool perform_handshake                     {true}; //TRUE default
 static constexpr bool enable_baseStation_parameter_updates  {false};
 static constexpr bool enable_recovery_beacon                {true};
 static constexpr bool log_every_reading                     {true};

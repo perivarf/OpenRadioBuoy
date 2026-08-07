@@ -383,6 +383,15 @@ Message_Data LoRa_Transceiver::sendData(byte * message, uint8_t msgSize,  uint32
     operationDone = false;
     message_data.RSSI = (uint32_t) 1e4*radio.getRSSI();
     message_data.SNR  = (uint32_t) 1e4*radio.getSNR();
+  } else if (debug_serial){
+    // No TxDone within message_send_time: the packet did NOT go out. Worth saying
+    // out loud, because the RSSI/SNR logged below are 0 either way - they describe
+    // the last received packet, so a transmit that nobody answers reads the same
+    // as a transmit that never happened.
+    Serial.print("sendData: no TxDone after ");
+    Serial.print(millis() - start_send);
+    Serial.print(" ms, startTransmit code ");
+    Serial.println(transmissionState);
   }
   listenTime -= millis() - start_send;
   return message_data;
