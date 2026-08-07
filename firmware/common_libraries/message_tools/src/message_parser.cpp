@@ -1,7 +1,51 @@
 #include "message_parser.h"
 #include "parser_utils.h"
+#include "sd_writer.h"
 
 Message_Parser MESSAGE_PARSER;
+
+void print_wave_analysis_message(const wave_analysis_Reading &w)
+{
+    sd_writer.debugSerialPrint("wave info - reading id: ");
+    sd_writer.debugSerialPrint(w.reading_ID);
+    sd_writer.debugSerialPrint(", Hs: ");
+    sd_writer.debugSerialPrint((float)w.Hs / scale_factor);
+    sd_writer.debugSerialPrint(" m, Tz: ");
+    sd_writer.debugSerialPrint((float)w.Tz / scale_factor);
+    sd_writer.debugSerialPrint(" s, Tc: ");
+    sd_writer.debugSerialPrint((float)w.Tc / scale_factor);
+    sd_writer.debugSerialPrint(" s, Tp: ");
+    sd_writer.debugSerialPrint((float)w.Tp / scale_factor);
+    sd_writer.debugSerialPrint(" s, max_value: ");
+    sd_writer.debugSerialPrintln((float)w.max_value / scale_factor);
+
+    /*
+      Elevation PSD spectrum, welch_bins consecutive bins. Which frequencies they
+      cover is set drifter-side and logged with the capture; it is deliberately
+      not a shared constant, so do not label these in Hz here. Values are
+      normalised to the peak (0-65535); absolute PSD = value/65535 * max_value.
+    */
+    sd_writer.debugSerialPrintln("wave spectrum (normalised 0-65535):");
+    for (size_t i = 0; i < welch_bins; i++){
+      sd_writer.debugSerialPrint((float)w.wave_spectrum[i]);
+      sd_writer.debugSerialPrint(" ");
+    }
+    sd_writer.debugSerialPrintln("");
+
+    /*
+      Formatted through sprintf rather than debugSerialPrint(float): that
+      overload is the only numeric one, and an epoch near 1.77e9 does not survive
+      a float round trip (24-bit mantissa -> rounded to the nearest 128 s). These
+      are also the fields that wrap if the sender's RTC was never set, so they
+      need to be exact to be worth printing at all.
+    */
+    char ts[80];  // worst case is exactly 64 with three wrapped uint32s; leave margin
+    sprintf(ts, "timestamps: start %lu, end %lu, span %lu s",
+            (unsigned long)w.timestamp_start,
+            (unsigned long)w.timestamp_end,
+            (unsigned long)(w.timestamp_end - w.timestamp_start));
+    sd_writer.debugSerialPrintln(ts);
+}
 // The new structure is "Tn(n*s*xxxx)ttttttttE"
 temperature_Reading Message_Parser::parse_temperature_message(byte *msg)
 {

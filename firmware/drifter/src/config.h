@@ -60,6 +60,16 @@ static constexpr uint32_t maximal_measurement_period         {30*min_2_s*s_2_ms}
 static constexpr uint32_t scale_factor                       {100000};
 static constexpr uint32_t thermometre_pause_between_readings {300};
 
+/*
+  Number of spectrum bins in a wave-analysis ('W') message. This is part of the
+  wire contract, not a local tuning knob: readings.h sizes
+  wave_analysis_Reading::wave_spectrum and wave_message_size from it, so drifter
+  and basestation MUST carry the same value. A mismatch does not fail to
+  compile - it silently shifts every field after the spectrum.
+  Keep in sync with basestation/src/config.h.
+*/
+static constexpr size_t welch_bins {51};
+
 
 // Enable or disable parameters
 static constexpr bool remove_outliers                       {true};
@@ -79,6 +89,18 @@ static constexpr bool log_every_reading                     {true};
 static constexpr bool resync_RTC_using_GPS                  {true};
 static constexpr bool enable_bootloader_menu                {true};
 static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
+
+/*
+  Bench test of the wave ('W') message. Set from the build, not here: the
+  orb_drifter_test_wave environment in platformio.ini passes -DDEBUG_WAVE_MSG=1.
+  In that build the GPS is never started and the GPS/thermo measurement is
+  skipped, so a synthetic wave message can be sent indoors without a fix; the
+  handshake and the rest of the transmit path are unchanged. Defaults to 0 so
+  the normal orb_drifter build compiles exactly as before.
+*/
+#ifndef DEBUG_WAVE_MSG
+#define DEBUG_WAVE_MSG 0
+#endif
 
 // Debug console on USART1, the header pins on this PCB. The ROM bootloader
 // listens on the same pair, so the menu and the flashing use one cable.

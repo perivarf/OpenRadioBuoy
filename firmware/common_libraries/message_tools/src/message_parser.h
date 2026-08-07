@@ -28,4 +28,16 @@ class Message_Parser{
 };
 
 extern Message_Parser MESSAGE_PARSER;
+
+/*
+  Print a decoded wave-analysis message to the debug console (and the debug file,
+  when one is open).
+
+  Shared deliberately: the base station prints this on reception, and the
+  drifter's DEBUG_WAVE_MSG bench build prints the same thing before transmitting,
+  so the two consoles can be diffed line for line to tell a codec fault from a
+  radio fault. That only works if there is exactly one implementation - two
+  approximately equal copies would drift and quietly invalidate the comparison.
+*/
+void print_wave_analysis_message(const wave_analysis_Reading &w);
 #endif

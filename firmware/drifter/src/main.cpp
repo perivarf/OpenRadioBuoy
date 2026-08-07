@@ -146,6 +146,17 @@ void setup() {
   */
   etl::error_handler::set_callback<etl_error_func>();
 
+#if DEBUG_WAVE_MSG
+  /*
+    Bench mode: the GPS is never brought up. A unit on a desk gets no fix, so the
+    wait-for-fix loop below would spin forever and the wave message under test
+    would never be reached.
+  */
+  sd_writer.logString("DEBUG_WAVE_MSG: GPS not started");
+  if (debug_serial){
+    mySerial.println(F("DEBUG_WAVE_MSG: skipping GPS init and fix wait"));
+  }
+#else
   sd_writer.logString("Beginning GPS");
 
   IWatchdog.reload();
@@ -164,13 +175,18 @@ void setup() {
   }
 
   gps_manager.processReadings(false);
+#endif
 
   /*
     We need to read the attached thermistors for a buoy ID
   */
   thermo_manager.begin(THERMO_DATA_PIN, THERMO_POWER_PIN);
 
+#if !DEBUG_WAVE_MSG
+  // Skipped on the bench: getDeploymentMessage reads GPSReadings.back(), and
+  // without a fix that deque is empty.
   gps_manager.getDeploymentMessage(LORA.WiO_ID);
+#endif
   LORA.startup_timestamp = gps_manager.timestamp;
   IWatchdog.reload();
   if (debug_serial){
@@ -207,7 +223,9 @@ void setup() {
     enabling them again in the loop. 
   */ 
   LowPower.begin();
-  gps_manager.shutdownGPS();
+#if !DEBUG_WAVE_MSG
+  gps_manager.shutdownGPS();  // never started in bench mode
+#endif
   sd_writer.closeLog();
   thermo_manager.sleep();
   LORA.sleep();
@@ -287,7 +305,150 @@ void task_measure_gps_temp() {
   sd_writer.closeLog();
   IWatchdog.reload();
 }
-  
+
+
+#if DEBUG_WAVE_MSG
+/*
+  Bench test of the wave-analysis ('W') message. There is no wave_manager on this
+  PCB yet, so the whole producer side lives here: a synthetic result, the
+  serialiser, and a console dump. The point is to exercise the wire format and
+  the base station's parser end to end without an IMU or a wave capture.
+
+  The byte layout below is the contract with
+  Message_Parser::parse_wave_analysis_message. Note the on-air field order is
+  Hs, Tc, Tp, Tz - NOT the Hs/Tz/Tc/Tp order the base station happens to print
+  them in. Getting that wrong is the easiest mistake to make here, which is why
+  the test values are deliberately distinct and not round.
+*/
+struct TestWaveResult {
+  uint16_t reading_ID;
+  float    Hs;         // significant wave height (m)
+  float    Tc;         // crest period (s)
+  float    Tp;         // peak period (s)
+  float    Tz;         // zero-crossing period (s)
+  float    max_value;  // peak elevation PSD (m^2/Hz)
+  uint16_t wave_spectrum[welch_bins];  // normalised to the peak, 0-65535
+  time_t   timestamp_start;
+  time_t   timestamp_end;
+};
+
+static TestWaveResult make_test_wave_result(void){
+  static uint16_t test_reading_ID = 0;
+
+  TestWaveResult res{};
+  res.reading_ID = ++test_reading_ID;
+
+  // Deliberately not round numbers, and all different from each other: if the
+  // fixed-point scaling or the field order is wrong on the receiving side,
+  // distinct odd values say so immediately, where 1.0/2.0/3.0 could line up
+  // plausibly after a swap.
+  res.Hs        = 1.37f;
+  res.Tc        = 2.53f;
+  res.Tp        = 6.91f;
+  res.Tz        = 4.29f;
+  res.max_value = 0.0842f;
+
+  // A single smooth peak. The wire value is bin/peak * 65535, so the far side
+  // reconstructs the absolute PSD as value/65535 * max_value. The peak sits off
+  // centre so a mirrored or off-by-one bin axis is visible at a glance.
+  const float peakBin = 0.35f * (float)welch_bins;
+  const float width   = 0.12f * (float)welch_bins;
+  for (size_t j = 0; j < welch_bins; j++){
+    const float d    = ((float)j - peakBin) / width;
+    const float norm = expf(-0.5f * d * d);
+    res.wave_spectrum[j] = (uint16_t)lroundf(norm * 65535.0f);
+  }
+
+  /*
+    time_t is unsigned long, and the RTC is never synced in this build (no GPS),
+    so now() starts at 0 and counts up from there. Deriving the pair as
+    now() - 30 min therefore wraps timestamp_start around to ~4.29e9 for the
+    first half hour of runtime. Anchor to a fixed plausible instant instead and
+    let now() only advance it, so both ends are always sane and ordered.
+  */
+  static constexpr time_t test_wave_epoch = 1767225600UL;  // 2026-01-01 00:00:00 UTC
+  res.timestamp_start = test_wave_epoch + now();
+  res.timestamp_end   = res.timestamp_start + 30*min_2_s;
+
+  return res;
+}
+
+/*
+  Serialise into msgB as 'W' ... 'E', matching parse_wave_analysis_message.
+  Floats go out as fixed-point scaled by scale_factor.
+*/
+static void build_test_wave_message(byte (&msgB)[wave_message_size], const TestWaveResult &res){
+  auto toFixed = [](float v) -> uint32_t {
+    if (!(v > 0.0f)) return 0;                       // undefined or negative -> 0
+    double scaled = (double)v * (double)scale_factor;
+    if (scaled > 4294967295.0) return 0xFFFFFFFFUL;  // clamp to uint32 range
+    return (uint32_t)llround(scaled);
+  };
+
+  uint8_t offset = 0;
+  msgB[offset++] = 'W';
+  msg_insert_uint(msgB, res.reading_ID, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, toFixed(res.Hs),        offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, toFixed(res.Tc),        offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, toFixed(res.Tp),        offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, toFixed(res.Tz),        offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, toFixed(res.max_value), offset, wave_message_size, offset, true);
+  for (size_t i = 0; i < welch_bins; i++){
+    msg_insert_uint(msgB, res.wave_spectrum[i], offset, wave_message_size, offset, true);
+  }
+  msg_insert_uint(msgB, (uint32_t)res.timestamp_start, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)res.timestamp_end,   offset, wave_message_size, offset, true);
+  msgB[offset++] = 'E';
+}
+
+/*
+  Decode the bytes we just serialised and print them with print_wave_analysis_message
+  - the very same function the base station calls on reception - so the two
+  consoles can be diffed line for line. If they agree, the codec is right and any
+  difference is on the air; if they disagree here, the fault is in the serialiser.
+
+  parse_wave_analysis_message is the base station's own parser too, so this is a
+  real round trip through the wire format, not a re-print of the source values.
+*/
+static void print_test_wave_message(byte (&msgB)[wave_message_size]){
+  wave_analysis_Reading w = MESSAGE_PARSER.parse_wave_analysis_message(msgB);
+  print_wave_analysis_message(w);
+
+  mySerial.print(F("raw ")); mySerial.print((uint32_t)wave_message_size);
+  mySerial.println(F(" bytes:"));
+  for (size_t j = 0; j < wave_message_size; j++){
+    if (msgB[j] < 0x10) mySerial.print('0');
+    mySerial.print(msgB[j], HEX); mySerial.print(' ');
+  }
+  mySerial.println();
+}
+
+/*
+  Send one synthetic wave message down the production path: same sendData / SD
+  logging pattern as the G and T messages in task_transmit.
+*/
+void task_test_wave(void){
+  TestWaveResult res = make_test_wave_result();
+  byte waveMsgB[wave_message_size];
+  build_test_wave_message(waveMsgB, res);
+
+  if (debug_serial){
+    mySerial.print(F("Sending W: ")); mySerial.print(wave_message_size);
+    mySerial.println(F(" bytes"));
+    print_test_wave_message(waveMsgB);
+  }
+
+  Message_Data message_data = LORA.sendData(waveMsgB, wave_message_size, 10000);
+  IWatchdog.reload();
+  delay(500);
+  sd_writer.logByteArray(waveMsgB, wave_message_size);
+  sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
+  LORA.packet_count++;
+  delay(200);
+  IWatchdog.reload();
+}
+#endif  // DEBUG_WAVE_MSG
+
 
 void task_transmit() {
 
@@ -365,6 +526,14 @@ void task_transmit() {
     delay(500);
   }
   
+#if DEBUG_WAVE_MSG
+  // The G/T loop above runs zero rounds on the bench (the thermo queue is empty
+  // without task_measure_gps_temp), so this is the only payload of the cycle.
+  if (LORA.available){
+    task_test_wave();
+  }
+#endif
+
   // Wrap up transmission, wait for base station instructions
   if (LORA.available){
     LORA.transmitFinished(thermo_manager.temperatures.size());
@@ -415,13 +584,22 @@ void loop() {
   }
 
   // Measurement loop (temperature and GPS)
+#if !DEBUG_WAVE_MSG
   if (millis_time_corrected(sleep_cycles_measurement) - measurement_timer > LORA.measurement_period){
       task_measure_gps_temp();
   }
-  
+#endif
+
   // Transmission protocol
-  if ((millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period) && 
-      (gps_manager.GPSReadings.size() > packet_count_send_treshold)) {  
+  bool transmission_due = millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period;
+  bool have_payload     = gps_manager.GPSReadings.size() > packet_count_send_treshold;
+#if DEBUG_WAVE_MSG
+  // The GPS threshold is the production trigger, but a bench unit indoors never
+  // gets a fix - so the test wave message has to be reason enough to transmit,
+  // or it would never go out at all.
+  have_payload = true;
+#endif
+  if (transmission_due && have_payload) {
         task_transmit();
   }
 
