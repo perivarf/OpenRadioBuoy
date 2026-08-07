@@ -50,7 +50,74 @@ void LoRa_Transceiver::beginRadio(double freq, double bw, int sf, int cr, int po
   packet_count = 0;
   listening = false;
   delay(200);
+  if (debug_serial){
+    reportModuleDiagnostics(freq);
+  }
   IWatchdog.reload();
+}
+
+
+/*
+  Module report, printed once from beginRadio(). Both of these fail silently
+  otherwise - the radio reports RADIOLIB_ERR_NONE and then simply does not reach
+  anyone.
+
+  Band variant: this unit is a RAK3172-9-SM-NI, i.e. the base model without TCXO.
+  Per the datasheet the hardware splits into RAK3172(L) (EU433/CN470) and
+  RAK3172(H) (EU868/US915/AU915/KR920/AS923/IN865/RU864); 863 MHz needs (H),
+  because the matching network is band-specific and no firmware setting fixes a
+  mismatch. band_strap_pin reads which one is fitted.
+
+  MUST run before the IMU is started: on this PCB the strap pin doubles as the
+  IMU's INT1 (see band_strap_pin in the header). beginRadio() is called from
+  setup() well before wave_manager.begin(), so the read here is valid.
+
+  Device errors: XOSC_START_ERR is what a TCXO/XTAL mismatch looks like - the
+  reference oscillator never starts, and the base RAK3172 has no TCXO (only the
+  -T/-TE/-F variants do), which is why beginRadio passes tcxoVoltage = 0.
+*/
+void LoRa_Transceiver::reportModuleDiagnostics(double freq){
+  pinMode(band_strap_pin, INPUT);
+  delay(1);
+  bool high_band = (digitalRead(band_strap_pin) == HIGH);
+
+  Serial.print("Radio begin at ");
+  Serial.print(freq);
+  Serial.print(" MHz, state ");
+  Serial.println(state);
+
+  Serial.print("Module band strap: ");
+  if (high_band){
+    Serial.println("HIGH -> RAK3172(H), covers 863 MHz");
+  } else {
+    Serial.println("LOW -> RAK3172(L) 433/470 MHz - WRONG BAND for 863 MHz");
+  }
+
+  uint16_t errs = radio.getDeviceErrors();
+  Serial.print("Device errors: 0x");
+  Serial.println(errs, HEX);
+  if (errs & RADIOLIB_SX126X_XOSC_START_ERR){
+    Serial.println("  XOSC_START_ERR - reference oscillator did not start (TCXO/XTAL mismatch)");
+  }
+  if (errs & RADIOLIB_SX126X_PLL_LOCK_ERR){
+    Serial.println("  PLL_LOCK_ERR - PLL failed to lock");
+  }
+  if (errs & RADIOLIB_SX126X_IMG_CALIB_ERR){
+    Serial.println("  IMG_CALIB_ERR - image calibration failed");
+  }
+  if (errs & RADIOLIB_SX126X_PLL_CALIB_ERR){
+    Serial.println("  PLL_CALIB_ERR");
+  }
+  if (errs & RADIOLIB_SX126X_ADC_CALIB_ERR){
+    Serial.println("  ADC_CALIB_ERR");
+  }
+  if (errs & RADIOLIB_SX126X_RC13M_CALIB_ERR){
+    Serial.println("  RC13M_CALIB_ERR");
+  }
+  if (errs & RADIOLIB_SX126X_RC64K_CALIB_ERR){
+    Serial.println("  RC64K_CALIB_ERR");
+  }
+  delay(100);
 }
 
 

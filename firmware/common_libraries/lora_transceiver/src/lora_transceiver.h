@@ -13,6 +13,18 @@
 //This function is difficult to weave into a class structure
 void setFlag(void);
 
+/*
+  RadioLib keeps getDeviceErrors() protected unless the whole library is built with
+  RADIOLIB_GODMODE. The SX126x error register is the only place XOSC_START_ERR and
+  PLL_LOCK_ERR surface, and both are silent killers on a fresh board, so re-export
+  just that one method instead of opening up the library wholesale.
+*/
+class STM32WLx_Diag : public STM32WLx {
+  public:
+    explicit STM32WLx_Diag(STM32WLx_Module * mod) : STM32WLx(mod) {}
+    using SX126x::getDeviceErrors;
+};
+
 static volatile bool operationDone = false;
 
  
@@ -92,8 +104,22 @@ class LoRa_Transceiver{
     //BST utils
     buoyInfo initEmptyBuoy();
     buoyInfo findBuoy(uint32_t);    
+    // One-shot module report after begin() - band variant and SX126x device errors.
+    // See the definition for why it has to run this early.
+    void reportModuleDiagnostics(double freq);
   private:
-    STM32WLx radio = new STM32WLx_Module();
+    /*
+      RAK3172 pin 35 carries a 10 kOhm pull INSIDE the module: up on the (H) high-band
+      part (EU868/US915/AS923/...), down on the (L) part (EU433/CN470). Reading it
+      identifies which module is soldered on.
+
+      This PCB also routes the IMU's INT1 to the same pin (INT1_IMU_PIN in
+      common_config.h), so the strap is only readable before the IMU is brought up -
+      after that the pin carries INT1, not the strap.
+    */
+    static constexpr uint32_t band_strap_pin = PB12;
+
+    STM32WLx_Diag radio{new STM32WLx_Module()};
     const uint32_t rfswitch_pins[5] = {PB8, PC13, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC};
     const Module::RfSwitchMode_t rfswitch_table[4] = {
       {STM32WLx::MODE_IDLE,  {LOW,  LOW}},
