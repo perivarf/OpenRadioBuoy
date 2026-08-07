@@ -63,6 +63,27 @@ analog_Reading Message_Parser::parse_analog_message(byte* msg)
     return analog_reading_packet;
 }
 
+wave_analysis_Reading Message_Parser::parse_wave_analysis_message(byte *msg)
+{
+    wave_analysis_Reading wa_reading_packet;
+    uint8_t offset = 1;
+
+    wa_reading_packet.reading_ID = msg_extract_uint<uint16_t>(msg, offset, true, offset);
+    wa_reading_packet.Hs         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    wa_reading_packet.Tc         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    wa_reading_packet.Tp         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    wa_reading_packet.Tz         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    wa_reading_packet.max_value  = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+
+    for (size_t i = 0; i < welch_bins; i++)
+        wa_reading_packet.wave_spectrum[i] = msg_extract_uint<uint16_t>(msg, offset, true, offset);
+
+    wa_reading_packet.timestamp_start = msg_extract_uint<time_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_end   = msg_extract_uint<time_t>(msg, offset, true, offset);
+
+    return wa_reading_packet;
+}
+
 // Buoy infor structure is EMxytttteE
 buoyInfoReading Message_Parser::parse_buoy_info_message(byte *msg)
 {

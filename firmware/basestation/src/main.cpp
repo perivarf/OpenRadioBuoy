@@ -318,6 +318,43 @@ void loop()
             messageQueue.push(qMsg);
 
           }
+          else if (LORA.byte_msg.byteMsg[0] == 'W')
+          {
+            // Wave analysis message: queue it for uplink (same path as G/T/A) and
+            // print the derived parameters. Fixed-point fields are /scale_factor.
+            BuoyMessage *qMsg = new BuoyMessage;
+            qMsg->byteMsg = new ByteMessage;
+            qMsg->rssi = rssi;
+            qMsg->byteMsg->numBytes = LORA.byte_msg.numBytes;
+            memcpy(qMsg->byteMsg->byteMsg, LORA.byte_msg.byteMsg, LORA.byte_msg.numBytes);
+            messageQueue.push(qMsg);
+
+            wave_analysis_Reading w = MESSAGE_PARSER.parse_wave_analysis_message(LORA.byte_msg.byteMsg);
+            sd_writer.debugSerialPrint("wave info - reading id: ");
+            sd_writer.debugSerialPrint(w.reading_ID);
+            sd_writer.debugSerialPrint(", Hs: ");
+            sd_writer.debugSerialPrint((float)w.Hs / scale_factor);
+            sd_writer.debugSerialPrint(" m, Tz: ");
+            sd_writer.debugSerialPrint((float)w.Tz / scale_factor);
+            sd_writer.debugSerialPrint(" s, Tc: ");
+            sd_writer.debugSerialPrint((float)w.Tc / scale_factor);
+            sd_writer.debugSerialPrint(" s, Tp: ");
+            sd_writer.debugSerialPrint((float)w.Tp / scale_factor);
+            sd_writer.debugSerialPrint(" s, max_value: ");
+            sd_writer.debugSerialPrintln((float)w.max_value / scale_factor);
+
+            // Elevation PSD spectrum, welch_bins consecutive bins. Which frequencies
+            // they cover is set drifter-side and logged with the capture; it is
+            // deliberately not a shared constant, so do not label these in Hz here.
+            // Values are normalised to the peak (0-65535); absolute PSD =
+            // value/65535 * max_value.
+            sd_writer.debugSerialPrintln("wave spectrum (normalised 0-65535):");
+            for (size_t i = 0; i < welch_bins; i++){
+              sd_writer.debugSerialPrint((float)w.wave_spectrum[i]);
+              sd_writer.debugSerialPrint(" ");
+            }
+            sd_writer.debugSerialPrintln("");
+          }
           else if (LORA.byte_msg.byteMsg[0] == 'E' && LORA.byte_msg.byteMsg[1] == 'M')
           {
             sd_writer.debugSerialPrintln("end message");

@@ -100,5 +100,6 @@ static           uint32_t motion_treshold                   {2000}; // m/s, divi
 static constexpr bool enable_rescue_from_notehub            {true}; 
 static constexpr float LoRa_freq_beacon                     {868.00};
 
+static constexpr size_t welch_bins {51};
 
 #endif

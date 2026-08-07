@@ -45,6 +45,35 @@ struct analog_Reading
     time_t timestamp;
 };
 
+struct wave_analysis_Reading
+{
+    uint16_t reading_ID;
+    uint32_t Hs;
+    uint32_t Tc;
+    uint32_t Tp;
+    uint32_t Tz;
+    uint32_t max_value;
+    uint16_t wave_spectrum[welch_bins];
+    time_t timestamp_start;
+    time_t timestamp_end;
+};
+
+/*
+  On-wire size of a wave-analysis message, framed 'W' ... 'E'. Must match the byte
+  layout produced by the drifter and consumed by
+  Message_Parser::parse_wave_analysis_message: tag + reading_ID(u16) +
+  {Hs,Tc,Tp,Tz,max_value}(5x u32) + wave_spectrum(welch_bins x u16) +
+  {timestamp_start,timestamp_end}(2x time_t) + trailing 'E'.
+
+  Whether it fits in a given device's ByteMessage buffer is asserted in
+  message_parser.h, i.e. only for the targets that actually handle wave messages -
+  this header is also pulled in (via lora_transceiver.h) by the drifter, whose
+  max_message_length is smaller and which neither sends nor receives them.
+*/
+static constexpr uint8_t wave_message_size =
+    1 + sizeof(uint16_t) + 5 * sizeof(uint32_t)
+    + welch_bins * sizeof(uint16_t) + 2 * sizeof(time_t) + 1;
+
 struct buoyInfoReading
 {
     int32_t sent_packets;
