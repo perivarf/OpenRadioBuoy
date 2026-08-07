@@ -23,7 +23,6 @@ static constexpr uint32_t DEBUG_SERIAL_RX_PIN           {PB7};
 // WiO operating modes
 static constexpr uint8_t BUOY_MODE   {0};
 static constexpr uint8_t BST_MODE    {1};
-static constexpr uint8_t MOORED_MODE {2};
 
 /*
   Bus wiring on this PCB (same board for drifter and basestation).
@@ -47,7 +46,7 @@ static constexpr uint32_t I2C_SCL_PIN    {PA12};
 // and RX for the link to work; the per-device ones (LoRa_power, frequencies)
 // live in each config.h.
 static constexpr float    LoRa_bw            {125.0};
-static constexpr uint8_t  LoRa_sf            {12};
+static constexpr uint8_t  LoRa_sf            {8};
 static constexpr uint8_t  LoRa_cr            {6};
 static constexpr float    LoRa_freq_beacon   {868.0};
 static constexpr uint32_t max_radio_wait_time {40000};

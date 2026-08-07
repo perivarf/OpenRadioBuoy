@@ -87,6 +87,11 @@ class SDWriter{
     void debugSerialPrint(float number);
     void debugSerialPrintln(const char * line);
     void debugSerialPrintln(float number);
+    // The one-argument float overloads print Arduino's default two decimals, which is
+    // too coarse for the wave parameters (max_value is ~1e-2 m^2/Hz). Pass digits
+    // explicitly; digits = 0 also renders an integer-valued float without ".00".
+    void debugSerialPrint(float number, int digits);
+    void debugSerialPrintln(float number, int digits);
     int8_t debugByteArray(byte * array, int length);
     void closeDebug(void);
     uint8_t mode = OLB_SD_INACTIVE;

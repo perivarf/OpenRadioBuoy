@@ -3,6 +3,18 @@
 
 LoRa_Transceiver LORA;
 
+/*
+  Reference oscillator supply on DIO3, in volts. Zero means the reference is a plain
+  32 MHz crystal and DIO3 is left alone.
+
+  Do NOT raise this and do not call setTCXO(). The module fitted here has no TCXO
+  even though the schematic calls for a -T part, so configuring one gives
+  XOSC_START_ERR (0x20) and startTransmit returns -707 - RadioLib documents that
+  pair as precisely this mismatch. The base station does have a TCXO; the asymmetry
+  costs frequency margin over temperature but is harmless for the link itself.
+*/
+static constexpr float kTcxoVoltage = 0.0f;
+
 void setFlag(void){
   // Function called by RadioLib to mark completed operation
   operationDone = true;
@@ -41,12 +53,11 @@ void LoRa_Transceiver::beginRadio(double freq, double bw, int sf, int cr, int po
     use the changeFrequency method.
   */
   radio.setRfSwitchTable(rfswitch_pins, rfswitch_table);
-  // tcxoVoltage = 0 => the reference is a plain crystal (XTAL), NOT a DIO3-controlled
-  // TCXO. Forcing TCXO on this board gave XOSC_START_ERR (device error 0x20): the
-  // radio waited for a TCXO that isn't there and the oscillator never started, so TX
-  // never completed. Do NOT call setTCXO() here (that would re-enable DIO3 control).
-  state = radio.begin(freq, bw, sf, cr, (0x12),power, 8, 0, false);
+  // XTAL reference: kTcxoVoltage is 0 and setTCXO() is deliberately not called, since
+  // that would hand DIO3 to a TCXO this module does not have. See kTcxoVoltage.
+  state = radio.begin(freq, bw, sf, cr, (0x12),power, 8, kTcxoVoltage, false);
   radio.setDio1Action(setFlag);
+  current_frequency = (float)freq;
   packet_count = 0;
   listening = false;
   delay(200);
@@ -58,40 +69,21 @@ void LoRa_Transceiver::beginRadio(double freq, double bw, int sf, int cr, int po
 
 
 /*
-  Module report, printed once from beginRadio(). Both of these fail silently
-  otherwise - the radio reports RADIOLIB_ERR_NONE and then simply does not reach
-  anyone.
+  Printed once from beginRadio(). A dead reference oscillator or a failed calibration
+  is otherwise invisible: begin() still returns RADIOLIB_ERR_NONE, and the only
+  symptom is a link that never works. XOSC_START_ERR points at kTcxoVoltage;
+  PLL_LOCK_ERR and the calibration bits fail just as quietly.
 
-  Band variant: this unit is a RAK3172-9-SM-NI, i.e. the base model without TCXO.
-  Per the datasheet the hardware splits into RAK3172(L) (EU433/CN470) and
-  RAK3172(H) (EU868/US915/AU915/KR920/AS923/IN865/RU864); 863 MHz needs (H),
-  because the matching network is band-specific and no firmware setting fixes a
-  mismatch. band_strap_pin reads which one is fitted.
-
-  MUST run before the IMU is started: on this PCB the strap pin doubles as the
-  IMU's INT1 (see band_strap_pin in the header). beginRadio() is called from
-  setup() well before wave_manager.begin(), so the read here is valid.
-
-  Device errors: XOSC_START_ERR is what a TCXO/XTAL mismatch looks like - the
-  reference oscillator never starts, and the base RAK3172 has no TCXO (only the
-  -T/-TE/-F variants do), which is why beginRadio passes tcxoVoltage = 0.
+  Do NOT add a band-strap read here. PB12 carries both the strap and the IMU's INT1,
+  and the IMU's pad is push-pull from reset, driving GND - so a read at this point
+  reports the IMU, not the strap, and will claim an (L) module on an (H) one.
+  imu_sampler reads it at the one place where the pad is released.
 */
 void LoRa_Transceiver::reportModuleDiagnostics(double freq){
-  pinMode(band_strap_pin, INPUT);
-  delay(1);
-  bool high_band = (digitalRead(band_strap_pin) == HIGH);
-
   Serial.print("Radio begin at ");
   Serial.print(freq);
   Serial.print(" MHz, state ");
   Serial.println(state);
-
-  Serial.print("Module band strap: ");
-  if (high_band){
-    Serial.println("HIGH -> RAK3172(H), covers 863 MHz");
-  } else {
-    Serial.println("LOW -> RAK3172(L) 433/470 MHz - WRONG BAND for 863 MHz");
-  }
 
   uint16_t errs = radio.getDeviceErrors();
   Serial.print("Device errors: 0x");
@@ -178,9 +170,10 @@ void LoRa_Transceiver::changeFrequency(double f){
   // Re-apply the RF switch table (beginRadio does this too). Without it a fresh
   // begin() leaves the STM32WL front-end unconfigured, so TX never keys up.
   radio.setRfSwitchTable(rfswitch_pins, rfswitch_table);
-  // XTAL reference (tcxoVoltage = 0), no DIO3-TCXO control - see beginRadio().
-  state = radio.begin(f, LoRa_bw, LoRa_sf, LoRa_cr, (0x12), LoRa_power, 8, 0, false);
+  // XTAL reference, same as beginRadio() - see kTcxoVoltage.
+  state = radio.begin(f, LoRa_bw, LoRa_sf, LoRa_cr, (0x12), LoRa_power, 8, kTcxoVoltage, false);
   radio.setDio1Action(setFlag);
+  current_frequency = (float)f;
   listening = false;
   delay(200);
   IWatchdog.reload();
@@ -247,6 +240,27 @@ void LoRa_Transceiver::listenByteArray(uint32_t max_wait_time)
     {
       byte_msg.success = false;
       byte_msg.numBytes = 0;
+      /*
+        A packet WAS detected - DIO1 fired - but readData rejected it, almost always
+        RADIOLIB_ERR_CRC_MISMATCH (-7). Every caller sits behind `byte_msg.success`,
+        so without this line the case is indistinguishable from hearing nothing at
+        all, when in fact something is reaching us and only the decode is failing.
+
+        RSSI and SNR are meaningful here, unlike after a transmit: they describe the
+        packet that just failed. Above roughly -30 dBm points at receiver saturation
+        from transmitting too close, not at a weak link.
+      */
+      if (debug_serial)
+      {
+        Serial.print("readData failed, code ");
+        Serial.print(state);
+        Serial.print(", len ");
+        Serial.print(numBytes);
+        Serial.print(", RSSI ");
+        Serial.print(radio.getRSSI());
+        Serial.print(" dBm, SNR ");
+        Serial.println(radio.getSNR());
+      }
     }
   }
   else

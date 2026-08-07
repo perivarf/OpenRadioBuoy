@@ -1,5 +1,6 @@
 #include "message_parser.h"
 #include "parser_utils.h"
+#include "sd_writer.h"   // the printers below log through sd_writer, as the rest does
 
 Message_Parser MESSAGE_PARSER;
 // The new structure is "Tn(n*s*xxxx)ttttttttE"
@@ -109,4 +110,121 @@ buoyInitMessage Message_Parser::parse_buoy_init_message(byte *msg)
     }
 
     return buoy_init_message;
+}
+
+
+/*
+  ---------------------------------------------------------------------------
+  Debug printers. One per parser above; see message_parser.h for why they live
+  here. Layout of print_wave_analysis_reading deliberately mirrors
+  WaveManager::printPendingResult on the drifter, so a test transmission can be
+  diffed line by line against the sender.
+  ---------------------------------------------------------------------------
+*/
+
+void Message_Parser::print_gps_reading(const GPS_Reading & r)
+{
+    sd_writer.debugSerialPrintln("location info");
+    sd_writer.debugSerialPrint("reading id: ");
+    sd_writer.debugSerialPrint(r.reading_ID);
+    sd_writer.debugSerialPrint(", lat: ");
+    sd_writer.debugSerialPrint(r.lat);
+    sd_writer.debugSerialPrint(", lng: ");
+    sd_writer.debugSerialPrint(r.lng);
+    sd_writer.debugSerialPrint(", vel: ");
+    sd_writer.debugSerialPrint(r.vel);
+    sd_writer.debugSerialPrint(", direction: ");
+    sd_writer.debugSerialPrint(r.direction);
+    sd_writer.debugSerialPrint(", timestamp: ");
+    sd_writer.debugSerialPrintln(r.timestamp);
+}
+
+
+void Message_Parser::print_temperature_reading(const temperature_Reading & r)
+{
+    sd_writer.debugSerialPrintln("temperature info");
+    sd_writer.debugSerialPrint("reading id: ");
+    sd_writer.debugSerialPrint(r.reading_ID);
+    sd_writer.debugSerialPrint(", ");
+    for (int i = 0; i < max_number_of_thermometres; i++){
+      sd_writer.debugSerialPrint("temperature sensor ");
+      sd_writer.debugSerialPrint(i);
+      sd_writer.debugSerialPrint(": ");
+      sd_writer.debugSerialPrint(r.temps[i]);
+      sd_writer.debugSerialPrint(", ");
+    }
+    sd_writer.debugSerialPrint(", timestamp: ");
+    sd_writer.debugSerialPrintln(r.timestamp);
+}
+
+
+void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r, float rssi)
+{
+    const float max_value = (float)r.max_value / scale_factor;
+
+    sd_writer.debugSerialPrint("  wave result #");
+    sd_writer.debugSerialPrintln((float)r.reading_ID, 0);
+    sd_writer.debugSerialPrint("    Hs ");
+    sd_writer.debugSerialPrint((float)r.Hs / scale_factor, 3);
+    sd_writer.debugSerialPrint(" m   Tc ");
+    sd_writer.debugSerialPrint((float)r.Tc / scale_factor, 3);
+    sd_writer.debugSerialPrint(" s   Tp ");
+    sd_writer.debugSerialPrint((float)r.Tp / scale_factor, 3);
+    sd_writer.debugSerialPrint(" s   Tz ");
+    sd_writer.debugSerialPrint((float)r.Tz / scale_factor, 3);
+    sd_writer.debugSerialPrintln(" s");
+    sd_writer.debugSerialPrint("    max_value ");
+    sd_writer.debugSerialPrint(max_value, 6);
+    sd_writer.debugSerialPrint(" m^2/Hz   span ");
+    sd_writer.debugSerialPrint((float)(r.timestamp_end - r.timestamp_start), 0);
+    sd_writer.debugSerialPrint(" s   RSSI ");
+    sd_writer.debugSerialPrint(rssi, 1);
+    sd_writer.debugSerialPrintln(" dBm");
+
+    /*
+      Wire format is a uint16 per bin normalised to the peak; absolute PSD is
+      value/65535 * max_value. Both columns are printed so the raw payload can be
+      checked against the decode without doing the arithmetic by hand.
+
+      The drifter prints a third column, the bin centre frequency. It is omitted
+      here on purpose: that axis comes from welch_bin_min/max and the Welch seglen
+      in wave_config.h, which this target does not share, so a Hz label here would
+      be a guess.
+    */
+    sd_writer.debugSerialPrint("    PSD, ");
+    sd_writer.debugSerialPrint((float)welch_bins, 0);
+    sd_writer.debugSerialPrintln(" bins (raw psd_eta):");
+    for (size_t i = 0; i < welch_bins; i++){
+      sd_writer.debugSerialPrint("      ");
+      sd_writer.debugSerialPrint((float)r.wave_spectrum[i], 0);
+      sd_writer.debugSerialPrint(" ");
+      sd_writer.debugSerialPrintln(r.wave_spectrum[i] / 65535.0f * max_value, 6);
+    }
+}
+
+
+void Message_Parser::print_beacon_reading(const beacon_Reading & r)
+{
+    sd_writer.debugSerialPrint("Received beacon message");
+    sd_writer.debugSerialPrint("timestamp: ");
+    sd_writer.debugSerialPrint(r.timestamp);
+    sd_writer.debugSerialPrint(", lat: ");
+    sd_writer.debugSerialPrint(r.lat);
+    sd_writer.debugSerialPrint(", lng: ");
+    sd_writer.debugSerialPrint(r.lng);
+    sd_writer.debugSerialPrint(", bouy ID: ");
+    sd_writer.debugSerialPrintln(r.buoy_id);
+}
+
+
+void Message_Parser::print_buoy_info_reading(const buoyInfoReading & r)
+{
+    sd_writer.debugSerialPrint("Sent packets: ");
+    sd_writer.debugSerialPrint(r.sent_packets);
+    sd_writer.debugSerialPrint(", left packets: ");
+    sd_writer.debugSerialPrint(r.left_packets);
+    sd_writer.debugSerialPrint(", listen time: ");
+    sd_writer.debugSerialPrint(r.listen_time);
+    sd_writer.debugSerialPrint(", crashed: ");
+    sd_writer.debugSerialPrintln(r.crashed);
 }

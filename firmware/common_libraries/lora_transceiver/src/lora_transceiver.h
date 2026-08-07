@@ -39,6 +39,10 @@ class LoRa_Transceiver{
     uint32_t startup_timestamp = 0;
     bool available = false;
     int16_t state;
+    // Last frequency handed to beginRadio/changeFrequency, in MHz. The radio itself
+    // has no cheap getter, and "which channel did that actually go out on" is the
+    // first question whenever a transmit is not heard.
+    float current_frequency = 0.0f;
     int16_t packet_count;
     uint32_t lastTransmission;
     uint16_t msgCounter = 0;
@@ -108,17 +112,6 @@ class LoRa_Transceiver{
     // See the definition for why it has to run this early.
     void reportModuleDiagnostics(double freq);
   private:
-    /*
-      RAK3172 pin 35 carries a 10 kOhm pull INSIDE the module: up on the (H) high-band
-      part (EU868/US915/AS923/...), down on the (L) part (EU433/CN470). Reading it
-      identifies which module is soldered on.
-
-      This PCB also routes the IMU's INT1 to the same pin (INT1_IMU_PIN in
-      common_config.h), so the strap is only readable before the IMU is brought up -
-      after that the pin carries INT1, not the strap.
-    */
-    static constexpr uint32_t band_strap_pin = PB12;
-
     STM32WLx_Diag radio{new STM32WLx_Module()};
     const uint32_t rfswitch_pins[5] = {PB8, PC13, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC};
     const Module::RfSwitchMode_t rfswitch_table[4] = {

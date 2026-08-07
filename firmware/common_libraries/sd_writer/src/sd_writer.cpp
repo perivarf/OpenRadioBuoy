@@ -63,7 +63,7 @@ bool SDWriter::begin(void){
     Serial.println(SD.sdErrorData(), HEX);
   }
 
-  if (!SD_fail && ((WIO_MODE == BUOY_MODE) || (WIO_MODE == MOORED_MODE))){
+  if (!SD_fail && (WIO_MODE == BUOY_MODE)){
     active = true;
 
     // We create the necessary directories if not already present
@@ -403,6 +403,28 @@ void SDWriter::debugSerialPrintln(float number){
   }
   if (debug_SD && debugOpened){
     debugFile.println(number);
+    debugFile.sync();
+  }
+}
+
+
+void SDWriter::debugSerialPrint(float number, int digits){
+  if (debug_serial){
+    Serial.print(number, digits);
+  }
+  if (debug_SD && debugOpened){
+    debugFile.print(number, digits);
+    debugFile.sync();
+  }
+}
+
+
+void SDWriter::debugSerialPrintln(float number, int digits){
+  if (debug_serial){
+    Serial.println(number, digits);
+  }
+  if (debug_SD && debugOpened){
+    debugFile.println(number, digits);
     debugFile.sync();
   }
 }

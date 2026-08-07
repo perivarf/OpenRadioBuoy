@@ -154,16 +154,8 @@ void loop()
           if (LORA.byte_msg.byteMsg[0] == 'U' && LORA.byte_msg.byteMsg[1] == 'R')
           {
 
-            sd_writer.debugSerialPrint("Received beacon message");
             beacon_Reading b = MESSAGE_PARSER.parse_beacon_message(LORA.byte_msg.byteMsg);
-            sd_writer.debugSerialPrint("timestamp: ");
-            sd_writer.debugSerialPrint(b.timestamp);
-            sd_writer.debugSerialPrint(", lat: ");
-            sd_writer.debugSerialPrint(b.lat);
-            sd_writer.debugSerialPrint(", lng: ");
-            sd_writer.debugSerialPrint(b.lng);
-            sd_writer.debugSerialPrint(", bouy ID: ");
-            sd_writer.debugSerialPrintln(b.buoy_id);
+            MESSAGE_PARSER.print_beacon_reading(b);
             BeaconOutgoingMessage *beaconMsg = new BeaconOutgoingMessage;
             beaconMsg->buoy_id = b.buoy_id;
             beaconMsg->lat = b.lat;
@@ -255,20 +247,8 @@ void loop()
             messageQueue.push(qMsg);
 
             // GSM.sendMessage("location info");
-            sd_writer.debugSerialPrintln("location info");
-            GPS_Reading g = MESSAGE_PARSER.parse_gps_message(LORA.byte_msg.byteMsg);
-            sd_writer.debugSerialPrint("reading id: ");
-            sd_writer.debugSerialPrint(g.reading_ID);
-            sd_writer.debugSerialPrint(", lat: ");
-            sd_writer.debugSerialPrint(g.lat);
-            sd_writer.debugSerialPrint(", lng: ");
-            sd_writer.debugSerialPrint(g.lng);
-            sd_writer.debugSerialPrint(", vel: ");
-            sd_writer.debugSerialPrint(g.vel);
-            sd_writer.debugSerialPrint(", direction: ");
-            sd_writer.debugSerialPrint(g.direction);
-            sd_writer.debugSerialPrint(", timestamp: ");
-            sd_writer.debugSerialPrintln(g.timestamp);
+            MESSAGE_PARSER.print_gps_reading(
+                MESSAGE_PARSER.parse_gps_message(LORA.byte_msg.byteMsg));
           }
           else if (LORA.byte_msg.byteMsg[0] == 'T')
           {
@@ -288,21 +268,8 @@ void loop()
             memcpy(qMsg->byteMsg->byteMsg, LORA.byte_msg.byteMsg, LORA.byte_msg.numBytes);
             messageQueue.push(qMsg);
 
-            sd_writer.debugSerialPrintln("temperature info");
-            // Receive temperature message
-            temperature_Reading c = MESSAGE_PARSER.parse_temperature_message(LORA.byte_msg.byteMsg);
-            sd_writer.debugSerialPrint("reading id: ");
-            sd_writer.debugSerialPrint(c.reading_ID);
-            sd_writer.debugSerialPrint(", ");
-            for (int i = 0; i < max_number_of_thermometres; i++){
-              sd_writer.debugSerialPrint("temperature sensor ");
-              sd_writer.debugSerialPrint(i);
-              sd_writer.debugSerialPrint(": ");
-              sd_writer.debugSerialPrint(c.temps[i]);
-              sd_writer.debugSerialPrint(", ");
-            }
-            sd_writer.debugSerialPrint(", timestamp: ");
-            sd_writer.debugSerialPrintln(c.timestamp);
+            MESSAGE_PARSER.print_temperature_reading(
+                MESSAGE_PARSER.parse_temperature_message(LORA.byte_msg.byteMsg));
           }
           else if (LORA.byte_msg.byteMsg[0] == 'A')
           {
@@ -320,8 +287,7 @@ void loop()
           }
           else if (LORA.byte_msg.byteMsg[0] == 'W')
           {
-            // Wave analysis message: queue it for uplink (same path as G/T/A) and
-            // print the derived parameters. Fixed-point fields are /scale_factor.
+            // Wave analysis message: queue it for uplink, same path as G/T/A.
             BuoyMessage *qMsg = new BuoyMessage;
             qMsg->byteMsg = new ByteMessage;
             qMsg->rssi = rssi;
@@ -329,46 +295,15 @@ void loop()
             memcpy(qMsg->byteMsg->byteMsg, LORA.byte_msg.byteMsg, LORA.byte_msg.numBytes);
             messageQueue.push(qMsg);
 
-            wave_analysis_Reading w = MESSAGE_PARSER.parse_wave_analysis_message(LORA.byte_msg.byteMsg);
-            sd_writer.debugSerialPrint("wave info - reading id: ");
-            sd_writer.debugSerialPrint(w.reading_ID);
-            sd_writer.debugSerialPrint(", Hs: ");
-            sd_writer.debugSerialPrint((float)w.Hs / scale_factor);
-            sd_writer.debugSerialPrint(" m, Tz: ");
-            sd_writer.debugSerialPrint((float)w.Tz / scale_factor);
-            sd_writer.debugSerialPrint(" s, Tc: ");
-            sd_writer.debugSerialPrint((float)w.Tc / scale_factor);
-            sd_writer.debugSerialPrint(" s, Tp: ");
-            sd_writer.debugSerialPrint((float)w.Tp / scale_factor);
-            sd_writer.debugSerialPrint(" s, max_value: ");
-            sd_writer.debugSerialPrintln((float)w.max_value / scale_factor);
-
-            // Elevation PSD spectrum, welch_bins consecutive bins. Which frequencies
-            // they cover is set drifter-side (wave_config.h welch_bin_min/max + the
-            // Welch seglen) and logged to the capture's cfg.csv; it is deliberately not
-            // a shared constant, so do not label these in Hz here. Values are
-            // normalised to the peak (0-65535); absolute PSD = value/65535 * max_value.
-            sd_writer.debugSerialPrintln("wave spectrum (normalised 0-65535):");
-            for (size_t i = 0; i < welch_bins; i++){
-              sd_writer.debugSerialPrint((float)w.wave_spectrum[i]);
-              sd_writer.debugSerialPrint(" ");
-            }
-            sd_writer.debugSerialPrintln("");
+            MESSAGE_PARSER.print_wave_analysis_reading(
+                MESSAGE_PARSER.parse_wave_analysis_message(LORA.byte_msg.byteMsg), rssi);
           }
           else if (LORA.byte_msg.byteMsg[0] == 'E' && LORA.byte_msg.byteMsg[1] == 'M')
           {
             sd_writer.debugSerialPrintln("end message");
 
-            buoyInfoReading b = MESSAGE_PARSER.parse_buoy_info_message(LORA.byte_msg.byteMsg);
-
-            sd_writer.debugSerialPrint("Sent packets: ");
-            sd_writer.debugSerialPrint(b.sent_packets);
-            sd_writer.debugSerialPrint(", left packets: ");
-            sd_writer.debugSerialPrint(b.left_packets);
-            sd_writer.debugSerialPrint(", listen time: ");
-            sd_writer.debugSerialPrint(b.listen_time);
-            sd_writer.debugSerialPrint(", crashed: ");
-            sd_writer.debugSerialPrintln(b.crashed);
+            MESSAGE_PARSER.print_buoy_info_reading(
+                MESSAGE_PARSER.parse_buoy_info_message(LORA.byte_msg.byteMsg));
             sd_writer.debugSerialPrintln("End of message");
             LORA.sendFinalMessage(adaptive_frequency_msg);
             // delay(100);

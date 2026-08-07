@@ -221,9 +221,13 @@ static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 // therefore re-arms itself whenever a backlog remains. ORB_test learned this the hard
 // way; do not remove that check.
 //
-// Set kImuUseInt1 = false to fall back to pure polling, which is what shipped before
-// and remains the behaviour to compare against if INT1 misbehaves on a given board.
-// -----------------------------------------------------------------------------
+// Set kImuUseInt1 = false to fall back to pure polling, which is the coarser drain
+// and the behaviour to compare against if INT1 misbehaves on a given board.
+//
+// INT1 is wired to PB12 (module pin 27), where the RAK3172 carries an internal
+// 10 kOhm pull up/down identifying the RF variant - pull-up on the 8xx-9xx part, pull-down
+// on the 4xx one. Tested that IMU-int and radio works, but should switch to different pint to save power
+// and potentially avoid unstable situations
 static constexpr bool kImuUseInt1 = true;
 
 // Watermark in FIFO words. Scales with ODR to keep the drain cadence ~constant.

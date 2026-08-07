@@ -392,13 +392,16 @@ void task_transmit() {
   LORA.wakeUp();
   sd_writer.logString("Looking for base station");
 
-  // Handshake
+  // Handshake. NOT bypassed in the bench build: DEBUG_WAVE_MSG fakes only the SOURCE
+  // of the wave result, never its journey. Everything from here on - handshake,
+  // learned send frequency, sendData, sd_writer - is the production path, which is
+  // the only reason a pass here says anything about the firmware that ships.
   if (perform_handshake){
     if (LORA.connectToBaseStation(max_radio_fix_look_time, max_radio_wait_time)){
     sd_writer.logString("Hands shaked");
     } else {
     sd_writer.logString("No base station found");
-    } 
+    }
     delay(send_delay_after_handshake);
   } else {
       // We do not check if a base station is present
@@ -459,7 +462,11 @@ void task_transmit() {
     wave_manager.printPendingResult(mySerial);
 #endif
     size_t wave_len = wave_manager.updateTransmitMessage();
-    if (debug_serial){ mySerial.print("Sending W: "); mySerial.print(wave_len); mySerial.println(" bytes"); }
+    if (debug_serial){
+      mySerial.print("Sending W: "); mySerial.print(wave_len);
+      mySerial.print(" bytes on "); mySerial.print(LORA.current_frequency, 3);
+      mySerial.println(" MHz");
+    }
     message_data = LORA.sendData(wave_manager.msgB, (uint8_t)wave_len, 10000);
     IWatchdog.reload();
     delay(500);
