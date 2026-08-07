@@ -58,7 +58,7 @@ static constexpr float LoRa_freq_receive_max        {867.00};
 
 static constexpr uint8_t num_LoRa_channels          {20};
 static constexpr float LoRa_bw                      {125.0};
-static constexpr int LoRa_sf                        {12};
+static constexpr int LoRa_sf                        {8};
 static constexpr int LoRa_cr                        {6};
 static constexpr int LoRa_power                     {20};
 static constexpr uint32_t max_radio_fix_look_time   {60000};
