@@ -408,6 +408,28 @@ void SDWriter::debugSerialPrintln(float number){
 }
 
 
+void SDWriter::debugSerialPrint(float number, int digits){
+  if (debug_serial){
+    Serial.print(number, digits);
+  }
+  if (debug_SD && debugOpened){
+    debugFile.print(number, digits);
+    debugFile.sync();
+  }
+}
+
+
+void SDWriter::debugSerialPrintln(float number, int digits){
+  if (debug_serial){
+    Serial.println(number, digits);
+  }
+  if (debug_SD && debugOpened){
+    debugFile.println(number, digits);
+    debugFile.sync();
+  }
+}
+
+
 int8_t SDWriter::debugByteArray(byte* array, int length){
   if (debugOpened && !SD_fail){
     debugSerialPrintln("Writing the following byte array to file:");

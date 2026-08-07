@@ -6,31 +6,45 @@ Message_Parser MESSAGE_PARSER;
 
 void print_wave_analysis_message(const wave_analysis_Reading &w)
 {
+    const float max_value = (float)w.max_value / scale_factor;
+
     sd_writer.debugSerialPrint("wave info - reading id: ");
-    sd_writer.debugSerialPrint(w.reading_ID);
+    sd_writer.debugSerialPrint((float)w.reading_ID, 0);
     sd_writer.debugSerialPrint(", Hs: ");
-    sd_writer.debugSerialPrint((float)w.Hs / scale_factor);
+    sd_writer.debugSerialPrint((float)w.Hs / scale_factor, 3);
     sd_writer.debugSerialPrint(" m, Tz: ");
-    sd_writer.debugSerialPrint((float)w.Tz / scale_factor);
+    sd_writer.debugSerialPrint((float)w.Tz / scale_factor, 3);
     sd_writer.debugSerialPrint(" s, Tc: ");
-    sd_writer.debugSerialPrint((float)w.Tc / scale_factor);
+    sd_writer.debugSerialPrint((float)w.Tc / scale_factor, 3);
     sd_writer.debugSerialPrint(" s, Tp: ");
-    sd_writer.debugSerialPrint((float)w.Tp / scale_factor);
+    sd_writer.debugSerialPrint((float)w.Tp / scale_factor, 3);
     sd_writer.debugSerialPrint(" s, max_value: ");
-    sd_writer.debugSerialPrintln((float)w.max_value / scale_factor);
+    sd_writer.debugSerialPrint(max_value, 6);
+    sd_writer.debugSerialPrintln(" m^2/Hz");
 
     /*
-      Elevation PSD spectrum, welch_bins consecutive bins. Which frequencies they
-      cover is set drifter-side and logged with the capture; it is deliberately
-      not a shared constant, so do not label these in Hz here. Values are
-      normalised to the peak (0-65535); absolute PSD = value/65535 * max_value.
+      Elevation PSD spectrum, welch_bins consecutive bins, ONE LINE EACH so the shape
+      of the spectrum is readable and a single bin can be quoted by number. Columns
+      are the raw wire value and the absolute PSD it decodes to - printing only the
+      normalised value leaves the reader to do value/65535 * max_value by hand for
+      every bin, which is the whole quantity of interest.
+
+      No Hz label: which frequencies the bins cover is set drifter-side (welch_bin_min
+      /max and the Welch seglen) and logged with the capture, not shared with this
+      target, so the bin INDEX stands in for it.
+
+      Digits matter here. The one-argument float overload prints two decimals, and the
+      bins land around 1e-3 m^2/Hz - every one of them would read 0.00.
     */
-    sd_writer.debugSerialPrintln("wave spectrum (normalised 0-65535):");
+    sd_writer.debugSerialPrintln("wave spectrum (bin, raw 0-65535, psd_eta m^2/Hz):");
     for (size_t i = 0; i < welch_bins; i++){
-      sd_writer.debugSerialPrint((float)w.wave_spectrum[i]);
+      sd_writer.debugSerialPrint("  ");
+      sd_writer.debugSerialPrint((float)i, 0);
       sd_writer.debugSerialPrint(" ");
+      sd_writer.debugSerialPrint((float)w.wave_spectrum[i], 0);
+      sd_writer.debugSerialPrint(" ");
+      sd_writer.debugSerialPrintln(w.wave_spectrum[i] / 65535.0f * max_value, 6);
     }
-    sd_writer.debugSerialPrintln("");
 
     /*
       Formatted through sprintf rather than debugSerialPrint(float): that

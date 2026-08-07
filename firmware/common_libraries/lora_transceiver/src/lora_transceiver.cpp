@@ -165,6 +165,27 @@ void LoRa_Transceiver::listenByteArray(uint32_t max_wait_time)
     {
       byte_msg.success = false;
       byte_msg.numBytes = 0;
+      /*
+        A packet WAS detected - DIO1 fired - but readData rejected it, almost always
+        RADIOLIB_ERR_CRC_MISMATCH (-7). Every caller sits behind `byte_msg.success`,
+        so without this line the case is indistinguishable from hearing nothing at
+        all, when in fact something is reaching us and only the decode is failing.
+
+        RSSI and SNR are meaningful here, unlike after a transmit: they describe the
+        packet that just failed. Above roughly -30 dBm points at receiver saturation
+        from transmitting too close, not at a weak link.
+      */
+      if (debug_serial)
+      {
+        Serial.print("readData failed, code ");
+        Serial.print(state);
+        Serial.print(", len ");
+        Serial.print(numBytes);
+        Serial.print(", RSSI ");
+        Serial.print(radio.getRSSI());
+        Serial.print(" dBm, SNR ");
+        Serial.println(radio.getSNR());
+      }
     }
   }
   else
