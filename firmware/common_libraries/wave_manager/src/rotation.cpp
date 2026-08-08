@@ -39,6 +39,19 @@ void skewSymmetric(const float v[3], float m[3][3]) {
   m[2][0] = -v[1];  m[2][1] =  v[0];  m[2][2] =  0.0f;
 }
 
+void rotateBodyToWorld(const float q[4], float ax, float ay, float az, float w[3]) {
+  const float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
+  w[0] = (1.0f - 2.0f * (qy * qy + qz * qz)) * ax +
+         2.0f * (qx * qy - qw * qz) * ay +
+         2.0f * (qx * qz + qw * qy) * az;
+  w[1] = 2.0f * (qx * qy + qw * qz) * ax +
+         (1.0f - 2.0f * (qx * qx + qz * qz)) * ay +
+         2.0f * (qy * qz - qw * qx) * az;
+  w[2] = 2.0f * (qx * qz - qw * qy) * ax +
+         2.0f * (qy * qz + qw * qx) * ay +
+         (1.0f - 2.0f * (qx * qx + qy * qy)) * az;
+}
+
 float verticalAccel(const float q[4], float ax, float ay, float az, float gravity) {
   // Third row of the body->world rotation matrix, applied to (ax,ay,az).
   float qw = q[0], qx = q[1], qy = q[2], qz = q[3];

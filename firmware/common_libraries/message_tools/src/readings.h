@@ -73,31 +73,25 @@ struct wave_analysis_Reading
 /*
   On-wire size of a wave-analysis message, framed 'W' ... 'E'. Must match the byte
   layout produced by WaveManager::updateTransmitMessage and consumed by
-  Message_Parser::parse_wave_analysis_message: tag + reading_ID(u16) +
-  {timestamp_start,timestamp_end}(2x time_t) + {Hs,Tc,Tp,Tz,max_value}(5x u32) +
-  {spec_f_min,spec_f_max}(2x u32) + num_bins(u16) + wave_spectrum(num_bins x u16)
-  + trailing 'E'.
+  Message_Parser::parse_wave_analysis_message
 
-  The spectrum is LAST on purpose: it is the only variable-length field, so a sender
+  The spectrum is last on purpose: it is the only variable-length field, so a sender
   that has fewer bins to ship - or none at all - simply stops earlier and everything
-  before it keeps its fixed offset. With the timestamps behind the spectrum instead,
-  every reader had to walk all num_bins just to reach them, which made a truncated
-  message unreadable rather than merely shorter.
+  before it keeps its fixed offset.
 
-  This constant is the size at the FULL bin count, i.e. the largest such message and
-  what the send buffer must hold. The receiver takes the actual length from num_bins.
+  The timestamps are uint32_t ON THE WIRE, deliberately not sizeof(time_t).
+  This saves 8B per message, at the cost of overflow in the year 2106.
+  At that point, either add custom epoch handling, or increase field to uint64_t.
 
-  The timestamps are uint32_t ON THE WIRE, deliberately not sizeof(time_t): time_t is
-  8 bytes in this toolchain, and the serialiser has always cast them down to 4. Sizing
-  or parsing them as time_t reads 8 bytes where 4 were written and shifts every field
-  behind them - which is invisible while they sit last in the message and corrupts
-  everything once they do not. An epoch fits in uint32 until 2106.
 */
-static constexpr uint8_t wave_message_size =
+static constexpr uint16_t wave_message_size =
     1 + sizeof(uint16_t) + 2 * sizeof(uint32_t) + 7 * sizeof(uint32_t)
     + sizeof(uint16_t) + welch_bins * sizeof(uint16_t) + 1;
+
 static_assert(wave_message_size <= max_message_length,
-    "wave_message_size exceeds the LoRa byte-message buffer (max_message_length)");
+    "wave_message_size exceeds the LoRa byte-message buffer (max_message_length) - "
+    "lower welch_bins in common_config.h; the SX126x payload length field is one byte, "
+    "so 255 is a hard ceiling and welch_bins cannot exceed 106");
 
 struct buoyInfoReading
 {

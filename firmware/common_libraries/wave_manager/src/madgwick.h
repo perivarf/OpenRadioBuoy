@@ -9,7 +9,7 @@
 
   Deliberately free of Arduino, LSM6DSV16X and wave_config.h dependencies (only
   rotation.h and <math.h>), so it compiles on a host for offline comparison
-  against ORB_test/tools/postprocess.py. The gain is supplied by the caller - on
+  against tools/postprocess.py. The gain is supplied by the caller - on
   the drifter that is kMadgwickBeta from wave_config.h.
 
   Quaternion convention is the shared one from rotation.h: q = [w,x,y,z],

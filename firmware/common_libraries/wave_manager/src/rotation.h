@@ -16,7 +16,7 @@
   the wrong projection.
 
   Deliberately free of Arduino / wave_config.h dependencies (only <math.h>), so
-  it compiles on a host next to ORB_test/tools/postprocess.py - hence gravity is
+  it compiles on a host next to tools/postprocess.py - hence gravity is
   a parameter rather than kGravity.
 */
 
@@ -27,6 +27,15 @@ void rollPitchFromAccel(float ax, float ay, float az, float &roll, float &pitch)
 
 // Quaternion [w,x,y,z] from roll/pitch, yaw = 0.
 void quatFromRollPitch(float q[4], float roll, float pitch);
+
+// Full body->world rotation, w = R(q) * a. Gravity is NOT removed - the caller
+// subtracts it from whichever component it uses, in whatever unit it passed in.
+//
+// verticalAccel below is the third row of this, kept as its own function because the
+// raw-sample path usually needs only that row and computing all three would be waste.
+// Use this one when the whole vector is needed (the brake flag's |a|, the world-frame
+// accel columns), so the rotation exists once rather than as an inlined 3x3 copy.
+void rotateBodyToWorld(const float q[4], float ax, float ay, float az, float w[3]);
 
 // Vertical linear accel: rotate the body accel onto world Z and subtract
 // gravity. Units follow the inputs - pass accel and gravity in the same unit

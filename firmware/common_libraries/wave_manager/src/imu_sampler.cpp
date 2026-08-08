@@ -1,25 +1,7 @@
 #include "imu_sampler.h"
-#include "config.h"   // SPI_CS_IMU_PIN and the shared SPI pin definitions
-#include "rotation.h" // verticalAccel
+#include "config.h"
+#include "rotation.h"
 #include <math.h>
-
-/*
-  Ported from ORB_test/src/Imu.cpp. Differences for the buoy:
-   - shares the global Arduino SPI object (sd_writer already called SPI.begin() on
-     SPI1) instead of owning a private SPIClass;
-   - INT1 is routed on the PCB but not used by the firmware: update() polls and
-     drains whatever the FIFO holds, so the drain cadence is the main loop's rather
-     than the sensor's. kFifoWatermark survived the port from ORB_test but nothing
-     applies it, so it is written to cfg.csv while describing nothing. ORB_test's
-     Imu.cpp has the working version behind kWakeMode == WakeMode::Interrupt
-     (FIFO_Set_Watermark_Level + INT1_CTRL bit 3 on kLsmInt1 = PB12), including the
-     re-arm guard the level-driven watermark interrupt needs after a blocking SD
-     flush. Porting that is the lever if polling proves too coarse;
-   - the AHRS and the decimation filter run HERE, on the raw FIFO stream, instead of
-     downstream on window means. The raw samples exist nowhere else, so this is the
-     only place the gyro can be integrated at the rate it was measured at and the
-     only place an antialias filter can see what it is supposed to remove.
-*/
 
 // -----------------------------------------------------------------------------
 // FirRowBank
@@ -41,16 +23,18 @@ void FirRowBank::push(float ax, float ay, float az,
 }
 
 void FirRowBank::eval(ImuRow &r) const {
+
+  // Eval gives value at centre of tap, so the series are aligned 
+  // for both filtered and unfiltered.
+
+  // Filtered
   r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
   r.axnSflp = nx_.eval(); r.aynSflp = ny_.eval(); r.aznSflp = nz_.eval();
   r.gx = gx_.eval(); r.gy = gy_.eval(); r.gz = gz_.eval();
   r.vaccFir = vacc_.eval();
-  // The SFLP vertical accel is the world-Z channel in m/s^2; filtering aznSflp and
-  // scaling is identical to filtering the scaled series (the filter is linear), so
-  // there is no eleventh delay line for it.
   r.vaccSflpFir = r.aznSflp * kMg2Ms2;
-  // Unfiltered counterparts, read straight off the delay lines' centre taps - the
-  // same instant the filtered values are centred on, at no extra cost.
+  
+  // Unfiltered
   r.vacc = vacc_.center();
   r.vaccSflp = nz_.center() * kMg2Ms2;
 }
@@ -60,8 +44,8 @@ void FirRowBank::eval(ImuRow &r) const {
 // -----------------------------------------------------------------------------
 ImuSampler *ImuSampler::s_self = nullptr;
 
-// Runs in interrupt context: set the flag and get out. Reading the FIFO from here
-// would take the SPI bus away from whatever the main loop was doing with it.
+// Runs in interrupt context: Interrupt service routine sets the flag and returns. 
+// Reading the FIFO from here would be a bad idea
 void ImuSampler::isrTrampoline() {
   if (s_self) s_self->fifoFlag_ = true;
 }
@@ -70,7 +54,8 @@ ImuSampler::ImuSampler()
     : imu_(&SPI, (int)SPI_CS_IMU_PIN, kImuSpiHz) { s_self = this; }
 
 bool ImuSampler::begin(Print &dbg) {
-  // Keep CS high before any bus activity (sd_writer also drives it high on boot).
+
+  // Keep CS high before any bus activity
   pinMode(SPI_CS_IMU_PIN, OUTPUT);
   digitalWrite(SPI_CS_IMU_PIN, HIGH);
 
@@ -80,6 +65,22 @@ bool ImuSampler::begin(Print &dbg) {
   }
   dbg.println("LSM6DSV: begin() OK");
 
+  applyConfig();
+
+  if (kImuUseInt1) {
+    
+    // Need to set pinMode() before attachInterrupt() or the ISR never fires.
+    pinMode(INT1_IMU_PIN, INPUT);
+
+    // The sensor drives INT1 push-pull, active high -> trigger on the rising edge.
+    attachInterrupt(digitalPinToInterrupt(INT1_IMU_PIN), isrTrampoline, RISING);
+  }
+
+  return true;
+}
+
+// All sensor config
+void ImuSampler::applyConfig() {
   imu_.Enable_X();      // accelerometer
   imu_.Enable_G();      // gyroscope
   imu_.Set_X_FS((int32_t)kAccelFS);   // full-scale from wave_config (kAccelFS)
@@ -87,17 +88,32 @@ bool ImuSampler::begin(Print &dbg) {
   imu_.Set_X_ODR((float)kImuOdrHz, kImuAccMode);
   imu_.Set_G_ODR((float)kImuOdrHz, kImuGyrMode);
 
+  // Accelerometer low-pass filter
   if (kUseLpf2) {
     imu_.Set_X_Filter_Mode(0, kLpf2Bw);  // 0 => low-pass mode, arg2 = bandwidth
   }
 
-  // Batch accel + gyro into the FIFO at the chosen ODR; SFLP game rotation vector
+  // Batch accel + gyro into the FIFO at the chosen ODR; SFLP rotation vector
   // (quaternion) is batched alongside them. Stream mode is started separately.
   imu_.FIFO_Set_X_BDR((float)kImuOdrHz);
   imu_.FIFO_Set_G_BDR((float)kImuOdrHz);
-  imu_.Enable_Rotation_Vector();
-  imu_.Set_SFLP_ODR(kSflpOdrHz);
-  imu_.Set_SFLP_Batch(true, false, false);  // (GameRotation, Gravity, gBias) -> FIFO
+
+  // SFLP fusion is AHRS filter built into the LSM6DSV16X.
+  // It is a quaternion that rotates the sensor frame into the
+  // gravitation frame
+  //
+  // The else branch is not redundant: applyConfig() runs again on every capture
+  // through begin(), and the driver's own begin() leaves the SFLP registers alone -
+  // without writing the off state explicitly, the result would depend on whatever
+  // happened to be in them.
+  if (kEnableSflp) {
+    imu_.Enable_Rotation_Vector();
+    imu_.Set_SFLP_ODR(kSflpOdrHz);
+    imu_.Set_SFLP_Batch(true, false, false);  // (Rotation, Gravity, gBias) -> FIFO
+  } else {
+    imu_.Disable_Rotation_Vector();
+    imu_.Set_SFLP_Batch(false, false, false);
+  }
 
   if (kImuUseInt1) {
     // Let INT1 go high once the FIFO holds kFifoWatermark words, so the drain runs
@@ -105,49 +121,56 @@ bool ImuSampler::begin(Print &dbg) {
     // in the wrapper, hence the raw register write (see wave_config.h).
     imu_.FIFO_Set_Watermark_Level((uint8_t)kFifoWatermark);
     imu_.Write_Reg(kInt1CtrlReg, kInt1FifoTh);
-    // The sensor drives INT1 push-pull, active high -> trigger on the rising edge.
-    pinMode(INT1_IMU_PIN, INPUT);
-    attachInterrupt(digitalPinToInterrupt(INT1_IMU_PIN), isrTrampoline, RISING);
+  }
+}
+
+// Start streaming using STREAM_MODE. Both STREAM_MODE and FIFO_MODE use the same FIFO buffer
+// but they differ when it fills. STREAM overwrites the oldest
+// word and keeps running. FIFO stops until a BYPASS trip restarts it
+// STREAM_MODE is more stable as it allows for some missing reads, but it continues
+// to fill the FIFO
+void ImuSampler::startStreaming() {
+  imu_.FIFO_Set_Mode(LSM6DSV16X_STREAM_MODE);
+}
+
+
+void ImuSampler::shutdownIMU() {
+  imu_.Disable_G();
+  imu_.Disable_X();
+}
+
+// Check if acceleration sensor 
+bool ImuSampler::checkImu(Print &dbg) {
+
+  uint8_t drdy = 0;
+  const uint32_t deadline = millis() + 100;
+  while (millis() < deadline) {
+    if (imu_.Get_X_DRDY_Status(&drdy) == LSM6DSV16X_OK && drdy) break;
+  }
+
+  // Read one accel sample, then put back to sleep
+  int32_t a[3] = {0, 0, 0};
+  const bool read_ok = (imu_.Get_X_Axes(a) == LSM6DSV16X_OK);
+
+  // Shutdown IMU after read, so it is left OFF until next capture.
+  shutdownIMU();
+
+  if (!drdy) {
+    dbg.println("LSM6DSV: no data-ready within 100 ms - sensor is not converting");
+    return false;
+  }
+  if (!read_ok) {
+    dbg.println("LSM6DSV: sample read failed");
+    return false;
   }
 
   return true;
 }
 
-// STREAM_MODE. FIFO_MODE was tried on 2026-08-04 and had to be reverted - the reason
-// is worth keeping, because FIFO_MODE looks like the safer choice and is not.
-//
-// The problem it was meant to solve: a full FIFO in STREAM mode discards its OLDEST
-// word to make room, which is the word the drain is in the middle of reading. With the
-// driver's split read (tag at 0x78, payload at 0x79..0x7E in a SECOND transaction) a
-// discard between the two paired one sample's tag with another's payload; an accel
-// word decoded with gyro sensitivity reads ~287000 mdps, which is the |g| that showed
-// up whenever fifo_ovf was set.
-//
-// That is fixed at the source now: readFifoWord() takes tag and payload in one burst,
-// so the word cannot be split at all. FIFO_MODE was defence against a bug that no
-// longer exists - and it brought a failure mode of its own. FIFO_MODE STOPS collecting
-// when full and only a trip through BYPASS restarts it, so recovery hinges on noticing
-// that it stopped. The only signal for that is FIFO_FULL_IA, and the datasheet defines
-// it as "FIFO will be full at the NEXT ODR" - predictive, not a state. Once collection
-// has stopped there is no next write, the flag de-asserts, the restart never fires, and
-// INT1 stays low forever. Measured symptom: the stream drops to 0 Hz and never returns,
-// with no overflow warning at all, because the counter never incremented either.
-//
-// STREAM mode cannot get stuck: it never stops, so there is nothing to restart. An
-// overrun costs samples and nothing else. This is also what ORB_test's Imu.cpp has
-// always done - it counts overflows and never resets the FIFO.
-//
-// resetFifo() is therefore a CAPTURE-START operation only, not a recovery path.
-void ImuSampler::startStreaming() {
-  imu_.FIFO_Set_Mode(LSM6DSV16X_STREAM_MODE);
-}
-
 void ImuSampler::resetFifo() {
   imu_.FIFO_Set_Mode(LSM6DSV16X_BYPASS_MODE);  // flush hardware FIFO
   imu_.FIFO_Set_Mode(LSM6DSV16X_STREAM_MODE);  // resume streaming
-  // The buffer is empty now, so any pending flag refers to words that no longer
-  // exist. Leaving it set would make the next update() drain nothing and clear it -
-  // harmless, but it would also mask a genuinely dead interrupt line.
+
   fifoFlag_ = false;
 }
 
@@ -166,11 +189,9 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   winFifoOvf_ = false;
   winFirDone_ = false;
   brakeRun_ = 0;
-  // The SFLP quaternion was NOT cleared here before, so the first rows of a capture
-  // could carry the previous capture's attitude into q*_sflp, ax_ned_sflp..az_ned_sflp and the
-  // brake flag until the first 0x13 word arrived. Identity is the honest start.
   latestQw_ = 1; latestQx_ = latestQy_ = latestQz_ = 0;
   latestGx_ = latestGy_ = latestGz_ = 0;
+
   // The AHRS re-seeds from gravity on the first accel sample (ahrsSeeded_), which is
   // also where the quaternion delay line gets filled.
   ahrs_.reset();
@@ -182,8 +203,8 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
 }
 
 // Evaluate the decimation filters and read the delay-matched quaternions into the
-// row being assembled. Everything written here refers to one instant: the centre of
-// the current window, carried back by the FIR group delay.
+// row being assembled. Everything here should referr to the same point in time instant:
+// the centre of the current window
 void ImuSampler::latchRowValues() {
   fir_.eval(pendingRow_);
   float mq[4], sq[4];
@@ -199,15 +220,11 @@ void ImuSampler::latchRowValues() {
   winFirDone_ = true;
 }
 
-// -----------------------------------------------------------------------------
 // Raw multi-byte burst read on the shared SPI bus. With IF_INC = 1 (the default) the
 // sensor auto-increments the address, so consecutive registers arrive in ONE CS-low
-// transfer. Ported from ORB_test's Imu::imuBurstRead; the only difference is that
-// this class shares the global SPI object rather than owning an SPIClass.
-//
+// transfer. 
 // Settings must match what the driver uses for its own reads or the two would
 // disagree about the bus: MODE3, MSB first, 0x80 as the read bit.
-// -----------------------------------------------------------------------------
 void ImuSampler::imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len) {
   SPI.beginTransaction(SPISettings(kImuSpiHz, MSBFIRST, SPI_MODE3));
   digitalWrite(SPI_CS_IMU_PIN, LOW);
@@ -221,34 +238,33 @@ void ImuSampler::imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len) {
 // in a single transaction. Reading 0x7E is what advances the FIFO, so the whole word
 // leaves the sensor atomically.
 //
-// This is not only faster than the wrapper's FIFO_Get_Tag + FIFO_Get_X_Axes pair - it
-// is the only version that is CORRECT while the FIFO is under pressure. Two separate
-// transactions leave a window in which the buffer can move on between the tag read
-// and the payload read, pairing one sample's tag with another's data; an accel word
-// decoded with gyro sensitivity reads ~287000 mdps, which is the |g| that showed up
-// whenever fifo_ovf was set. FIFO_MODE closes that window from the sensor side and
-// this closes it from the bus side.
+//   w[0..6] = tag | x_lo x_hi | y_lo y_hi | z_lo z_hi     (three LE int16, tag >> 3 = sensor)
+//
+// One burst rather than the wrapper's FIFO_Get_Tag + FIFO_Get_X_Axes
 //
 // Returns tag_sensor, the top 5 bits of the tag byte (FIFO_DATA_OUT_TAG: bit 0 unused,
 // bits 2:1 tag_cnt, bits 7:3 tag_sensor).
 uint8_t ImuSampler::readFifoWord(uint8_t payload[6]) {
   uint8_t w[7];
   imuBurstRead(kFifoDataOutTagReg, w, 7);
+  
+  // place payload bytes into the caller's buffer
   for (uint8_t i = 0; i < 6; i++) payload[i] = w[i + 1];
+  
+  // return tag (top 5 bits)
   return (uint8_t)(w[0] >> 3);
 }
 
-// -----------------------------------------------------------------------------
 // Raw log. Little-endian, layout documented at wave_raw_log in wave_config.h.
-// -----------------------------------------------------------------------------
 void ImuSampler::rawAppend(const uint8_t *p, uint8_t n) {
   if (!rawSink_) return;
   for (uint8_t i = 0; i < n; i++) {
     rawBuf_[rawLen_++] = p[i];
+
+    // Check if rawBuf_ is full
     if (rawLen_ >= kRawBlockBytes) {
-      // The buffer is dropped either way - there is nowhere to hold it, and stalling
-      // the drain to retry is the one thing guaranteed to overflow the FIFO. What is
-      // NOT dropped is the knowledge that it happened.
+      
+
       if (!rawSink_(rawBuf_, rawLen_)) {
         nRawWriteFail_++;
         rawWriteFailPending_ = true;
@@ -258,10 +274,7 @@ void ImuSampler::rawAppend(const uint8_t *p, uint8_t n) {
   }
 }
 
-// The FIFO word exactly as it came off the bus - no decoding, no scaling. The
-// sensitivity constants that would be baked in by decoding are in the file header
-// instead, so the far side can apply them (and a later correction to them does not
-// invalidate captures already on the card).
+// The FIFO word exactly as it came off the bus. The
 void ImuSampler::rawEmitWord(uint8_t tag, const uint8_t payload[6]) {
   if (!rawSink_) return;
   uint8_t rec[kRawWordBytes];
@@ -312,7 +325,7 @@ void ImuSampler::flushRaw(void) {
   if (rawSink_ && rawLen_ > 0) {
     if (!rawSink_(rawBuf_, rawLen_)) {
       nRawWriteFail_++;
-      rawWriteFailPending_ = true;  // no sync will follow; ana.csv is the only record
+      rawWriteFailPending_ = true;
     }
     rawLen_ = 0;
   }
@@ -350,7 +363,7 @@ static inline float halfToFloat(uint16_t h) {
   return c.f;
 }
 
-// SFLP game rotation vector: x,y,z as halves, w reconstructed from the unit norm.
+// SFLP rotation vector: x,y,z as halves, w reconstructed from the unit norm.
 // Same reconstruction as the driver's sflp2q, including the renormalisation guard
 // for a sum of squares that rounds above 1. Output is [x,y,z,w] to match the
 // wrapper's FIFO_Get_Rotation_Vector, which is what the caller already expects.
@@ -387,7 +400,7 @@ void ImuSampler::closeWindow() {
 }
 
 // Drain all pending FIFO words. Three tags are batched together: accel (2), gyro
-// (1) and SFLP game rotation / quaternion (0x13). The accel tag is the clock: it
+// (1) and SFLP rotation / quaternion (0x13). The accel tag is the clock: it
 // drives windowing, the AHRS, and all ten decimation filters, so every delay line
 // advances exactly once per accel sample and they can never drift apart. Gyro and
 // SFLP words only latch their latest value for the accel branch to pair with.
@@ -453,22 +466,7 @@ void ImuSampler::update(Print &dbg) {
         winFirDone_ = false;
       }
       winNAcc_++;
-      // Brake flag with debounce: LINEAR accel (gravity removed) must stay over
-      // threshold for kBrakeMinSamples in a row. Rotate body accel to world/NED
-      // with the SFLP quaternion (world = R(q).a_body), then subtract gravity.
-      float qw = latestQw_, qx = latestQx_, qy = latestQy_, qz = latestQz_;
-      float ax = (float)a[0], ay = (float)a[1], az = (float)a[2];
-      float wX = (1 - 2 * (qy * qy + qz * qz)) * ax + 2 * (qx * qy - qw * qz) * ay + 2 * (qx * qz + qw * qy) * az;
-      float wY = 2 * (qx * qy + qw * qz) * ax + (1 - 2 * (qx * qx + qz * qz)) * ay + 2 * (qy * qz - qw * qx) * az;
-      float wZ = 2 * (qx * qz - qw * qy) * ax + 2 * (qy * qz + qw * qx) * ay + (1 - 2 * (qx * qx + qy * qy)) * az;
-      wZ -= 1000.0f;  // remove 1 g gravity
-      double aMag2 = (double)wX * wX + (double)wY * wY + (double)wZ * wZ;
-      if (aMag2 > kBrakeThresholdMg2) {
-        if (brakeRun_ < 0xFFFF) brakeRun_++;
-        if (brakeRun_ >= kBrakeMinSamples) winBraking_ = true;
-      } else {
-        brakeRun_ = 0;
-      }
+      const float ax = (float)a[0], ay = (float)a[1], az = (float)a[2];
 
       // ---- AHRS on the raw stream ----
       // Accel and gyro arrive as separate FIFO tags, so the update is paired with
@@ -492,6 +490,46 @@ void ImuSampler::update(Print &dbg) {
         // delay the FIR imposes on ax..gz, so the whole row describes one instant.
         // At one step per sample that delay is kFirHalf pushes exactly.
         qDelay_.push(ahrs_.quaternion(), sflpQ);
+      }
+
+      // World-frame linear accel from the SFLP quaternion, gravity removed. These are
+      // the ax_ned_sflp / vacc_sflp columns and nothing else - the wave chain reads
+      // them only when wave_use_sflp is set.
+      //
+      // Left at zero when the fusion block is off. The delay lines start zeroed and
+      // nothing but this pushes them, so zeros here make every _sflp column read zero
+      // rather than body-frame values wearing a world-frame name. cfg.csv's
+      // sflp_enabled is what tells the two zeros apart afterwards.
+      float wX = 0.0f, wY = 0.0f, wZ = 0.0f;
+      if (kEnableSflp) {
+        float w[3];
+        rotateBodyToWorld(sflpQ, ax, ay, az, w);
+        wX = w[0]; wY = w[1]; wZ = w[2] - 1000.0f;   // remove 1 g, mg units
+      }
+
+      // Brake flag with debounce: LINEAR accel (gravity removed) must stay over
+      // threshold for kBrakeMinSamples in a row.
+      //
+      // Rotated with the orientation the build actually trusts, not with SFLP
+      // unconditionally. It used to be the latter, which let a NaN or an unconverged
+      // SFLP poison a quality flag on a build whose measurement came from Madgwick -
+      // the flag and the measurement now stand or fall together.
+      //
+      // Placed after the AHRS update so it sees this sample's attitude rather than the
+      // previous one, and so the very first sample uses the seeded attitude from
+      // initFromAccel instead of an uninitialised default.
+      float bX = wX, bY = wY, bZ = wZ;
+      if (!wave_use_sflp) {
+        float b[3];
+        rotateBodyToWorld(ahrs_.quaternion(), ax, ay, az, b);
+        bX = b[0]; bY = b[1]; bZ = b[2] - 1000.0f;
+      }
+      const double aMag2 = (double)bX * bX + (double)bY * bY + (double)bZ * bZ;
+      if (aMag2 > kBrakeThresholdMg2) {
+        if (brakeRun_ < 0xFFFF) brakeRun_++;
+        if (brakeRun_ >= kBrakeMinSamples) winBraking_ = true;
+      } else {
+        brakeRun_ = 0;
       }
 
       // The vertical accel is recomputed on EVERY raw sample from the latest
@@ -519,7 +557,7 @@ void ImuSampler::update(Print &dbg) {
       sumGyrMag2_ += (double)g[0] * g[0] + (double)g[1] * g[1] + (double)g[2] * g[2];
       nGyrDbg_++;
       latestGx_ = g[0]; latestGy_ = g[1]; latestGz_ = g[2];
-    } else if (tag == kSflpGameRotationTag) {  // quaternion [x,y,z,w]
+    } else if (tag == kSflpRotationTag) {  // quaternion [x,y,z,w]
       float q[4];
       payloadToQuat(payload, q);
       // NaN guard: a corrupt FIFO word decodes to an invalid half-float and the

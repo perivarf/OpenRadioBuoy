@@ -13,28 +13,10 @@ WaveManager *WaveManager::s_self = nullptr;
 // imu.csv column contract. Naming convention, so a capture can be read without
 // consulting the firmware to find out which orientation a column came from:
 //   unsuffixed  = the SELECTED filter (WaveAhrs, or SFLP when wave_use_sflp)
-//   _sflp       = the on-chip SFLP game-rotation fusion
+//   _sflp       = the on-chip SFLP rotation fusion, or ZERO throughout when
+//                 kEnableSflp is false and the block never ran - cfg.csv's
+//                 sflp_enabled is what separates that from a still buoy
 //   _fir        = FIR-decimated; without it, the unfiltered value at the same instant
-// The filter's NAME belongs in cfg.csv (wave_orientation_name), not in a column name:
-// WaveAhrs is a compile-time choice, so "vacc_madgwick" was a lie the moment it was
-// set to KalmanAhrs.
-//
-// RENAMED at wave_build_seq 3 (columns kept their ORDER, only names changed):
-//   ax_ned..az_ned -> ax_ned_sflp..az_ned_sflp  (they always were SFLP-rotated)
-//   qw..qz         -> qw_sflp..qz_sflp
-//   mqw..mqz       -> qw..qz                    (the selected filter)
-//   vacc_madgwick  -> vacc
-// The absence of "mqw" is what tells a reader it has a build_seq 3+ file; postprocess
-// looks columns up by name and branches on exactly that. Note the one hazard this
-// rename creates and an append never did: an OLD postprocess reading a NEW capture
-// silently takes the selected filter's quaternion for the SFLP one (tilt diagnostics
-// only - the vertical accel it uses comes from az_ned*, which it will not find at all).
-//
-// Semantics changed at wave_build_seq 2: ax..gz and the NED triple are the
-// FIR-decimated value at the window centre, not the window mean, and the quaternions
-// are delayed to match (see ImuRow). vacc/vacc_sflp are the UNFILTERED values at that
-// same instant; vacc_fir/vacc_sflp_fir are the filtered ones. cfg.csv carries
-// row_decimation/ahrs_rate_hz so an old and a new capture cannot be confused.
 static const char *kImuCsvHeader =
     "win_start_ms,n,ax_mg,ay_mg,az_mg,ax_ned_sflp,ay_ned_sflp,az_ned_sflp,"
     "gx_mdps,gy_mdps,gz_mdps,qw_sflp,qx_sflp,qy_sflp,qz_sflp,braking,"
@@ -45,31 +27,30 @@ void WaveManager::begin(void) {
   imu_.setRowSink(&WaveManager::rowSinkTrampoline);
   imuOk_ = imu_.begin(Serial);
   if (imuOk_) {
-    imu_.resetFifo();
+    imuOk_ = imu_.checkImu(Serial);
+    if (!imuOk_ && debug_serial) {
+      Serial.println("WaveManager: IMU check failed at boot - will retry each capture");
+    }
   } else if (debug_serial) {
-    Serial.println("WaveManager: IMU init failed - wave analysis disabled");
+    Serial.println("WaveManager: IMU init failed at boot - will retry each capture");
   }
 }
 
 void WaveManager::wake(void) {
-  if (imuOk_) imu_.resetFifo();
 
-  // Restart the GNSS engine. task_measure_gps_temp leaves the receiver in a
-  // controlled GNSS stop (shutdownGPS -> initialized = false), and update() is a
-  // no-op in that state - which is why gps.csv held nothing but its header line in
-  // every capture up to build_seq 3, in spite of serviceGps() running for the whole
-  // half hour. begin() is bounded (~3.5 s worst case) and reloads the watchdog
-  // itself, and it runs before the FIFO stream starts, so it cannot starve a drain.
+  // Restart the GNSS engine
   gps_manager.begin();
+
+  imuOk_ = imu_.begin(Serial);
+  if (imuOk_) {
+    imu_.resetFifo();
+  } else if (debug_serial) {
+    Serial.println("WaveManager: IMU did not answer - skipping this capture");
+  }
 }
 
 void WaveManager::sleep(void) {
-  // The LSM6DSV keeps streaming into its FIFO; nothing to actively power down here.
-  // Between captures the FIFO is simply left to overwrite (reset at next capture).
-  //
-  // The GPS is the part that does cost power: put it back into the controlled GNSS
-  // stop wake() brings it out of, so a capture does not leave the receiver tracking
-  // through the whole sleep window. Called on the abort path too (see main.cpp).
+  if (imuOk_) imu_.shutdownIMU();
   gps_manager.shutdownGPS();
 }
 
@@ -130,11 +111,11 @@ bool WaveManager::rawSinkTrampoline(const uint8_t *data, uint16_t len) {
 }
 
 // One filled block from the raw log. No sync() here on purpose: this runs inside the
-// FIFO drain, and a per-block flush to the card is exactly the stall the FIFO cannot
+// FIFO drain, and a per-block flush to the sd-card is exactly the stall the FIFO cannot
 // absorb. SdFat's own buffering plus the sync in stopSession is enough - a capture cut
 // by a reset loses the tail of the raw file, which is the same bargain imu.csv makes.
 //
-// The return value is not decoration. write() reports a SHORT write (card full, I/O
+// The return value is not decoration. write() reports a SHORT write (sd-card full, I/O
 // error) by returning fewer bytes, and discarding that was the difference between a
 // file that is missing a block and a file that LOOKS fine while every byte after the
 // gap is misparsed. The sampler turns a false into kRawFlagWriteFail on the next sync.
@@ -159,7 +140,6 @@ void WaveManager::writeRawHeader(void) {
   put32(kRawMagic);
   h[o++] = kRawFormatVersion;
   h[o++] = kRawWordBytes;
-  put16(wave_build_seq);
   put16(kImuOdrHz);
   put16((uint16_t)kSflpOdrHz);
   putf(kAccSensMgPerLsb);          // int16 LSB -> mg
@@ -204,7 +184,7 @@ uint8_t WaveManager::takeReading(void) {
 
   // Deliberately the FIRST thing after the IMU check: an abort must not consume a
   // reading ID, create a session folder or reserve the clusters, so a run that never
-  // sees the sky leaves the card exactly as it was. The wait runs whatever
+  // sees the sky leaves the sd-card exactly as it was. The wait runs whatever
   // wave_measurement_require_gps says - the answer is logged as gps_fix_at_start
   // either way, and only the ABORT is conditional. enable_GPS wins over the
   // requirement: demanding a fix from a build with no receiver would abort forever.
@@ -316,7 +296,7 @@ bool WaveManager::startSession(void) {
   const uint32_t gpsBytes  = durationS * wave_gps_row_bytes_max;  // <= 1 row per fix per second
   if (imuCsvActive_ && !imuFile_.preAllocate(imuBytes) && debug_serial) {
     Serial.print("WaveManager: imu preAllocate failed, "); Serial.print(imuBytes);
-    Serial.println(" B - card may be full or fragmented");
+    Serial.println(" B - sd-card may be full or fragmented");
   }
   if (!gpsFile_.preAllocate(gpsBytes) && debug_serial) {
     Serial.println("WaveManager: gps preAllocate failed");
@@ -352,8 +332,7 @@ bool WaveManager::startSession(void) {
   gpsFile_.sync();
   writeSessionAnchor();  // anchor keys (sessionFile_ kept open)
 
-  // cfg.csv: write-once and close - the constants never change during a capture.
-  // A failure here is not fatal: the run is still valid, only less self-describing.
+  // cfg.csv: write-once and close - the constants are known at start of session.
   snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_CFG_PREFIX);
   File cfg = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
   if (cfg) {
@@ -368,7 +347,7 @@ bool WaveManager::startSession(void) {
   return true;
 }
 
-// The anchor (build + start time) is written up front so it survives on disk even
+// The session file (build + start time) is written up front so it survives on disk even
 // if the capture is interrupted before stopSession. imu/gps use a relative time
 // base (ms from start), so these keys alone tie t=0 to real UTC.
 void WaveManager::writeSessionAnchor(void) {
@@ -377,41 +356,28 @@ void WaveManager::writeSessionAnchor(void) {
   sprintf(iso, "%04d-%02d-%02dT%02d:%02d:%02dZ",
           year(captureStart_), month(captureStart_), day(captureStart_),
           hour(captureStart_), minute(captureStart_), second(captureStart_));
-  sessionFile_.print("build_seq,");       sessionFile_.println(wave_build_seq);
   sessionFile_.print("reading_id,");      sessionFile_.println(readingID_);
   sessionFile_.print("orientation_name,");sessionFile_.println(analyzer_.orientationName());
-  // Whether the capture began with a position. Zero here is the one thing that
-  // explains an empty gps.csv without guesswork - and with
-  // wave_measurement_require_gps false it is a capture that ran on purpose, not a
-  // failed one.
   sessionFile_.print("gps_fix_at_start,"); sessionFile_.println(gpsFixAtStart_ ? 1 : 0);
   sessionFile_.print("start_utc_epoch,"); sessionFile_.println((uint32_t)captureStart_);
   sessionFile_.print("start_utc_iso,");   sessionFile_.println(iso);
   sessionFile_.sync();  // do not close: summary is appended at stop
 }
 
-// cfg.csv: every constant the capture depends on, so a session folder is
-// self-describing - postprocess.py can rebuild the exact pipeline (scaling,
-// bucketing, Welch, taper) from the folder alone, without matching it against a
-// firmware revision. Kept out of ses.csv because these are per-BUILD values, while
-// ses.csv holds the per-RUN anchor + summary; mixing them buried the ~12 lines you
-// actually want to eyeball under ~50 lines of constants.
-//
-// Written and closed inside startSession (before the FIFO stream starts, so the SD
-// activity cannot starve the drain loop) and never reopened - so it costs no
-// long-lived File handle, which matters with RAM at ~87%.
+// cfg.csv: every constant the capture depends on, so that the session folder
+// is self-describing. Enabling postprocessing / testing / verification
 void WaveManager::writeSessionConfig(File &f) {
   f.println("key,value");
 
   // --- capture scheduling ---
   f.print("duration_ms,");        f.println(wave_measurement_duration);
   f.print("period_ms,");          f.println(base_measurement_period_wave_analysis);
-  // AHRS settling window: logged to imu.csv/gps.csv but excluded from Welch/PSD, so
+  
+  // --- AHRS settling window: logged to imu.csv/gps.csv but excluded from Welch/PSD, so ---
   // postprocess must skip the same leading rows to reproduce the on-device Hs.
   f.print("filter_warm_up_ms,");  f.println(wave_measurement_filter_warm_up);
-  // With gps_fix_required set, a folder only exists if the fix arrived inside this
-  // budget - which is what makes a MISSING capture a timeout rather than a crash.
-  // Without it the pair explains the opposite case: a folder whose gps.csv is empty.
+
+  // GNSS
   f.print("gps_fix_timeout_ms,"); f.println(wave_gps_fix_timeout);
   f.print("gps_fix_required,");   f.println((wave_measurement_require_gps && enable_GPS) ? 1 : 0);
 
@@ -424,37 +390,27 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("imu_spi_hz,");         f.println(kImuSpiHz);
   f.print("accel_fs_g,");         f.println((int)kAccelFS);
   f.print("gyro_fs_dps,");        f.println((int)kGyroFS);
-  f.print("acc_sens_mg_lsb,");    f.println(kAccSensMgPerLsb, 4);
-  f.print("gyr_sens_mdps_lsb,");  f.println(kGyrSensMdpsPerLsb, 4);
   f.print("lpf2_enabled,");       f.println(kUseLpf2 ? 1 : 0);
   f.print("lpf2_bw,");            f.println(kLpf2Bw);        // raw CTRL8 register value
   f.print("lpf2_odr_div,");       f.println(kLpf2Div);
   f.print("lpf2_cutoff_hz,");     f.println(kLpf2CutoffHz, 2);
+  // Tells a zero in the _sflp columns apart from a still buoy: 0 here means the fusion
+  // block never ran, so those columns carry no information at all.
+  f.print("sflp_enabled,");       f.println(kEnableSflp ? 1 : 0);
   f.print("sflp_odr_hz,");        f.println(kSflpOdrHz, 1);
-  f.print("sflp_game_rot_tag,");  f.println(kSflpGameRotationTag);
-  // fifo_watermark only means something when INT1 drives the drain - it described
-  // nothing at all until the interrupt path was ported, so record which one ran.
+  f.print("sflp_rotation_tag,");  f.println(kSflpRotationTag);
   f.print("imu_wake,");           f.println(kImuUseInt1 ? "int1_watermark" : "poll");
   f.print("fifo_watermark,");     f.println(kFifoWatermark);
 
-  // --- windowing (raw ODR -> imu.csv rows) ---
-  // cfg.csv KEYS are deliberately left alone by the kRowOdrHz/kWelchInputOdrHz
-  // rename: postprocess.py and firmware_test.py look them up by name, and old
-  // captures have to stay comparable with new ones.
+  // --- IMU.csv - windowing (raw ODR -> imu.csv rows) ---
   f.print("output_rate_hz,");     f.println(kRowOdrHz);
   f.print("window_ms,");          f.println(kRowPeriodMs);
   f.print("csv_sync_rows,");      f.println(wave_csv_sync_rows);
-  // What the imu file reserved up front. Read this next to fifo_ovf in imu.csv: a
-  // capture that overflows despite a successful reservation has a stall that is not
-  // cluster allocation, which is a different hunt.
   f.print("imu_prealloc_bytes,");
   f.println((uint32_t)kRowOdrHz * (wave_measurement_duration / s_2_ms) *
             wave_imu_row_bytes_max);
 
   // --- decimation ---
-  // row_decimation is the single key that separates a build-1 capture (boxcar means,
-  // AHRS stepped on the 100 Hz rows) from a build-2 one (FIR, AHRS on the raw
-  // stream). Anything reading these folders should branch on it, not on a date.
   f.print("row_decimation,fir");  f.println();
   f.print("fir_ntap,");           f.println(kFirNtap);
   f.print("fir_s1_cutoff_hz,");   f.println(kFirS1CutoffHz, 3);
@@ -463,35 +419,30 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("fir_s2_delay_s,");     f.println(kFirS2DelayS, 6);
   f.print("fir_s1_center_ms,");   f.println(kFirS1CenterMs);
   f.print("fir_s2_center_ms,");   f.println(kFirS2CenterMs);
-  // The device runs the filters causally, so the logged series lag by the group
-  // delays above. Offline comparisons must either shift or use compensate=False.
+  // The logged series lag by the group delays above. 
+  // Offline comparisons must compensate for that
   f.print("fir_compensate,0");    f.println();
 
-  // --- brake detection ---
+  // --- breaking wave detection ---
   f.print("brake_g_thresh,");     f.println(kBrakeGThreshold, 3);
   f.print("brake_thresh_mg2,");   f.println((float)kBrakeThresholdMg2, 1);
   f.print("brake_min_ms,");       f.println(kBrakeMinMs);
   f.print("brake_min_samples,");  f.println(kBrakeMinSamples);
 
   // --- orientation / vertical acceleration ---
-  // Echoed from ses.csv (same analyzer, so they cannot disagree): without it the
-  // tuning below is ambiguous, since only one method actually ran.
   f.print("orientation_name,");   f.println(analyzer_.orientationName());
-  // The AHRS runs on the RAW stream now, not on the rows, so the rate it was
-  // stepped at is no longer output_rate_hz and has to be recorded separately -
-  // offline cannot reproduce the device attitude without it.
+
   f.print("ahrs_rate_hz,");       f.println(kAhrsInputOdrHz, 2);
   f.print("ahrs_rate_cap_hz,");   f.println(kAhrsInputOdrCapHz);
-  // The quaternions are held, not filtered, but they ARE carried back by the stage-1
-  // group delay so every column in a row describes one instant. See quat_delay.h.
+
   f.print("quat_decimation,hold"); f.println();
   f.print("quat_delay_s,");       f.println(kFirS1DelayS, 6);
   f.print("quat_delay_steps,");   f.println(kQuatDelaySteps);
+
+  // --- Madgwick ---
   f.print("madgwick_beta,");      f.println(kMadgwickBeta, 4);
-  // The full Kalman tuning, because R is adaptive: r0 alone does not say what the
-  // filter did, the lambdas and dt_ref do. Written whichever filter ran, like
-  // madgwick_beta above - a capture folder should describe the build, not only
-  // the branch it took.
+
+  // --- Kalman ---
   f.print("kalman_sigma_g,");     f.println(kKalmanParams.sigmaG, 6);
   f.print("kalman_sigma_b,");     f.println(kKalmanParams.sigmaB, 8);
   f.print("kalman_r0,");          f.println(kKalmanParams.r0, 8);
@@ -507,8 +458,6 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("log_mode,");           f.println((uint8_t)wave_log_mode);  // 0=csv 1=raw 2=both
   f.print("raw_format_version,"); f.println(kRawFormatVersion);
   f.print("vacc_bucket_ms,");     f.println(kWelchInputPeriodMs);
-  // Cast is load-bearing: kWelchInputOdrHz is an integer now, and println(int, 3)
-  // would print it in BASE 3 rather than with three decimals.
   f.print("vacc_fs_hz,");         f.println((float)kWelchInputOdrHz, 3);
 
   // --- Welch spectrum + acc->elevation taper ---
@@ -518,24 +467,19 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("welch_window,");       f.println(kWelchWindow == WindowType::Hann ? "Hann" : "Hamming");
   f.print("psd_df_hz,");          f.println(kPsdDfHz, 6);
   f.print("wave_fmax_hz,");       f.println(kWaveFMax, 3);
+  f.print("psd_max_freq_hz,");    f.println(kPsdMaxFreq, 3);
   f.print("taper_f1_hz,");        f.println(kTaperF1, 3);
   f.print("taper_f2_hz,");        f.println(kTaperF2, 3);
-
-  // --- transmitted spectrum slice ---
-  // The bin range is drifter-side, so these keys are the only record of which
-  // frequencies the base station's wave_spectrum[] actually covers.
   f.print("welch_bin_min,");      f.println((uint32_t)welch_bin_min);
   f.print("welch_bin_max,");      f.println((uint32_t)welch_bin_max);
   f.print("welch_bins,");         f.println((uint32_t)welch_bins);
-  // A wire bin is the average of spec_bin_group PSD bins, so the array length alone
-  // no longer determines the frequency axis. These three keys do, and they are the
-  // only record of it: f_j = spec_f_min_hz + j * spec_bin_width_hz. Changed meaning
-  // at wave_build_seq 2 - spec_f_min/max_hz are now wire-bin CENTRES, and they used
-  // to be PSD-bin centres back when the mapping was 1:1.
+  f.print("spec_n_bins,");        f.println((uint32_t)kSpecNBins);
   f.print("spec_bin_group,");     f.println((uint32_t)kSpecBinGroup);
   f.print("spec_bin_width_hz,");  f.println(kSpecBinWidthHz, 6);
   f.print("spec_f_min_hz,");      f.println(kSpecFMinHz, 5);
   f.print("spec_f_max_hz,");      f.println(kSpecFMaxHz, 5);
+
+  f.print("spec_band_max_hz,");   f.println(kSpecBandMaxHz, 5);
   f.print("scale_factor,");       f.println(scale_factor);
 }
 
@@ -738,11 +682,13 @@ size_t WaveManager::updateTransmitMessage(void) {
   };
   msg_insert_uint(msgB, toFreqFixed(kSpecFMinHz), offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFreqFixed(kSpecFMaxHz), offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, (uint16_t)welch_bins,     offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint16_t)kSpecNBins,     offset, wave_message_size, offset, true);
 
   // Last field: it is the only variable-length one, so stopping short here shortens
-  // the message without moving anything the receiver has already read.
-  for (size_t i = 0; i < welch_bins; i++) {
+  // the message without moving anything the receiver has already read. kSpecNBins is
+  // at most welch_bins - the capacity wave_message_size was budgeted for - and is
+  // smaller whenever kPsdMaxFreq does not divide evenly into the bin grid.
+  for (size_t i = 0; i < kSpecNBins; i++) {
     msg_insert_uint(msgB, res.wave_spectrum[i], offset, wave_message_size, offset, true);
   }
   msgB[offset++] = 'E';
@@ -769,9 +715,9 @@ void WaveManager::enqueueFakeResult(void) {
   // A single smooth peak, encoded exactly as finalize() does: the wire value is
   // binEta/peakEta * 65535, so the far side reconstructs value/65535 * max_value.
   // Peak placed off-centre so a mirrored or off-by-one bin axis is visible.
-  const float peakBin = 0.35f * (float)welch_bins;
-  const float width   = 0.12f * (float)welch_bins;
-  for (size_t j = 0; j < welch_bins; j++) {
+  const float peakBin = 0.35f * (float)kSpecNBins;
+  const float width   = 0.12f * (float)kSpecNBins;
+  for (size_t j = 0; j < kSpecNBins; j++) {
     const float d = ((float)j - peakBin) / width;
     const float norm = expf(-0.5f * d * d);
     res.wave_spectrum[j] = (uint16_t)lroundf(norm * 65535.0f);
@@ -819,12 +765,12 @@ void WaveManager::printPendingResult(Print &out) const {
   // updateTransmitMessage puts in the message - rather than from welch_bin_min and
   // the group size, so this really is the receiver's arithmetic and not a parallel
   // derivation that could agree here and disagree over the air.
-  out.print(F("    PSD, "));      out.print((uint32_t)welch_bins);
+  out.print(F("    PSD, "));      out.print((uint32_t)kSpecNBins);
   out.print(F(" bins, f_min "));  out.print(kSpecFMinHz, 4);
   out.print(F(" Hz, f_max "));    out.print(kSpecFMaxHz, 4);
   out.print(F(" Hz, df "));       out.print(kSpecBinWidthHz, 6);
   out.println(F(" Hz (f_hz raw psd_eta):"));
-  for (size_t j = 0; j < welch_bins; j++) {
+  for (size_t j = 0; j < kSpecNBins; j++) {
     out.print(F("      "));      out.print(kSpecFMinHz + j * kSpecBinWidthHz, 4);
     out.print(' ');              out.print(r.wave_spectrum[j]);
     out.print(' ');

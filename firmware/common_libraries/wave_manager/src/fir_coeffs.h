@@ -4,7 +4,7 @@
 #include "fir.h"   // kFirNtap - the tables are sized by it and generated for it
 
 /*
-  GENERERT av ORB_test/tools/gen_fir_table.py - IKKE rediger for hand.
+  GENERERT av tools/gen_fir_table.py - IKKE rediger for hand.
 
   Vindusbasert sinc-lavpass (Hamming, normalisert sa sum(h) = 1), samme formel og
   samme funksjon som postprocess.py bruker offline: fir.firwin_lowpass. Sum = 1 gir
@@ -30,7 +30,7 @@
 // stille feil - derfor et gjerde, ikke en kommentar.
 static_assert(kFirNtap == 129,
               "kFirNtap er endret - regenerer fir_coeffs.h med "
-              "ORB_test/tools/gen_fir_table.py --ntap <n>");
+              "tools/gen_fir_table.py --ntap <n>");
 
 // D = 1.2: firwin_lowpass(129, 0.5, 1.2) => fc/fs = 0.416666667
 inline constexpr float kFirTapsD12[kFirNtap] = {

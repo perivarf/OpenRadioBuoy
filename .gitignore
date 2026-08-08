@@ -46,3 +46,7 @@ out/
 # Visual Studio Code temporary and workspace files
 .vscode/
 *.code-workspace
+
+# Python analysis tools
+__pycache__/
+*.pyc

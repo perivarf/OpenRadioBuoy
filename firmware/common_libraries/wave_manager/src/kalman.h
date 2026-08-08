@@ -30,7 +30,7 @@
   slams and fast rolling, leaving attitude to the gyro; in calm stretches it
   drops back and the accel anchors the slow drift.
 
-  MEASURED, on Skjaerhalden 20260731_110314 through ORB_test/tools/postprocess.py:
+  MEASURED, on Skjaerhalden 20260731_110314 through tools/postprocess.py:
   with a FIXED R this filter left a flat 8.5e-4 (m/s^2)^2/Hz tilt-leakage floor
   below 0.25 Hz and reported Hs 0.222 m where Madgwick and SFLP both said 0.097 m.
   The same filter WITH the adaptive R lands at 0.135 m. lambdaW carries essentially
@@ -54,9 +54,9 @@
       vertical axis is never corrected. Roll/pitch bias, the part that matters for
       vertical acceleration, converges normally.
 
-  Ported from ORB_test/tools/kalman.py, which holds the parameter sweeps behind
+  Ported from tools/kalman.py, which holds the parameter sweeps behind
   the defaults in wave_config.h. The two are meant to stay the same estimator:
-  ORB_test/tools/mekf.py mirrors THIS file, so postprocess.py's MEKF column and
+  tools/mekf.py mirrors THIS file, so postprocess.py's MEKF column and
   its Kalman column diverging is the signal that they have drifted apart. The
   chi^2 innovation gate in kalman.py is deliberately not ported - it is off
   (gate = 0) in every configuration that has been run.

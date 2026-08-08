@@ -6,19 +6,14 @@
 #include <LSM6DSV16XSensor.h>
 #include "wave_config.h"
 #include "fir.h"
-#include "fir_coeffs.h"   // kFirCoeffsStage1 - generated, see ORB_test/tools/gen_fir_table.py
+#include "fir_coeffs.h"   // kFirCoeffsStage1 - generated, see tools/gen_fir_table.py
 #include "quat_delay.h"
 
 /*
-  One IMU row per kRowPeriodMs, ported from ORB_test Imu.h.
-  Shared type: ImuSampler produces it, the analyzer and CSV logger consume it.
-
-  ONE TIME BASE PER ROW. Every value here describes the same instant: the centre of
-  the window, carried back by the decimating FIR's group delay (kFirS1DelayS, 66.7 ms
-  at 960 Hz). That includes the quaternions, which are not filtered but ARE delayed
-  by the same amount - see quat_delay.h for why those are two different decisions.
-  The row's timestamp, winStartMs, still names the window on the plain kRowPeriodMs grid; it
-  is a label for the window, not a claim about which instant the values describe.
+  One row per kRowPeriodMs. Every field describes the SAME instant - the window centre,
+  where the decimating FIR's group delay puts it (kFirS1DelayS, 66.7 ms at 960 Hz). The
+  quaternions are not filtered but are delayed by the same amount to match.
+  winStartMs labels the window; it is not the instant the values describe.
 */
 struct ImuRow {
   uint32_t winStartMs;                  // window start, relative ms from capture start
@@ -38,30 +33,20 @@ struct ImuRow {
   uint8_t sflpNan;                      // 1 if a NaN SFLP quaternion was rejected in the window
 };
 
-// Callback invoked when a window closes. Const again: the row leaves ImuSampler
-// complete. It used to be non-const because the analyzer ran the AHRS and had to
-// back-fill the orientation fields; the AHRS now lives here, on the raw stream.
+// Called when a window closes. The row leaves ImuSampler complete, hence const.
 using ImuRowSink = void (*)(const ImuRow &);
 
-// Raw-log sink: one filled block of <stamp>_raw.bin. See wave_raw_log in
-// wave_config.h for the record layout.
-//
-// Returns false if the block did not reach the card in full. The sampler cannot fix
-// that, but it must KNOW: a partial block desynchronises every byte after it, so the
-// next sync record carries kRawFlagWriteFail and the decoder can stop trusting the
-// file at the right place instead of quietly reading payload bytes as tags.
+// One filled block of <stamp>_raw.bin (layout: wave_raw_log in wave_config.h).
+// Return false on a short write: it desynchronises every byte after it, so the next
+// sync record carries kRawFlagWriteFail and the decoder knows where to stop trusting.
 using RawBlockSink = bool (*)(const uint8_t *data, uint16_t len);
 
 /*
-  The ten series decimated per row. Which ten is not arbitrary: everything logged to
-  imu.csv goes through the same filter, so an offline AHRS fed these columns sees the
-  same antialias filter the on-device one saw, and no column is a boxcar mean while
-  its neighbour is filtered.
+  The ten series decimated per row - everything imu.csv logs, all through the same
+  filter, so an offline AHRS sees the antialiasing the on-device one saw.
 
-  Cost note: a decimating FIR is paid for at its OUTPUT rate. push() is a store, run
-  at kImuOdrHz; eval() is the expensive part and runs at kRowOdrHz. That is what
-  makes ten of them affordable, and it also means lowering the ROW rate does not make
-  them cheaper by much - lowering the ODR does - see fir.h.
+  Cost is paid at the OUTPUT rate: push() is a store at kImuOdrHz, eval() the real work
+  at kRowOdrHz. Lowering kImuOdrHz makes them cheaper; lowering the row rate barely does.
 */
 class FirRowBank {
  public:
@@ -91,23 +76,21 @@ class FirRowBank {
 };
 
 /*
-  IMU driver for the LSM6DSV family. Ported from ORB_test/src/Imu, adapted for the
-  buoy: shares the global Arduino SPI object (already brought up by sd_writer on
-  SPI1) instead of owning its own bus, and drains the FIFO by polling its fill level.
-  INT1 is routed on the PCB but unused: no pin for it is defined in common_config.h
-  and nothing attaches to it, so the drain cadence is the main loop's, not the
-  sensor's. Wiring it up is the obvious lever if polling ever proves too coarse.
+  LSM6DSV driver. Shares the global Arduino SPI object (sd_writer brings up SPI1) rather
+  than owning a bus, and drains the FIFO on the INT1 watermark (kImuUseInt1).
 
-  This class owns the AHRS. It has to: the raw samples exist nowhere else, and
-  running the orientation filter on window means integrated the gyro at a resolution
-  it was never measured at. The analyzer downstream is now purely the wave chain.
+  Owns the AHRS: the raw samples exist nowhere else, and running the orientation filter
+  on window means would integrate the gyro at a rate it was never measured at.
 */
 class ImuSampler {
  public:
   ImuSampler();
 
-  // Init sensor: ODR/FS/filter, FIFO + SFLP batching. Does NOT start the FIFO
+  // Init sensor: ODR/FS/filter, FIFO + SFLP batching, ISR. Does NOT start the FIFO
   // stream (see startStreaming). Assumes the shared SPI bus is already begun.
+  //
+  // Called at boot and again from WaveManager::wake() before each capture, so the
+  // return value answers "is the IMU alive now", not "was it at boot".
   bool begin(Print &dbg);
 
   // Put the FIFO into STREAM/continuous mode so it starts filling.
@@ -115,6 +98,17 @@ class ImuSampler {
 
   // Flush the hardware FIFO (BYPASS -> STREAM) and clear pending state.
   void resetFifo();
+
+  // Park the sensor between captures; begin() is the other half, as with the GPS.
+  // Only the ODR fields move - everything else begin() wrote stays in its register,
+  // which is what makes begin() cheap enough to be the way back up.
+  void shutdownIMU();
+
+  // Boot liveness check: begin() only proves the part ANSWERS, so a dead or stuck
+  // converter passes it. Brings the sensor up, waits for data-ready, reads one sample
+  // and shuts it down again. A direct register read, not a FIFO drain - at boot there
+  // is no capture open. False only if the sensor cannot be read.
+  bool checkImu(Print &dbg);
 
   // Drain all pending FIFO words once (call repeatedly during a capture).
   void update(Print &dbg);
@@ -132,40 +126,38 @@ class ImuSampler {
   // Push the partial block. Call at end of capture, or the tail is lost.
   void flushRaw(void);
 
+  // FIFO fills since the last debug print, which zeroes it on the way out.
   uint32_t overflowCount() const { return nOverflow_; }
 
-  // FIFO fills for the WHOLE capture, cleared only by resetWindowing. nOverflow_ is
-  // the debug print's own counter and is zeroed every time it prints, so it cannot
-  // answer "was this capture clean?" - this one can, and goes to ana.csv.
+  // FIFO fills for the WHOLE capture (ana.csv). nOverflow_ is the debug print's own
+  // counter and is zeroed on every print, so it cannot answer "was this capture clean?".
   uint32_t overflowTotal() const { return nOverflowTotal_; }
 
   // Windows where no raw sample landed on the centre and the FIR had to be read at
   // the window edge instead. Non-zero means FIFO gaps; logged to ana.csv.
   uint32_t firLateEvalCount() const { return nFirLateEval_; }
 
-  // Blocks the raw sink failed to write in full. Judge the FILE by this, the way
-  // overflowTotal() judges the CAPTURE: zero here with a non-zero overflowTotal is a
-  // rough but readable capture, whereas non-zero here means raw.bin is desynchronised
-  // past the first failure no matter how clean the sensor was.
+  // Blocks the raw sink failed to write in full. Non-zero means raw.bin is
+  // desynchronised past the first failure, however clean the sensor was.
   uint32_t rawWriteFailCount() const { return nRawWriteFail_; }
 
  private:
+  // Every register setting that comes from wave_config.h
+  void applyConfig();
+
   // INT1 watermark plumbing. attachInterrupt takes a plain function, so the ISR is a
-  // static trampoline that finds the one instance through s_self - the same pattern
-  // WaveManager uses for its row sink, and the one ORB_test's Imu uses here. The ISR
-  // does nothing but set the flag; all work happens in update().
+  // static trampoline that reaches the instance through s_self. It only sets the flag.
   static ImuSampler *s_self;
   static void isrTrampoline();
   volatile bool fifoFlag_ = false;
   uint32_t lastDrainMs_ = 0;   // deadline for the INT1 gate; see kFifoPollFallbackMs
 
-  // Raw auto-incrementing register burst on the shared SPI bus (ORB_test's
-  // Imu::imuBurstRead). One CS-low transfer for len consecutive registers.
+  // Raw auto-incrementing register burst on the shared SPI bus
+  //  One CS-low transfer for len consecutive registers.
   void imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len);
 
   // Pop one FIFO word atomically: tag + 6 payload bytes in a single transfer.
-  // Returns tag_sensor. See the definition for why the split the driver does is
-  // not merely slower but wrong under FIFO pressure.
+  // Returns tag_sensor
   uint8_t readFifoWord(uint8_t payload[6]);
 
   void closeWindow();
@@ -189,6 +181,7 @@ class ImuSampler {
   uint8_t  rawBuf_[kRawBlockBytes];
   uint16_t rawLen_ = 0;
   uint32_t nRawWriteFail_ = 0;
+  
   // Sticky: set the moment a block is lost, cleared only once a sync record has
   // actually carried it into the file. Without the stickiness the report could itself
   // be the write that fails, and the loss would go unrecorded in the stream.

@@ -4,19 +4,12 @@
 #include <string.h>
 
 /*
-  Ported from ORB_test/src/analysis.cpp, reduced to a single on-device orientation
-  method to fit RAM - selected at compile time at the bottom of wave_config.h. The
-  offline postprocess still recomputes all three methods from the raw imu.csv.
-
-  What is left here is the wave chain itself (FFT / Welch / spectral moments) plus
-  the second decimation stage in ingest(). The orientation filter moved to
-  ImuSampler, where the raw stream is; the building blocks it uses stay free of
-  Arduino and of this file's units: madgwick.{h,cpp}, kalman.{h,cpp}, rotation.{h,cpp}
-  (the quaternion primitives they share) and fir.{h,cpp}.
+  Contains the wave chain (FFT / Welch / spectral moments) plus
+  the second decimation stage for imu (ingest). 
 */
 
 // -----------------------------------------------------------------------------
-// FFT + Welch (file-local, ported from analysis.cpp). Single shared scratch.
+// FFT + Welch
 // -----------------------------------------------------------------------------
 static float  gRe[kWelchSegLen], gIm[kWelchSegLen];
 static double gS2 = 0.0;
@@ -102,7 +95,7 @@ void StreamAnalyzer::begin(void) {
   ensureS2();
 }
 
-// Push one 10 Hz sample into the segment; on a full segment FFT + accumulate PSD
+// Push one sample into the segment; on a full segment FFT + accumulate PSD
 // and keep the last (N - step) samples (75% overlap).
 void StreamAnalyzer::pushWelch(float sample) {
   segBuf_[segFill_++] = sample;
@@ -122,10 +115,7 @@ void StreamAnalyzer::ingest(const ImuRow &r) {
 
   long t = (long)r.winStartMs;
 
-  // The row already carries the vertical acceleration, computed per RAW sample by
-  // ImuSampler and decimated to this rate through stage 1. Which series it is -
-  // the software AHRS or the chip's SFLP - was decided there by wave_use_sflp; both
-  // are logged either way, so imu.csv keeps the reference.
+  
   const float v = isfinite(r.vaccFir) ? r.vaccFir : 0.0f;
 
   // Stage 2 is fed on EVERY row, warm-up included. The delay line has to be full by
@@ -198,14 +188,17 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
   // params.maxValue.
   //
   // Each wire bin is the BAND AVERAGE of kSpecBinGroup consecutive PSD bins, not a
-  // 1:1 copy - that is what lets welch_bins span the whole wave band without the
+  // 1:1 copy - that is what lets kSpecNBins span the whole wave band without the
   // payload growing to match (see wave_config.h). Averaging keeps the integral:
   // sum_j Shat_j * (G*df) == sum_k S_k * df. Normalising against the UNAVERAGED
   // peakEta is deliberate and keeps the absolute scale reconstructible on the far
   // side as value/65535 * maxValue; the cost is that no wire bin quite reaches
   // 65535, since averaging the peak bin with its neighbour lowers it.
+  // kSpecNBins, not welch_bins: the array is sized to the wire-format capacity, but
+  // only the first kSpecNBins entries are filled and sent. The rest stay at the zero
+  // set above, so a stale tail cannot leak out if the count ever grows again.
   if (peakEta > 0.0f) {
-    for (size_t j = 0; j < welch_bins; j++) {
+    for (size_t j = 0; j < kSpecNBins; j++) {
       float acc = 0.0f;
       for (size_t g = 0; g < kSpecBinGroup; g++) {
         const int k = (int)welch_bin_min + (int)(j * kSpecBinGroup + g);

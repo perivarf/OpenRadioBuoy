@@ -59,25 +59,12 @@ static constexpr uint8_t max_message_length {255};
 static constexpr uint32_t scale_factor              {100000};
 static constexpr uint8_t  max_number_of_thermometres {1};
 
-// Wave analysis message wire format: the LARGEST number of uint16 spectrum values a
-// wave message can carry. It sizes wave_spectrum[] in wave_analysis_Reading and fixes
-// wave_message_size, i.e. it is a capacity bound on both ends.
-//
-// It is no longer what the parser loops over. The message states its own bin count
-// and frequency axis (spec_f_min/spec_f_max/num_bins), because a bin index means
-// nothing without the segment length and sample rate behind f = k*fs/N and the base
-// station has neither. A sender with a different bin count therefore produces a
-// short message rather than a silently misaligned one - but it must still be <= this,
-// or the extra bins are dropped on reception.
-//
-// WHICH frequencies the bins cover remains drifter-side physics, next to the Welch
-// settings in wave_manager/wave_config.h (welch_bin_min/max + kSpecBinGroup), and
-// wave_config.h static_asserts its bin range against this count.
-//
-// 57 -> 51 at wave_build_seq 2. Each wire bin became the average of two PSD bins
-// instead of a single one, which let the message span the whole 0-1 Hz wave band
-// (it covered 0.049-0.596 Hz before) on FEWER bins, not more.
-static constexpr size_t welch_bins {51};
+// Wave analysis message wire format: the largest number of uint16 spectrum values a
+// wave message can carry so that the message is still less than max_message_length
+// Actual bin count is kSpecNBins in drifter, with kSpecNBins<=welch_bins
+// and the actual bin count is sent in the wave message to basestation
+// In case of this being set to high, a compile time assertion will be through in wave_manager.cpp
+static constexpr size_t welch_bins {106};
 
 // Shared wave-analysis run parameters
 static constexpr bool     base_enable_wave_analysis           {true};

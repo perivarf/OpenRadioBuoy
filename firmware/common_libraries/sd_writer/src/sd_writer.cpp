@@ -55,8 +55,8 @@ bool SDWriter::begin(void){
   SD_fail = !SD.begin(SdSpiConfig(SPI_CS_SD_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPI_MHZ), &SPI));
 
   if (SD_fail && debug_serial){
-    // sdErrorCode/sdErrorData say whether the card never answered CMD0 (wiring,
-    // CS, no card) or failed later in the init handshake (card/speed issue).
+    // sdErrorCode/sdErrorData say whether the sd-card never answered CMD0 (wiring,
+    // CS, no sd-card) or failed later in the init handshake (sd-card/speed issue).
     Serial.print("SD begin failed, error 0x");
     Serial.print(SD.sdErrorCode(), HEX);
     Serial.print(" data 0x");

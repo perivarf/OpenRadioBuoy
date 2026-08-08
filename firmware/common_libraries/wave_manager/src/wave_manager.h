@@ -76,7 +76,7 @@ class WaveManager {
   static WaveManager *s_self;
   static void rowSinkTrampoline(const ImuRow &r);
   void onRow(const ImuRow &r);
-  // bool: false means the block did not reach the card in full, which the sampler
+  // bool: false means the block did not reach the sd-card in full, which the sampler
   // turns into kRawFlagWriteFail on the next sync record. See onRawBlock.
   static bool rawSinkTrampoline(const uint8_t *data, uint16_t len);
   bool onRawBlock(const uint8_t *data, uint16_t len);
@@ -85,7 +85,7 @@ class WaveManager {
   // Session logging (ORB_test Logger style): one timestamped directory per capture.
   bool startSession(void);          // build stamp, mkdir _tmp, open imu/gps/ses, headers
   void stopSession(void);           // close ses, rename _tmp -> final (capture completed)
-  void writeSessionAnchor(void);    // build_seq + start UTC (crash-safe, written up front)
+  void writeSessionAnchor(void);    // reading ID + start UTC (crash-safe, written up front)
   void writeSessionConfig(File &f); // cfg.csv: every constant the capture depends on
   void writeSessionSummary(bool ok, const WaveParams &params);  // stop UTC, duration, rows, params
   void serviceGps(uint32_t relMs);  // drive gps_manager.update(); log a gps.csv row per fix
