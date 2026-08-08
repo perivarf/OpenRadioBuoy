@@ -5,8 +5,6 @@
 #include <Arduino.h>
 #include "config.h"
 
-// typedef byte BuoyID[8];
-
 static constexpr uint8_t ANALOG_READING_TYPE_UNKNOWN   {0};
 static constexpr uint8_t ANALOG_READING_TYPE_PH        {1};
 static constexpr uint8_t ANALOG_READING_TYPE_TURBIDITY {2};
@@ -45,22 +43,17 @@ struct analog_Reading
     time_t timestamp;
 };
 
-/*
-  Fixed-point scale for the frequency axis below - NOT scale_factor.
+/* Scaling factor when sending frequencies over LoRa
+   uint32 represents up to around 4e9, so with scaling factor 1e8
+   we can send 4e9 / 1e8 = 40 Hz with 8 decimals.
 
-  scale_factor (1e5) is too coarse here. It quantises the first bin centre 0.0048828
-  to 0.00488 and the last to 0.98145, and after rebuilding the step from that pair the
-  top bins land within 5e-6 Hz of a 4-decimal rounding boundary: the sender prints
-  0.9814 and the receiver 0.9815 for the same bin, which defeats the whole point of
-  the two consoles being diffable. At 1e7 the round trip is exact to well below the
-  printed resolution and the reconstructed step comes back as 0.01953125 on the nose.
-
-  Headroom is not a concern: u32 at this scale reaches 429 Hz against a 10 Hz series.
+   This will be enough precision when casting to float later, since
+   float has 1 sign bit, 8 exponent bits and 23 mantissa bits
+   So at at right under 4Hz we can represent numbers with spacing 2 * 1/2^23 = 2.38e-7
+   i.e. around 6 decimals of precision.
 */
 static constexpr uint32_t wave_freq_scale {10000000UL};
 
-// Field order mirrors the wire, and the wire puts every fixed-size field first - see
-// wave_message_size below for why the spectrum has to be last.
 struct wave_analysis_Reading
 {
     uint16_t reading_ID;
@@ -70,25 +63,11 @@ struct wave_analysis_Reading
     uint32_t Tc;
     uint32_t Tp;
     uint32_t Tz;
-    uint32_t max_value;
-    /*
-      Frequency axis of the spectrum below, carried in the message so the receiver
-      is self-sufficient: it has no sample rate or segment length to derive
-      f = k*fs/N from, and a bin index alone says nothing physical.
-
-      Both are BIN CENTRES, fixed-point by wave_freq_scale above, and num_bins is
-      the count actually on the wire. The step follows:
-
-          df   = (spec_f_max - spec_f_min) / (num_bins - 1)
-          f_j  = spec_f_min + j * df
-
-      num_bins may be smaller than welch_bins - the array is a capacity bound now,
-      not a parse contract - so always loop over num_bins, never welch_bins.
-    */
-    uint32_t spec_f_min;
-    uint32_t spec_f_max;
-    uint16_t num_bins;
-    uint16_t wave_spectrum[welch_bins];
+    uint32_t max_value; // Maximum value of the PSD, used for normalizing the spectrum
+    uint32_t spec_f_min; // Bin centre of the first bin, scaled with wave_freq_scale
+    uint32_t spec_f_max; // Bin centre of the last bin, scaled with wave_freq_scale
+    uint16_t num_bins; // Number of bins in the array, must be smaller than welch_bins
+    uint16_t wave_spectrum[welch_bins]; // normalised spectrum (value/65535 * max_value = absolute PSD value)
 };
 
 /*
@@ -107,9 +86,15 @@ struct wave_analysis_Reading
 
   This constant is the size at the FULL bin count, i.e. the largest such message and
   what the send buffer must hold. The receiver takes the actual length from num_bins.
+
+  The timestamps are uint32_t ON THE WIRE, deliberately not sizeof(time_t): time_t is
+  8 bytes in this toolchain, and the serialiser has always cast them down to 4. Sizing
+  or parsing them as time_t reads 8 bytes where 4 were written and shifts every field
+  behind them - which is invisible while they sit last in the message and corrupts
+  everything once they do not. An epoch fits in uint32 until 2106.
 */
 static constexpr uint8_t wave_message_size =
-    1 + sizeof(uint16_t) + 2 * sizeof(time_t) + 7 * sizeof(uint32_t)
+    1 + sizeof(uint16_t) + 2 * sizeof(uint32_t) + 7 * sizeof(uint32_t)
     + sizeof(uint16_t) + welch_bins * sizeof(uint16_t) + 1;
 static_assert(wave_message_size <= max_message_length,
     "wave_message_size exceeds the LoRa byte-message buffer (max_message_length)");

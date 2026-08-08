@@ -37,11 +37,13 @@ void setup()
   sd_writer.logString("Booting base station");
   sd_writer.closeLog();
 
-  LORA.beginRadio(LoRa_freq_receive, LoRa_bw, LoRa_sf, LoRa_cr, LoRa_power);
-  LORA.setDefaultSendFrequency(LoRa_freq_send);
+  // set up LoRa transceiver
   LORA.setBaseStationID(base_station_ID);
   LORA.getWiOID();
   LORA.computeReceptionChannel(num_LoRa_channels, LoRa_freq_receive_min, LoRa_freq_receive_max);
+  LORA.beginRadio(LoRa_freq_receive, LoRa_bw, LoRa_sf, LoRa_cr, LoRa_power);
+  LORA.setDefaultSendFrequency(LoRa_freq_send);
+  
   // set up GSM connection
   GSM.begin();
 

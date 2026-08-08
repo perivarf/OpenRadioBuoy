@@ -30,8 +30,8 @@ static constexpr uint32_t listen_time               {30000};
 // Enable or disable parameters
 static constexpr bool debug_SD                      {true};
 static constexpr bool enable_handshake              {true};
+static constexpr bool enable_notecard               {false};
 
-// Notecard parameters
 static constexpr int output_sync_frequency          {30}; // 30 minutes
 static constexpr int input_sync_frequency           {30}; // 30 minutes
 static constexpr int health_frequency               {30 * 60 * 1000}; // 30 minutes

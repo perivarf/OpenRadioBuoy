@@ -69,11 +69,9 @@ wave_analysis_Reading Message_Parser::parse_wave_analysis_message(byte *msg)
     wave_analysis_Reading wa_reading_packet;
     uint8_t offset = 1;
 
-    // Everything up to num_bins sits at a fixed offset; only the spectrum varies, and
-    // it comes last, so a message carrying fewer bins still parses down to here.
     wa_reading_packet.reading_ID      = msg_extract_uint<uint16_t>(msg, offset, true, offset);
-    wa_reading_packet.timestamp_start = msg_extract_uint<time_t>(msg, offset, true, offset);
-    wa_reading_packet.timestamp_end   = msg_extract_uint<time_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_start = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_end   = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Hs         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tc         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tp         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
@@ -83,10 +81,7 @@ wave_analysis_Reading Message_Parser::parse_wave_analysis_message(byte *msg)
     wa_reading_packet.spec_f_max = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.num_bins   = msg_extract_uint<uint16_t>(msg, offset, true, offset);
 
-    // The sender states its own bin count, so one built with a different welch_bins
-    // no longer misaligns anything - it can only overrun our array, and those bins
-    // are dropped. num_bins is corrected to what was actually stored so the printer
-    // and any consumer loop cannot walk past the end.
+    // Limiting the number of bins to the maximum allowed, to avoid buffer overflow
     if (wa_reading_packet.num_bins > welch_bins) wa_reading_packet.num_bins = welch_bins;
     for (uint16_t i = 0; i < wa_reading_packet.num_bins; i++)
         wa_reading_packet.wave_spectrum[i] = msg_extract_uint<uint16_t>(msg, offset, true, offset);
@@ -124,10 +119,7 @@ buoyInitMessage Message_Parser::parse_buoy_init_message(byte *msg)
 
 /*
   ---------------------------------------------------------------------------
-  Debug printers. One per parser above; see message_parser.h for why they live
-  here. Layout of print_wave_analysis_reading deliberately mirrors
-  WaveManager::printPendingResult on the drifter, so a test transmission can be
-  diffed line by line against the sender.
+  Debug printers.
   ---------------------------------------------------------------------------
 */
 
@@ -190,9 +182,8 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
     sd_writer.debugSerialPrint(rssi, 1);
     sd_writer.debugSerialPrintln(" dBm");
 
-    // sprintf, not debugSerialPrint(float): an epoch near 1.77e9 does not survive a
-    // float round trip (24-bit mantissa -> rounded to the nearest 128 s), and these
-    // are the fields that wrap if the sender's RTC was never set.
+    // NB. Timestamp sent as 4B will only be valid until 2106. 
+    // Either increase to 8B or use a different start data for the epoch (i.e. 2020)
     char ts[64];  // "    window " + two 10-digit values + " .. " is 39; leave margin
     sprintf(ts, "    window %lu .. %lu",
             (unsigned long)r.timestamp_start, (unsigned long)r.timestamp_end);
@@ -200,12 +191,7 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
 
     /*
       Wire format is a uint16 per bin normalised to the peak; absolute PSD is
-      value/65535 * max_value. Both columns are printed so the raw payload can be
-      checked against the decode without doing the arithmetic by hand.
-
-      Layout is byte-for-byte what WaveManager::printPendingResult writes on the
-      drifter, so a bench transmission can be diffed line for line against the
-      sender - any difference is then the codec or the air, not the formatting.
+      value/65535 * max_value. Both columns are printed so the raw payload can be checked
     */
     const float f_min = (float)r.spec_f_min / wave_freq_scale;
     const float f_max = (float)r.spec_f_max / wave_freq_scale;
@@ -213,9 +199,17 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
 
     sd_writer.debugSerialPrint("    PSD, ");
     sd_writer.debugSerialPrint((float)r.num_bins, 0);
-    sd_writer.debugSerialPrint(" bins of ");
+    sd_writer.debugSerialPrint(" bins, f_min ");
+    sd_writer.debugSerialPrint(f_min, 4);
+    sd_writer.debugSerialPrint(" Hz, f_max ");
+    sd_writer.debugSerialPrint(f_max, 4);
+    sd_writer.debugSerialPrint(" Hz, df ");
     sd_writer.debugSerialPrint(df, 6);
     sd_writer.debugSerialPrintln(" Hz (f_hz raw psd_eta):");
+
+    // Printing the spectrum.
+    // Notice that spectrum frequencies are bin centres, not edges, 
+    // and the step is df = (f_max - f_min)/(num_bins - 1)
     for (uint16_t i = 0; i < r.num_bins; i++){
       sd_writer.debugSerialPrint("      ");
       sd_writer.debugSerialPrint(f_min + i * df, 4);

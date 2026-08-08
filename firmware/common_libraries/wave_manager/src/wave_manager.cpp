@@ -819,8 +819,10 @@ void WaveManager::printPendingResult(Print &out) const {
   // updateTransmitMessage puts in the message - rather than from welch_bin_min and
   // the group size, so this really is the receiver's arithmetic and not a parallel
   // derivation that could agree here and disagree over the air.
-  out.print(F("    PSD, "));  out.print((uint32_t)welch_bins);
-  out.print(F(" bins of "));  out.print(kSpecBinWidthHz, 6);
+  out.print(F("    PSD, "));      out.print((uint32_t)welch_bins);
+  out.print(F(" bins, f_min "));  out.print(kSpecFMinHz, 4);
+  out.print(F(" Hz, f_max "));    out.print(kSpecFMaxHz, 4);
+  out.print(F(" Hz, df "));       out.print(kSpecBinWidthHz, 6);
   out.println(F(" Hz (f_hz raw psd_eta):"));
   for (size_t j = 0; j < welch_bins; j++) {
     out.print(F("      "));      out.print(kSpecFMinHz + j * kSpecBinWidthHz, 4);

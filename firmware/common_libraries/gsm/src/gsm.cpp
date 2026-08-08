@@ -3,8 +3,19 @@
 
 GSM_module GSM;
 
+/*
+  Every public method starts with an enable_notecard guard rather than 
+  guards in main.cpp. This to reduce noise in debugging and wait times.
+*/
+
 void GSM_module::begin()
 {
+    if (!enable_notecard) return;
+    
+    // Setting I2C pins explicitly
+    Wire.setSDA(I2C_SDA_PIN);
+    Wire.setSCL(I2C_SCL_PIN);
+
     notecard.begin();
 
     // Configure the productUID, and instruct the Notecard to stay connected to
@@ -26,6 +37,7 @@ void GSM_module::begin()
 
 void GSM_module::end()
 {
+    if (!enable_notecard) return;
     notecard.end();
 }
 
@@ -37,6 +49,7 @@ void GSM_module::reset()
 
 void GSM_module::init_aux()
 {
+    if (!enable_notecard) return;
     J *req = NoteNewRequest("card.aux");
     JAddStringToObject(req, "mode", "gpio");
 
@@ -57,6 +70,7 @@ void GSM_module::init_aux()
 
 long GSM_module::getTime()
 {
+    if (!enable_notecard) return 0;
     long time = 0;
     J *rsp = notecard.requestAndResponse(notecard.newRequest("card.time"));
     if (rsp != NULL)
@@ -69,6 +83,7 @@ long GSM_module::getTime()
 
 FrequencyMessage GSM_module::receiveMeasurementFrequency()
 {
+    if (!enable_notecard) return FrequencyMessage{};
     // inbound communication
     FrequencyMessage frequency_msg = {default_update_frequency, base_measurement_period, false, target_reading_distance, motion_treshold};
    
@@ -106,6 +121,7 @@ FrequencyMessage GSM_module::receiveMeasurementFrequency()
 
 void GSM_module::sendBuoyMessage(BuoyMessage *msg, uint32_t buoy_id)
 {
+    if (!enable_notecard) return;
 
     byte msg_buffer[byte_message_size];
     memcpy(msg_buffer, msg->byteMsg, msg->byteMsg->numBytes); // remove memcpy since it is unnecessary
@@ -139,6 +155,7 @@ void GSM_module::sendBuoyMessage(BuoyMessage *msg, uint32_t buoy_id)
 
 void GSM_module::sendMessage(const char *msg)
 {
+    if (!enable_notecard) return;
     J *req = notecard.newRequest("note.add");
     if (req != NULL)
     {
@@ -160,6 +177,7 @@ void GSM_module::sendMessage(const char *msg)
 
 void GSM_module::syncMessages(bool sync_input)
 {
+    if (!enable_notecard) return;
     J *sync_req = NoteNewRequest("hub.sync");
     JAddBoolToObject(sync_req, "in", sync_input);
     NoteRequest(sync_req);
@@ -167,6 +185,7 @@ void GSM_module::syncMessages(bool sync_input)
 
 BeaconIncomingMessage GSM_module::receiveBeaconMessage(bool rescue_mode, time_t timeout)
 {
+    if (!enable_notecard) return BeaconIncomingMessage{};
     sd_writer.debugSerialPrintln("Receive beacon rescue function");
     BeaconIncomingMessage beacon_message = {rescue_mode, timeout};
     J *req = NoteNewRequest("note.get");
@@ -199,6 +218,7 @@ BeaconIncomingMessage GSM_module::receiveBeaconMessage(bool rescue_mode, time_t 
 
 void GSM_module::sendBeaconMessage(BeaconOutgoingMessage* msg)
 {
+    if (!enable_notecard) return;
 
 
     if (J *req = notecard.newRequest("note.add"))
@@ -229,6 +249,7 @@ void GSM_module::sendBeaconMessage(BeaconOutgoingMessage* msg)
 
 time_t GSM_module::getDate()
 {
+    if (!enable_notecard) return now();  // uptime clock, so SD filenames still differ
     J *req = NoteNewRequest("card.location");
     J *rsp = NoteRequestResponse(req);
     time_t time = 0;
