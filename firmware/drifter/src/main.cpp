@@ -320,6 +320,20 @@ void task_measure_gps_temp() {
   them in. Getting that wrong is the easiest mistake to make here, which is why
   the test values are deliberately distinct and not round.
 */
+/*
+  Frequency axis this fake spectrum claims to cover, as BIN CENTRES. The real drifter
+  derives these from its Welch settings (segment length and decimated sample rate) and
+  ships them in the message; this target has no wave analysis, so the values are
+  simply the ones that firmware produces for a 1024-sample segment at 10 Hz, grouped
+  two PSD bins per wire bin: df = 2 * 10/1024 = 0.01953125 Hz, first centre at half a
+  group above DC.
+
+  They only need to be plausible and self-consistent - the point of the test message
+  is to exercise the codec, not to describe a real sea state.
+*/
+static constexpr float test_spec_f_min = 0.0048828125f;
+static constexpr float test_spec_f_max = test_spec_f_min + (welch_bins - 1) * 0.01953125f;
+
 struct TestWaveResult {
   uint16_t reading_ID;
   float    Hs;         // significant wave height (m)
@@ -388,16 +402,30 @@ static void build_test_wave_message(byte (&msgB)[wave_message_size], const TestW
   uint8_t offset = 0;
   msgB[offset++] = 'W';
   msg_insert_uint(msgB, res.reading_ID, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)res.timestamp_start, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)res.timestamp_end,   offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Hs),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tc),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tp),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tz),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.max_value), offset, wave_message_size, offset, true);
+
+  // Frequency axis, so the receiver can label the bins it is about to read. Bin
+  // centres, and the count immediately before the bins themselves.
+  // wave_freq_scale, not toFixed's scale_factor - see readings.h for why the axis
+  // needs the finer scale.
+  auto toFreqFixed = [](float f) -> uint32_t {
+    return (uint32_t)llround((double)f * (double)wave_freq_scale);
+  };
+  msg_insert_uint(msgB, toFreqFixed(test_spec_f_min), offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, toFreqFixed(test_spec_f_max), offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint16_t)welch_bins,         offset, wave_message_size, offset, true);
+
+  // Last field: it is the only variable-length one, so stopping short here shortens
+  // the message without moving anything the receiver has already read.
   for (size_t i = 0; i < welch_bins; i++){
     msg_insert_uint(msgB, res.wave_spectrum[i], offset, wave_message_size, offset, true);
   }
-  msg_insert_uint(msgB, (uint32_t)res.timestamp_start, offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, (uint32_t)res.timestamp_end,   offset, wave_message_size, offset, true);
   msgB[offset++] = 'E';
 }
 
