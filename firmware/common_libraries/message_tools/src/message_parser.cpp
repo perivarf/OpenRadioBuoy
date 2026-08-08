@@ -63,7 +63,11 @@ void print_wave_analysis_message(const wave_analysis_Reading &w)
 
     sd_writer.debugSerialPrint("    PSD, ");
     sd_writer.debugSerialPrint((float)w.num_bins, 0);
-    sd_writer.debugSerialPrint(" bins of ");
+    sd_writer.debugSerialPrint(" bins, f_min ");
+    sd_writer.debugSerialPrint(f_min, 4);
+    sd_writer.debugSerialPrint(" Hz, f_max ");
+    sd_writer.debugSerialPrint(f_max, 4);
+    sd_writer.debugSerialPrint(" Hz, df ");
     sd_writer.debugSerialPrint(df, 6);
     sd_writer.debugSerialPrintln(" Hz (f_hz raw psd_eta):");
     for (uint16_t i = 0; i < w.num_bins; i++){
@@ -143,9 +147,11 @@ wave_analysis_Reading Message_Parser::parse_wave_analysis_message(byte *msg)
 
     // Everything up to num_bins sits at a fixed offset; only the spectrum varies, and
     // it comes last, so a message carrying fewer bins still parses down to here.
+    // uint32_t, NOT time_t - the wire carries 4 bytes and time_t is 8 here. See
+    // wave_message_size in readings.h.
     wa_reading_packet.reading_ID      = msg_extract_uint<uint16_t>(msg, offset, true, offset);
-    wa_reading_packet.timestamp_start = msg_extract_uint<time_t>(msg, offset, true, offset);
-    wa_reading_packet.timestamp_end   = msg_extract_uint<time_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_start = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_end   = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Hs         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tc         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tp         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
