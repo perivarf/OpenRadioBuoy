@@ -720,16 +720,31 @@ size_t WaveManager::updateTransmitMessage(void) {
   uint8_t offset = 0;
   msgB[offset++] = 'W';
   msg_insert_uint(msgB, res.reading_ID, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)res.timestamp_start, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)res.timestamp_end,   offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Hs),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tc),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tp),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tz),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.max_value), offset, wave_message_size, offset, true);
+
+  // Frequency axis, so the base station can label the bins it is about to read. Bin
+  // CENTRES, and the count immediately before the bins themselves - the receiver
+  // needs it to know how many to consume.
+  // wave_freq_scale, not toFixed's scale_factor - see readings.h for why the axis
+  // needs the finer scale.
+  auto toFreqFixed = [](float f) -> uint32_t {
+    return (uint32_t)llround((double)f * (double)wave_freq_scale);
+  };
+  msg_insert_uint(msgB, toFreqFixed(kSpecFMinHz), offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, toFreqFixed(kSpecFMaxHz), offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint16_t)welch_bins,     offset, wave_message_size, offset, true);
+
+  // Last field: it is the only variable-length one, so stopping short here shortens
+  // the message without moving anything the receiver has already read.
   for (size_t i = 0; i < welch_bins; i++) {
     msg_insert_uint(msgB, res.wave_spectrum[i], offset, wave_message_size, offset, true);
   }
-  msg_insert_uint(msgB, (uint32_t)res.timestamp_start, offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, (uint32_t)res.timestamp_end,   offset, wave_message_size, offset, true);
   msgB[offset++] = 'E';
 
   wave_analysis_results.pop_front();
@@ -788,17 +803,27 @@ void WaveManager::printPendingResult(Print &out) const {
   out.print(F(" m^2/Hz   span "));
   out.print((uint32_t)(r.timestamp_end - r.timestamp_start));  out.println(F(" s"));
 
+  // sprintf, not out.print(float): an epoch near 1.77e9 does not survive a float
+  // round trip (24-bit mantissa -> rounded to the nearest 128 s), and these are the
+  // fields that wrap if the RTC was never set, so they must be exact to be useful.
+  char ts[64];  // "    window " + two 10-digit values + " .. " is 39; leave margin
+  sprintf(ts, "    window %lu .. %lu",
+          (unsigned long)r.timestamp_start, (unsigned long)r.timestamp_end);
+  out.println(ts);
+
   // The wire format is a normalised uint16 per bin; the base station reconstructs
   // value/65535 * max_value. Both are printed so the raw payload can be checked
   // against the decoded value without doing the arithmetic by hand.
+  //
+  // The frequency is built from kSpecFMinHz and kSpecBinWidthHz - the two values
+  // updateTransmitMessage puts in the message - rather than from welch_bin_min and
+  // the group size, so this really is the receiver's arithmetic and not a parallel
+  // derivation that could agree here and disagree over the air.
   out.print(F("    PSD, "));  out.print((uint32_t)welch_bins);
   out.print(F(" bins of "));  out.print(kSpecBinWidthHz, 6);
   out.println(F(" Hz (f_hz raw psd_eta):"));
   for (size_t j = 0; j < welch_bins; j++) {
-    const float f = ((float)welch_bin_min
-                     + (float)j * (float)kSpecBinGroup
-                     + 0.5f * (float)(kSpecBinGroup - 1)) * kPsdDfHz;
-    out.print(F("      "));      out.print(f, 4);
+    out.print(F("      "));      out.print(kSpecFMinHz + j * kSpecBinWidthHz, 4);
     out.print(' ');              out.print(r.wave_spectrum[j]);
     out.print(' ');
     out.println(r.wave_spectrum[j] / 65535.0f * r.max_value, 6);

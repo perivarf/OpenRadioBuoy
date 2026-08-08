@@ -45,29 +45,72 @@ struct analog_Reading
     time_t timestamp;
 };
 
+/*
+  Fixed-point scale for the frequency axis below - NOT scale_factor.
+
+  scale_factor (1e5) is too coarse here. It quantises the first bin centre 0.0048828
+  to 0.00488 and the last to 0.98145, and after rebuilding the step from that pair the
+  top bins land within 5e-6 Hz of a 4-decimal rounding boundary: the sender prints
+  0.9814 and the receiver 0.9815 for the same bin, which defeats the whole point of
+  the two consoles being diffable. At 1e7 the round trip is exact to well below the
+  printed resolution and the reconstructed step comes back as 0.01953125 on the nose.
+
+  Headroom is not a concern: u32 at this scale reaches 429 Hz against a 10 Hz series.
+*/
+static constexpr uint32_t wave_freq_scale {10000000UL};
+
+// Field order mirrors the wire, and the wire puts every fixed-size field first - see
+// wave_message_size below for why the spectrum has to be last.
 struct wave_analysis_Reading
 {
     uint16_t reading_ID;
+    time_t timestamp_start;
+    time_t timestamp_end;
     uint32_t Hs;
     uint32_t Tc;
     uint32_t Tp;
     uint32_t Tz;
     uint32_t max_value;
+    /*
+      Frequency axis of the spectrum below, carried in the message so the receiver
+      is self-sufficient: it has no sample rate or segment length to derive
+      f = k*fs/N from, and a bin index alone says nothing physical.
+
+      Both are BIN CENTRES, fixed-point by wave_freq_scale above, and num_bins is
+      the count actually on the wire. The step follows:
+
+          df   = (spec_f_max - spec_f_min) / (num_bins - 1)
+          f_j  = spec_f_min + j * df
+
+      num_bins may be smaller than welch_bins - the array is a capacity bound now,
+      not a parse contract - so always loop over num_bins, never welch_bins.
+    */
+    uint32_t spec_f_min;
+    uint32_t spec_f_max;
+    uint16_t num_bins;
     uint16_t wave_spectrum[welch_bins];
-    time_t timestamp_start;
-    time_t timestamp_end;
 };
 
 /*
   On-wire size of a wave-analysis message, framed 'W' ... 'E'. Must match the byte
   layout produced by WaveManager::updateTransmitMessage and consumed by
   Message_Parser::parse_wave_analysis_message: tag + reading_ID(u16) +
-  {Hs,Tc,Tp,Tz,max_value}(5x u32) + wave_spectrum(welch_bins x u16) +
-  {timestamp_start,timestamp_end}(2x time_t) + trailing 'E'.
+  {timestamp_start,timestamp_end}(2x time_t) + {Hs,Tc,Tp,Tz,max_value}(5x u32) +
+  {spec_f_min,spec_f_max}(2x u32) + num_bins(u16) + wave_spectrum(num_bins x u16)
+  + trailing 'E'.
+
+  The spectrum is LAST on purpose: it is the only variable-length field, so a sender
+  that has fewer bins to ship - or none at all - simply stops earlier and everything
+  before it keeps its fixed offset. With the timestamps behind the spectrum instead,
+  every reader had to walk all num_bins just to reach them, which made a truncated
+  message unreadable rather than merely shorter.
+
+  This constant is the size at the FULL bin count, i.e. the largest such message and
+  what the send buffer must hold. The receiver takes the actual length from num_bins.
 */
 static constexpr uint8_t wave_message_size =
-    1 + sizeof(uint16_t) + 5 * sizeof(uint32_t)
-    + welch_bins * sizeof(uint16_t) + 2 * sizeof(time_t) + 1;
+    1 + sizeof(uint16_t) + 2 * sizeof(time_t) + 7 * sizeof(uint32_t)
+    + sizeof(uint16_t) + welch_bins * sizeof(uint16_t) + 1;
 static_assert(wave_message_size <= max_message_length,
     "wave_message_size exceeds the LoRa byte-message buffer (max_message_length)");
 
