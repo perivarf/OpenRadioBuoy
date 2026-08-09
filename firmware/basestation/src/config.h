@@ -3,17 +3,12 @@
 #include "Arduino.h"
 
 /*
-  The console is the mySerial instance in main.cpp (USART1 on PB6/PB7, the
+  The console is the Serial instance in main.cpp (USART1 on PB6/PB7, the
   debug header on this PCB). The variant's own `Serial` is an unused LPUART1 on
   PA2/PA3, so alias it here and every existing Serial.print lands on the header.
   USART1 supports only this orientation: PB6 is in PinMap_UART_TX, PB7 in
   PinMap_UART_RX. Swapping them leaves the line undriven.
 */
-static constexpr uint32_t DEBUG_SERIAL_TX_PIN            {PB6};
-static constexpr uint32_t DEBUG_SERIAL_RX_PIN            {PB7};
-extern HardwareSerial mySerial;
-#undef Serial          // WSerial.h has already aliased it to SerialLP1
-#define Serial mySerial
 
 static constexpr uint8_t BUOY_MODE {0};
 static constexpr uint8_t BST_MODE {1};

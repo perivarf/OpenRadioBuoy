@@ -3,15 +3,11 @@
 #include "Arduino.h"
 
 /*
-  The console is the mySerial instance in main.cpp (USART1 on PB6/PB7). The
+  The console is the Serial instance in main.cpp (USART1 on PB6/PB7). The
   shared libraries print to `Serial`, which on this variant is an unused
   LPUART1 on PA2/PA3, so their output would be lost. Alias it here - config.h
   resolves to each project's own copy, so this does not affect basestation.
 */
-extern HardwareSerial mySerial;
-#undef Serial          // WSerial.h has already aliased it to SerialLP1
-#define Serial mySerial
-
 
 // OLB MODE PARAMETERS - DO NOT ADJUST LIGHTLY
 static constexpr uint8_t BUOY_MODE {0};
@@ -121,13 +117,6 @@ static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
   one. The handshake and the rest of the transmit path are unchanged.
 */
 #define DEBUG_TEST_MSG (DEBUG_WAVE_MSG || DEBUG_GPS_MSG || DEBUG_TEMP_MSG)
-
-// Debug console on USART1, the header pins on this PCB. The ROM bootloader
-// listens on the same pair, so the menu and the flashing use one cable.
-// USART1 supports only this orientation: PB6 is in PinMap_UART_TX, PB7 in
-// PinMap_UART_RX. Swapping them leaves the line undriven.
-static constexpr uint32_t DEBUG_SERIAL_TX_PIN               {PB6};
-static constexpr uint32_t DEBUG_SERIAL_RX_PIN               {PB7};
 
 /*
   Bus wiring on this PCB. Do not change unless you have rewired the ORB.
