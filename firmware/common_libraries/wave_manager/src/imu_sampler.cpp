@@ -81,8 +81,12 @@ bool ImuSampler::begin(Print &dbg) {
 
 // All sensor config
 void ImuSampler::applyConfig() {
+
+  // Enable accelerometer and gyroscope
   imu_.Enable_X();      // accelerometer
   imu_.Enable_G();      // gyroscope
+
+  // Set ranges, ODR and mode (high accuracy, low power etc) from wave_config.h
   imu_.Set_X_FS((int32_t)kAccelFS);   // full-scale from wave_config (kAccelFS)
   imu_.Set_G_FS((int32_t)kGyroFS);    // full-scale from wave_config (kGyroFS)
   imu_.Set_X_ODR((float)kImuOdrHz, kImuAccMode);
@@ -102,10 +106,9 @@ void ImuSampler::applyConfig() {
   // It is a quaternion that rotates the sensor frame into the
   // gravitation frame
   //
-  // The else branch is not redundant: applyConfig() runs again on every capture
-  // through begin(), and the driver's own begin() leaves the SFLP registers alone -
-  // without writing the off state explicitly, the result would depend on whatever
-  // happened to be in them.
+  // SFLP can return estimated gyro bias
+  // Can inject gyro bias at start (if known) to improve convergence
+  // Set_SFLP_GBIAS(float x, float y, float z)  // rad/s
   if (kEnableSflp) {
     imu_.Enable_Rotation_Vector();
     imu_.Set_SFLP_ODR(kSflpOdrHz);
@@ -115,6 +118,7 @@ void ImuSampler::applyConfig() {
     imu_.Set_SFLP_Batch(false, false, false);
   }
 
+  // Interrupt watermark
   if (kImuUseInt1) {
     // Let INT1 go high once the FIFO holds kFifoWatermark words, so the drain runs
     // on the sensor's cadence rather than the main loop's. INT1_CTRL has no setter

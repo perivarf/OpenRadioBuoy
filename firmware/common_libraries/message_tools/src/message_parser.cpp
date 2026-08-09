@@ -70,8 +70,8 @@ wave_analysis_Reading Message_Parser::parse_wave_analysis_message(byte *msg)
     uint8_t offset = 1;
 
     wa_reading_packet.reading_ID      = msg_extract_uint<uint16_t>(msg, offset, true, offset);
-    wa_reading_packet.timestamp_start = msg_extract_uint<uint32_t>(msg, offset, true, offset);
-    wa_reading_packet.timestamp_end   = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_start = msg_extract_uint<time_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_end   = msg_extract_uint<time_t>(msg, offset, true, offset);
     wa_reading_packet.Hs         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tc         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tp         = msg_extract_uint<uint32_t>(msg, offset, true, offset);

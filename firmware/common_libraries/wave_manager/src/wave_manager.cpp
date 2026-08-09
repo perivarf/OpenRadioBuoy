@@ -664,8 +664,8 @@ size_t WaveManager::updateTransmitMessage(void) {
   uint8_t offset = 0;
   msgB[offset++] = 'W';
   msg_insert_uint(msgB, res.reading_ID, offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, (uint32_t)res.timestamp_start, offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, (uint32_t)res.timestamp_end,   offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, res.timestamp_start, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, res.timestamp_end,   offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Hs),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tc),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tp),        offset, wave_message_size, offset, true);

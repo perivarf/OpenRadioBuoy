@@ -78,20 +78,15 @@ struct wave_analysis_Reading
   The spectrum is last on purpose: it is the only variable-length field, so a sender
   that has fewer bins to ship - or none at all - simply stops earlier and everything
   before it keeps its fixed offset.
-
-  The timestamps are uint32_t ON THE WIRE, deliberately not sizeof(time_t).
-  This saves 8B per message, at the cost of overflow in the year 2106.
-  At that point, either add custom epoch handling, or increase field to uint64_t.
-
 */
 static constexpr uint16_t wave_message_size =
-    1 + sizeof(uint16_t) + 2 * sizeof(uint32_t) + 7 * sizeof(uint32_t)
+    1 + sizeof(uint16_t) + 2 * sizeof(time_t) + 7 * sizeof(uint32_t)
     + sizeof(uint16_t) + welch_bins * sizeof(uint16_t) + 1;
 
 static_assert(wave_message_size <= max_message_length,
     "wave_message_size exceeds the LoRa byte-message buffer (max_message_length) - "
     "lower welch_bins in common_config.h; the SX126x payload length field is one byte, "
-    "so 255 is a hard ceiling and welch_bins cannot exceed 106");
+    "so 255 is a hard ceiling and welch_bins cannot exceed 102");
 
 struct buoyInfoReading
 {

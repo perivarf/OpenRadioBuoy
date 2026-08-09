@@ -388,7 +388,8 @@ static constexpr uint16_t kQuatDelaySlots = kQuatDelaySteps + 1;   // 65 (2080 B
 // segments at 75% overlap. 2048 resolved finer but halved the segment count (32),
 // leaving a noisier PSD, and cost ~14 kB more RAM (segBuf_ + psdAcc_ + the FFT
 // scratch buffers) - which matters here. A fetch-limited fjord peaks at 0.15-0.6 Hz;
-// 1024 places ~15 bins across a 0.3 Hz peak, far more than Tp needs.
+// 1024 places ~31 bins across a 0.3 Hz peak. However, welch_bins in common_config.h is 
+// the wire-format capacity, so the transmitted spectrum is coarser than the analysis
 static constexpr uint16_t kWelchSegLen     = 1024;
 static constexpr uint16_t kWelchOverlapDiv = 4;      // step = seglen/4 => 75% overlap
 static_assert((kWelchSegLen & (kWelchSegLen - 1)) == 0, "kWelchSegLen must be a power of two");

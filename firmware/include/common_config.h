@@ -64,7 +64,7 @@ static constexpr uint8_t  max_number_of_thermometres {1};
 // Actual bin count is kSpecNBins in drifter, with kSpecNBins<=welch_bins
 // and the actual bin count is sent in the wave message to basestation
 // In case of this being set to high, a compile time assertion will be through in wave_manager.cpp
-static constexpr size_t welch_bins {106};
+static constexpr size_t welch_bins {102};
 
 // Shared wave-analysis run parameters
 static constexpr bool     base_enable_wave_analysis           {true};
