@@ -11,7 +11,7 @@ static const uint32_t char_message_size = max_message_length;
 
 // This is the unique Product Identifier for our device
 #ifndef PRODUCT_UID
-#define PRODUCT_UID "no.uio.ifi.andreapf:oslofjord_drifter_basestation" 
+#define PRODUCT_UID "com.gmail.per.ivar.faust:imu" 
 #endif
 #define myProductID PRODUCT_UID
 
