@@ -95,7 +95,7 @@ struct wave_analysis_Reading
   On-wire size of a wave-analysis message, framed 'W' ... 'E'. Must match the byte
   layout produced by the drifter and consumed by
   Message_Parser::parse_wave_analysis_message: tag + reading_ID(u16) +
-  {timestamp_start,timestamp_end}(2x u32) + {Hs,Tc,Tp,Tz,max_value}(5x u32) +
+  {timestamp_start,timestamp_end}(2x time_t) + {Hs,Tc,Tp,Tz,max_value}(5x u32) +
   {spec_f_min,spec_f_max}(2x u32) + num_bins(u16) + wave_spectrum(num_bins x u16)
   + trailing 'E'.
 
@@ -108,11 +108,9 @@ struct wave_analysis_Reading
   This constant is the size at the FULL bin count, i.e. the largest such message and
   what the send buffer must hold. The receiver takes the actual length from num_bins.
 
-  The timestamps are uint32_t ON THE WIRE, deliberately not sizeof(time_t): time_t is
-  8 bytes in this toolchain, and the serialiser has always cast them down to 4. Sizing
-  or parsing them as time_t reads 8 bytes where 4 were written and shifts every field
-  behind them - which is invisible while they sit last in the message and corrupts
-  everything once they do not. An epoch fits in uint32 until 2106.
+  Sender and receiver must size them identically: parsing them at a different width
+  than they were written shifts every field behind them, which is invisible while the
+  timestamps sit last in the message and corrupts everything once they do not.
 
   Whether it fits in a given device's ByteMessage buffer is asserted in
   message_parser.h, i.e. only for the targets that actually handle wave messages -
@@ -120,7 +118,7 @@ struct wave_analysis_Reading
   max_message_length is smaller and which neither sends nor receives them.
 */
 static constexpr uint8_t wave_message_size =
-    1 + sizeof(uint16_t) + 2 * sizeof(uint32_t) + 7 * sizeof(uint32_t)
+    1 + sizeof(uint16_t) + 2 * sizeof(time_t) + 7 * sizeof(uint32_t)
     + sizeof(uint16_t) + welch_bins * sizeof(uint16_t) + 1;
 
 struct buoyInfoReading

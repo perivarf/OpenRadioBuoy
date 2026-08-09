@@ -147,11 +147,11 @@ wave_analysis_Reading Message_Parser::parse_wave_analysis_message(byte *msg)
 
     // Everything up to num_bins sits at a fixed offset; only the spectrum varies, and
     // it comes last, so a message carrying fewer bins still parses down to here.
-    // uint32_t, NOT time_t - the wire carries 4 bytes and time_t is 8 here. See
-    // wave_message_size in readings.h.
+    // time_t, matching the width the sender writes - see wave_message_size in
+    // readings.h. Extracting at any other width shifts every field behind it.
     wa_reading_packet.reading_ID      = msg_extract_uint<uint16_t>(msg, offset, true, offset);
-    wa_reading_packet.timestamp_start = msg_extract_uint<uint32_t>(msg, offset, true, offset);
-    wa_reading_packet.timestamp_end   = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_start = msg_extract_uint<time_t>(msg, offset, true, offset);
+    wa_reading_packet.timestamp_end   = msg_extract_uint<time_t>(msg, offset, true, offset);
     wa_reading_packet.Hs         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tc         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tp         = msg_extract_uint<uint32_t>(msg, offset, true, offset);

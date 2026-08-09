@@ -1,0 +1,868 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORB telemetry</title>
+<style>
+  /*
+    Palette roles. Light values on :root, dark values redefined under both the OS
+    media query and an explicit [data-theme="dark"] stamp, so a toggle - if one
+    is ever added - wins in either direction.
+
+    The eight categorical slots are used in fixed order and never cycled; the
+    temperature chart is the only consumer that can reach slot 8 (the drifter
+    carries at most max_number_of_thermometres = 8 sensors).
+  */
+  :root {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --axis:           #c3c2b7;
+    --border:         rgba(11, 11, 11, 0.10);
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+    --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+    --ramp: #cde2fb, #b7d3f6, #9ec5f4, #86b6ef, #6da7ec, #5598e7, #3987e5,
+            #2a78d6, #256abf, #1c5cab, #184f95, #104281, #0d366b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --axis:           #383835;
+      --border:         rgba(255, 255, 255, 0.10);
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+      --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 20px 64px;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  header { margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--text-secondary); font-size: 13px; }
+  h2.section {
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-secondary); margin: 28px 0 10px;
+  }
+
+  /* One filter row above everything it scopes - never inside a chart card. */
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 20px; }
+  .filters .spacer { flex: 1 1 auto; }
+  select, button {
+    font: inherit; color: var(--text-primary);
+    background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--axis); }
+  button[aria-pressed="true"] { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+  .seg { display: flex; gap: 4px; }
+
+  .tiles { display: grid; gap: 12px; margin-bottom: 4px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .tile .label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tile .value { font-size: 28px; font-weight: 600; line-height: 1.15; margin-top: 4px; }
+  .tile .value.small { font-size: 18px; }
+  .tile .unit { font-size: 15px; font-weight: 400; color: var(--text-secondary); margin-left: 3px; }
+  .tile .note { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  .card { position: relative; background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .card h3 { font-size: 14px; font-weight: 600; margin: 0 0 2px; }
+  .card .cap { font-size: 12px; color: var(--text-secondary); margin: 0 0 12px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  .tip {
+    position: absolute; pointer-events: none; opacity: 0;
+    transform: translate(-50%, -100%);
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 9px; font-size: 12px; white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.13); transition: opacity 90ms linear; z-index: 4;
+  }
+  .tip b { font-weight: 600; }
+  .tip .row { display: flex; align-items: center; gap: 6px; }
+
+  .colorbar { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+  .colorbar canvas { border-radius: 3px; border: 1px solid var(--border); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th { color: var(--text-secondary); font-weight: 600; }
+  th:first-child, td:first-child { text-align: left; }
+  .tablewrap { overflow-x: auto; max-height: 360px; overflow-y: auto; }
+
+  .empty { color: var(--text-secondary); padding: 28px 0; text-align: center; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Open Radio Buoy — telemetry</h1>
+  <div class="sub" id="subtitle">Loading…</div>
+</header>
+
+<div class="filters">
+  <select id="buoy" aria-label="Buoy"></select>
+  <div class="seg" id="range" role="group" aria-label="Time range">
+    <button data-hours="24">24 h</button>
+    <button data-hours="168">7 d</button>
+    <button data-hours="720">30 d</button>
+    <button data-hours="0" aria-pressed="true">All</button>
+  </div>
+  <div class="spacer"></div>
+  <button id="toggleTable" aria-pressed="false">Table view</button>
+  <button id="refresh">Refresh</button>
+</div>
+
+<div class="tiles" id="tiles"></div>
+
+<h2 class="section" id="sec-wave">Waves</h2>
+<div class="card" id="card-hs">
+  <h3>Significant wave height</h3>
+  <p class="cap">H<sub>s</sub> per measurement window, metres.</p>
+  <div class="plot" id="plot-hs"></div>
+  <div class="tip" id="tip-hs"></div>
+</div>
+
+<div class="card" id="card-periods">
+  <h3>Wave periods</h3>
+  <p class="cap">Peak, zero-crossing and crest period, seconds. Same unit, so they share one axis.</p>
+  <div class="legend" id="legend-periods"></div>
+  <div class="plot" id="plot-periods"></div>
+  <div class="tip" id="tip-periods"></div>
+</div>
+
+<div class="card" id="card-fall">
+  <h3>Spectrum waterfall</h3>
+  <p class="cap">Elevation PSD, m²/Hz. One column per measurement, evenly spaced — hover a column to read it below; click to pin it.</p>
+  <div class="plot" id="plot-fall"></div>
+  <div class="colorbar">
+    <span id="cb-min">0</span>
+    <canvas id="cb" width="180" height="10"></canvas>
+    <span id="cb-max">—</span>
+    <span style="color:var(--text-muted)">m²/Hz</span>
+  </div>
+  <div class="tip" id="tip-fall"></div>
+</div>
+
+<div class="card" id="card-spec">
+  <h3>Selected spectrum</h3>
+  <p class="cap" id="spec-cap">Latest measurement.</p>
+  <div class="plot" id="plot-spec"></div>
+  <div class="tip" id="tip-spec"></div>
+</div>
+
+<h2 class="section" id="sec-gps">Position</h2>
+<div class="card" id="card-track">
+  <h3>Drift track</h3>
+  <p class="cap">Every GPS fix in this slice, oldest to newest. Longitude is scaled by cos(latitude), so distances read true in both directions.</p>
+  <div class="plot" id="plot-track"></div>
+  <div class="tip" id="tip-track"></div>
+</div>
+
+<div class="card" id="card-speed">
+  <h3>Speed over ground</h3>
+  <p class="cap">Metres per second, from the GPS fix. Heading is in the tooltip and the table.</p>
+  <div class="plot" id="plot-speed"></div>
+  <div class="tip" id="tip-speed"></div>
+</div>
+
+<h2 class="section" id="sec-temp">Temperature</h2>
+<div class="card" id="card-temp">
+  <h3>Thermometer string</h3>
+  <p class="cap">Degrees Celsius per sensor, in sensor order. Values outside −20…60 °C are dropped as sensor faults rather than plotted.</p>
+  <div class="legend" id="legend-temp"></div>
+  <div class="plot" id="plot-temp"></div>
+  <div class="tip" id="tip-temp"></div>
+</div>
+
+<div id="tables" hidden>
+  <h2 class="section">Table view</h2>
+  <div class="card" id="card-table-wave">
+    <h3>Wave measurements</h3>
+    <div class="tablewrap"><table id="table-wave"></table></div>
+  </div>
+  <div class="card" id="card-table-gps">
+    <h3>GPS fixes</h3>
+    <div class="tablewrap"><table id="table-gps"></table></div>
+  </div>
+  <div class="card" id="card-table-temp">
+    <h3>Temperature readings</h3>
+    <div class="tablewrap"><table id="table-temp"></table></div>
+  </div>
+</div>
+
+</div>
+
+<script>
+/* ---------- state ---------- */
+
+let waveRows = [];      // all three arrays are oldest-first, as served by the API
+let gpsRows = [];
+let tempRows = [];
+let selectedIndex = -1; // waterfall column pinned/hovered; -1 = latest
+let pinned = false;
+let hours = 0;
+let buoy = "all";
+
+// A DS18B20 that has dropped off the bus reports 85 or -127, and either one
+// flattens a real 4-18 degree water series into a straight line.
+const TEMP_MIN = -20, TEMP_MAX = 60;
+const plausibleTemp = (v) => (Number.isFinite(v) && v > TEMP_MIN && v < TEMP_MAX ? v : null);
+
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const seriesColor = (slot) => css("--series-" + (slot + 1));
+const rampSteps = () => css("--ramp").split(",").map((s) => s.trim());
+
+const fmtNum = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v) ? "—" : Number(v).toFixed(d));
+const fmtTime = (s) => new Date(s * 1000).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+const fmtDate = (s) => new Date(s * 1000).toLocaleDateString([], { month: "short", day: "2-digit" });
+
+/* ---------- generic line chart (SVG) ---------- */
+
+function niceTicks(min, max, count) {
+  if (min === max) { min -= 0.5; max += 0.5; }
+  const raw = (max - min) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+  const first = Math.ceil(min / step) * step;
+  const out = [];
+  for (let v = first; v <= max + step * 1e-6; v += step) out.push(Number(v.toFixed(10)));
+  return out;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const el = (name, attrs) => {
+  const n = document.createElementNS(SVG_NS, name);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+};
+
+function placeTip(tip, host, chartRect, x, y) {
+  const cardBox = (host.offsetParent || host).getBoundingClientRect();
+  tip.style.left = (chartRect.left - cardBox.left + x) + "px";
+  tip.style.top = (chartRect.top - cardBox.top + y) + "px";
+  tip.style.opacity = 1;
+}
+
+/*
+  series: [{name, color, values:[number|null]}], x: shared across series.
+  Hover is a crosshair on the nearest x, never the only way to read a value - the
+  endpoint of each series is direct-labelled and the table view has them all.
+*/
+function lineChart(host, tip, { x, series, height = 210, yFormat = (v) => fmtNum(v), xFormat = fmtDate, yUnit = "", tipTime = true }) {
+  host.innerHTML = "";
+  if (!x.length) {
+    host.innerHTML = '<div class="empty">No measurements in this range.</div>';
+    return;
+  }
+
+  const W = Math.max(host.clientWidth || 640, 320);
+  const H = height;
+  const M = { t: 12, r: 62, b: 26, l: 46 };
+  const pw = W - M.l - M.r;
+  const ph = H - M.t - M.b;
+
+  const finite = series.flatMap((s) => s.values).filter((v) => Number.isFinite(v));
+  if (!finite.length) {
+    host.innerHTML = '<div class="empty">No usable values in this range.</div>';
+    return;
+  }
+  let ymin = Math.min(...finite), ymax = Math.max(...finite);
+  const pad = (ymax - ymin || Math.abs(ymax) || 1) * 0.12;
+  ymin = ymin - pad;
+  ymax = ymax + pad;
+
+  const xmin = x[0], xmax = x[x.length - 1];
+  const sx = (v) => M.l + (xmax === xmin ? pw / 2 : ((v - xmin) / (xmax - xmin)) * pw);
+  const sy = (v) => M.t + ph - ((v - ymin) / (ymax - ymin)) * ph;
+
+  const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img" });
+
+  // Recessive chrome: solid hairlines, one shade off the surface. Never dashed.
+  for (const t of niceTicks(ymin, ymax, 4)) {
+    svg.appendChild(el("line", { x1: M.l, x2: M.l + pw, y1: sy(t), y2: sy(t), stroke: css("--grid"), "stroke-width": 1 }));
+    const lab = el("text", { x: M.l - 8, y: sy(t) + 4, "text-anchor": "end", fill: css("--text-muted"), "font-size": 11 });
+    lab.textContent = yFormat(t);
+    svg.appendChild(lab);
+  }
+  svg.appendChild(el("line", { x1: M.l, x2: M.l + pw, y1: M.t + ph, y2: M.t + ph, stroke: css("--axis"), "stroke-width": 1 }));
+
+  const xticks = Math.min(6, x.length);
+  for (let i = 0; i < xticks; i++) {
+    const idx = Math.round((i / Math.max(xticks - 1, 1)) * (x.length - 1));
+    const lab = el("text", { x: sx(x[idx]), y: H - 8, "text-anchor": "middle", fill: css("--text-muted"), "font-size": 11 });
+    lab.textContent = xFormat(x[idx]);
+    svg.appendChild(lab);
+  }
+
+  for (const s of series) {
+    let d = "", pen = false;
+    s.values.forEach((v, i) => {
+      if (!Number.isFinite(v)) { pen = false; return; }
+      d += (pen ? "L" : "M") + sx(x[i]) + " " + sy(v);
+      pen = true;
+    });
+    svg.appendChild(el("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+
+    // Selective direct label: the endpoint only. This is also the relief that the
+    // three sub-3:1 light-mode slots require.
+    let last = -1;
+    s.values.forEach((v, i) => { if (Number.isFinite(v)) last = i; });
+    if (last >= 0) {
+      svg.appendChild(el("circle", { cx: sx(x[last]), cy: sy(s.values[last]), r: 3.5, fill: s.color, stroke: css("--surface-1"), "stroke-width": 2 }));
+      const t = el("text", { x: sx(x[last]) + 9, y: sy(s.values[last]) + 4, fill: css("--text-secondary"), "font-size": 11 });
+      t.textContent = yFormat(s.values[last]) + (yUnit ? " " + yUnit : "");
+      svg.appendChild(t);
+    }
+  }
+
+  const cross = el("line", { x1: 0, x2: 0, y1: M.t, y2: M.t + ph, stroke: css("--axis"), "stroke-width": 1, opacity: 0 });
+  svg.appendChild(cross);
+  const dots = series.map((s) => {
+    const c = el("circle", { r: 4.5, fill: s.color, stroke: css("--surface-1"), "stroke-width": 2, opacity: 0 });
+    svg.appendChild(c);
+    return c;
+  });
+
+  const hit = el("rect", { x: M.l, y: M.t, width: pw, height: ph, fill: "transparent", cursor: "crosshair" });
+  svg.appendChild(hit);
+
+  hit.addEventListener("mousemove", (e) => {
+    const bounds = svg.getBoundingClientRect();
+    const px = e.clientX - bounds.left;
+    let best = 0, bestD = Infinity;
+    x.forEach((v, i) => { const d = Math.abs(sx(v) - px); if (d < bestD) { bestD = d; best = i; } });
+
+    cross.setAttribute("x1", sx(x[best]));
+    cross.setAttribute("x2", sx(x[best]));
+    cross.setAttribute("opacity", 1);
+
+    let html = "<b>" + (tipTime ? fmtTime(x[best]) : xFormat(x[best])) + "</b>";
+    series.forEach((s, si) => {
+      const v = s.values[best];
+      if (Number.isFinite(v)) {
+        dots[si].setAttribute("cx", sx(x[best]));
+        dots[si].setAttribute("cy", sy(v));
+        dots[si].setAttribute("opacity", 1);
+        html += '<div class="row"><span class="swatch" style="background:' + s.color + '"></span>' +
+                s.name + " " + yFormat(v) + (yUnit ? " " + yUnit : "") + "</div>";
+      } else {
+        dots[si].setAttribute("opacity", 0);
+      }
+    });
+    if (typeof series.extraTip === "function") html += series.extraTip(best);
+
+    tip.innerHTML = html;
+    placeTip(tip, host, bounds, sx(x[best]), M.t - 8);
+  });
+  hit.addEventListener("mouseleave", () => {
+    tip.style.opacity = 0;
+    cross.setAttribute("opacity", 0);
+    dots.forEach((d) => d.setAttribute("opacity", 0));
+  });
+
+  host.appendChild(svg);
+}
+
+/* ---------- drift track (SVG, equal aspect) ---------- */
+
+function trackChart(host, tip, rows) {
+  host.innerHTML = "";
+  const pts = rows.filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lng));
+  if (!pts.length) {
+    host.innerHTML = '<div class="empty">No GPS fixes in this range.</div>';
+    return;
+  }
+
+  const W = Math.max(host.clientWidth || 640, 320);
+  const H = 320;
+  const M = { t: 12, r: 68, b: 26, l: 58 };
+  const pw = W - M.l - M.r;
+  const ph = H - M.t - M.b;
+
+  // Equidistant-cylindrical: scaling longitude by cos(lat) makes a degree of
+  // longitude the same distance on screen as a degree of latitude, so the track
+  // shape is not stretched. Good enough for a drift track's span.
+  const latMean = pts.reduce((a, p) => a + p.lat, 0) / pts.length;
+  const kx = Math.cos((latMean * Math.PI) / 180) || 1;
+  const px = (p) => p.lng * kx;
+
+  let x0 = Math.min(...pts.map(px)), x1 = Math.max(...pts.map(px));
+  let y0 = Math.min(...pts.map((p) => p.lat)), y1 = Math.max(...pts.map((p) => p.lat));
+  const spanX = x1 - x0 || 1e-4, spanY = y1 - y0 || 1e-4;
+
+  // One scale for both axes, then centre the shorter span in the plot.
+  const scale = Math.min(pw / (spanX * 1.1), ph / (spanY * 1.1));
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const sx = (p) => M.l + pw / 2 + (px(p) - cx) * scale;
+  const sy = (p) => M.t + ph / 2 - (p.lat - cy) * scale;
+
+  const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img" });
+
+  for (const t of niceTicks(y0, y1, 3)) {
+    const y = M.t + ph / 2 - (t - cy) * scale;
+    if (y < M.t || y > M.t + ph) continue;
+    svg.appendChild(el("line", { x1: M.l, x2: M.l + pw, y1: y, y2: y, stroke: css("--grid"), "stroke-width": 1 }));
+    const lab = el("text", { x: M.l - 8, y: y + 4, "text-anchor": "end", fill: css("--text-muted"), "font-size": 11 });
+    lab.textContent = t.toFixed(4) + "°";
+    svg.appendChild(lab);
+  }
+  for (const t of niceTicks(x0 / kx, x1 / kx, 3)) {
+    const x = M.l + pw / 2 + (t * kx - cx) * scale;
+    if (x < M.l || x > M.l + pw) continue;
+    svg.appendChild(el("line", { x1: x, x2: x, y1: M.t, y2: M.t + ph, stroke: css("--grid"), "stroke-width": 1 }));
+    const lab = el("text", { x, y: H - 8, "text-anchor": "middle", fill: css("--text-muted"), "font-size": 11 });
+    lab.textContent = t.toFixed(4) + "°";
+    svg.appendChild(lab);
+  }
+
+  const color = seriesColor(0);
+  svg.appendChild(el("path", {
+    d: pts.map((p, i) => (i ? "L" : "M") + sx(p) + " " + sy(p)).join(""),
+    fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round",
+  }));
+
+  // Direct labels on the two points that carry the story: where it started and
+  // where it is now. A 2px surface ring keeps them legible over the path.
+  const first = pts[0], last = pts[pts.length - 1];
+  svg.appendChild(el("circle", { cx: sx(first), cy: sy(first), r: 4.5, fill: css("--surface-1"), stroke: color, "stroke-width": 2 }));
+  svg.appendChild(el("circle", { cx: sx(last), cy: sy(last), r: 5.5, fill: color, stroke: css("--surface-1"), "stroke-width": 2 }));
+  const labStart = el("text", { x: sx(first) + 9, y: sy(first) + 4, fill: css("--text-secondary"), "font-size": 11 });
+  labStart.textContent = "start";
+  svg.appendChild(labStart);
+  const labNow = el("text", { x: sx(last) + 10, y: sy(last) + 4, fill: css("--text-secondary"), "font-size": 11 });
+  labNow.textContent = last.lat.toFixed(4) + ", " + last.lng.toFixed(4);
+  svg.appendChild(labNow);
+
+  const hover = el("circle", { r: 6, fill: "none", stroke: color, "stroke-width": 2, opacity: 0 });
+  svg.appendChild(hover);
+  const hit = el("rect", { x: M.l, y: M.t, width: pw, height: ph, fill: "transparent", cursor: "crosshair" });
+  svg.appendChild(hit);
+
+  // Nearest-point layer: the hit target is the whole plot, not the 5px dot.
+  hit.addEventListener("mousemove", (e) => {
+    const bounds = svg.getBoundingClientRect();
+    const mx = e.clientX - bounds.left, my = e.clientY - bounds.top;
+    let best = pts[0], bestD = Infinity;
+    for (const p of pts) {
+      const d = (sx(p) - mx) ** 2 + (sy(p) - my) ** 2;
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    hover.setAttribute("cx", sx(best));
+    hover.setAttribute("cy", sy(best));
+    hover.setAttribute("opacity", 1);
+    tip.innerHTML = "<b>" + fmtTime(best.timestamp) + "</b>" +
+      "<div>" + best.lat.toFixed(5) + ", " + best.lng.toFixed(5) + "</div>" +
+      "<div>" + fmtNum(best.vel) + " m/s · " + fmtNum(best.direction, 0) + "°</div>";
+    placeTip(tip, host, bounds, sx(best), sy(best) - 10);
+  });
+  hit.addEventListener("mouseleave", () => { tip.style.opacity = 0; hover.setAttribute("opacity", 0); });
+
+  host.appendChild(svg);
+}
+
+/* ---------- waterfall (canvas) ---------- */
+
+function drawWaterfall(host, tip) {
+  host.innerHTML = "";
+  if (!waveRows.length) {
+    host.innerHTML = '<div class="empty">No measurements in this range.</div>';
+    return;
+  }
+
+  const W = Math.max(host.clientWidth || 640, 320);
+  const H = 260;
+  const M = { t: 8, r: 12, b: 26, l: 46 };
+  const pw = W - M.l - M.r;
+  const ph = H - M.t - M.b;
+
+  const canvas = document.createElement("canvas");
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  canvas.style.cursor = "crosshair";
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // Absolute scale across the whole slice, so columns are comparable.
+  const vmax = Math.max(...waveRows.map((r) => r.max_value || 0)) || 1;
+  const fmin = Math.min(...waveRows.map((r) => r.f_min));
+  const fmax = Math.max(...waveRows.map((r) => r.f_max));
+
+  const ramp = rampSteps();
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches && document.documentElement.dataset.theme !== "light";
+  // Sequential, one hue: near-zero recedes toward the surface, so the ramp runs
+  // light-to-dark on a light surface and dark-to-light on a dark one.
+  const colorOf = (t) => {
+    const i = Math.max(0, Math.min(ramp.length - 1, Math.round(t * (ramp.length - 1))));
+    return dark ? ramp[ramp.length - 1 - i] : ramp[i];
+  };
+
+  const colW = pw / waveRows.length;
+  waveRows.forEach((r, ci) => {
+    const bins = r.spectrum.length;
+    if (!bins) return;
+    const df = bins > 1 ? (r.f_max - r.f_min) / (bins - 1) : 0;
+    for (let b = 0; b < bins; b++) {
+      const psd = (r.spectrum[b] / 65535) * (r.max_value || 0);
+      const f0 = r.f_min + (b - 0.5) * df;
+      const f1 = r.f_min + (b + 0.5) * df;
+      const y0 = M.t + ph - ((f1 - fmin) / (fmax - fmin)) * ph;
+      const y1 = M.t + ph - ((f0 - fmin) / (fmax - fmin)) * ph;
+      ctx.fillStyle = colorOf(Math.sqrt(psd / vmax)); // sqrt: swell peaks are narrow
+      ctx.fillRect(M.l + ci * colW, y0, Math.ceil(colW) + 0.5, Math.ceil(y1 - y0) + 0.5);
+    }
+  });
+
+  ctx.font = '11px system-ui, -apple-system, "Segoe UI", sans-serif';
+  ctx.fillStyle = css("--text-muted");
+  ctx.textAlign = "right";
+  for (const t of niceTicks(fmin, fmax, 4)) {
+    if (t < fmin || t > fmax) continue;
+    const y = M.t + ph - ((t - fmin) / (fmax - fmin)) * ph;
+    ctx.fillText(t.toFixed(2), M.l - 8, y + 4);
+  }
+  ctx.save();
+  ctx.translate(12, M.t + ph / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.fillText("Hz", 0, 0);
+  ctx.restore();
+
+  ctx.textAlign = "center";
+  const xticks = Math.min(6, waveRows.length);
+  for (let i = 0; i < xticks; i++) {
+    const idx = Math.round((i / Math.max(xticks - 1, 1)) * (waveRows.length - 1));
+    ctx.fillText(fmtDate(waveRows[idx].ts_start), M.l + (idx + 0.5) * colW, H - 8);
+  }
+
+  ctx.strokeStyle = css("--axis");
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(M.l, M.t + ph + 0.5);
+  ctx.lineTo(M.l + pw, M.t + ph + 0.5);
+  ctx.stroke();
+
+  const indexAt = (clientX) => {
+    const b = canvas.getBoundingClientRect();
+    return Math.max(0, Math.min(waveRows.length - 1, Math.floor((clientX - b.left - M.l) / colW)));
+  };
+
+  canvas.addEventListener("mousemove", (e) => {
+    const i = indexAt(e.clientX);
+    const r = waveRows[i];
+    tip.innerHTML = "<b>" + fmtTime(r.ts_start) + "</b>" +
+      "<div>H<sub>s</sub> " + fmtNum(r.hs) + " m · T<sub>p</sub> " + fmtNum(r.tp) + " s</div>" +
+      "<div>peak PSD " + fmtNum(r.max_value, 4) + " m²/Hz</div>";
+    placeTip(tip, host, canvas.getBoundingClientRect(), M.l + (i + 0.5) * colW, M.t - 8);
+    if (!pinned) { selectedIndex = i; renderSpectrum(); }
+  });
+  canvas.addEventListener("mouseleave", () => { tip.style.opacity = 0; });
+  canvas.addEventListener("click", (e) => {
+    const i = indexAt(e.clientX);
+    pinned = !(pinned && selectedIndex === i);
+    selectedIndex = i;
+    renderSpectrum();
+  });
+
+  host.appendChild(canvas);
+
+  // Colorbar legend - the waterfall encodes on color alone, so it needs one.
+  const cb = document.getElementById("cb");
+  const cctx = cb.getContext("2d");
+  for (let x = 0; x < cb.width; x++) {
+    cctx.fillStyle = colorOf(x / (cb.width - 1));
+    cctx.fillRect(x, 0, 1, cb.height);
+  }
+  document.getElementById("cb-max").textContent = fmtNum(vmax, 4);
+}
+
+/* ---------- renders ---------- */
+
+const tile = (label, value, unit, note, small) =>
+  '<div class="tile"><div class="label">' + label + '</div><div class="value' + (small ? " small" : "") + '">' + value +
+  (unit ? '<span class="unit">' + unit + "</span>" : "") + '</div><div class="note">' + note + "</div></div>";
+
+function renderTiles() {
+  const host = document.getElementById("tiles");
+  const w = waveRows[waveRows.length - 1];
+  const g = gpsRows[gpsRows.length - 1];
+  const t = tempRows[tempRows.length - 1];
+  let html = "";
+
+  if (w) {
+    html += tile("H<sub>s</sub>", fmtNum(w.hs), "m", "significant height");
+    html += tile("T<sub>p</sub>", fmtNum(w.tp), "s", "peak period");
+  }
+  if (t) {
+    const first = t.temps.map(plausibleTemp).find((v) => v !== null);
+    html += tile("Water temp", first === undefined ? "—" : fmtNum(first), "°C", "sensor 1 of " + t.num_sensors);
+  }
+  if (g) {
+    html += tile("Speed", fmtNum(g.vel), "m/s", "over ground, " + fmtNum(g.direction, 0) + "°");
+    html += tile("Position", g.lat.toFixed(4) + ", " + g.lng.toFixed(4), "", fmtTime(g.timestamp), true);
+  }
+
+  const last = [w, g, t].filter(Boolean).map((r) => r.received);
+  if (last.length) {
+    const newest = [w, g, t].filter(Boolean).sort((a, b) => b.received - a.received)[0];
+    html += tile("Received", fmtTime(Math.max(...last)), "", "buoy " + newest.buoy_id, true);
+  }
+
+  host.innerHTML = html;
+}
+
+function renderSpectrum() {
+  const i = selectedIndex >= 0 && selectedIndex < waveRows.length ? selectedIndex : waveRows.length - 1;
+  const r = waveRows[i];
+  const cap = document.getElementById("spec-cap");
+  if (!r) {
+    document.getElementById("plot-spec").innerHTML = '<div class="empty">No measurements in this range.</div>';
+    cap.textContent = "";
+    return;
+  }
+
+  const bins = r.spectrum.length;
+  const df = bins > 1 ? (r.f_max - r.f_min) / (bins - 1) : 0;
+  const freqs = r.spectrum.map((_, b) => r.f_min + b * df);
+  const psd = r.spectrum.map((v) => (v / 65535) * (r.max_value || 0));
+
+  cap.textContent = fmtTime(r.ts_start) + " – " + fmtTime(r.ts_end) +
+    (pinned ? " (pinned — click the column again to release)" : " (latest; hover the waterfall to change)");
+
+  lineChart(document.getElementById("plot-spec"), document.getElementById("tip-spec"), {
+    x: freqs,
+    series: [{ name: "PSD", color: seriesColor(0), values: psd }],
+    height: 200,
+    yFormat: (v) => v.toFixed(3),
+    xFormat: (v) => v.toFixed(2) + " Hz",
+    yUnit: "m²/Hz",
+    tipTime: false,
+  });
+}
+
+function renderWave() {
+  const has = waveRows.length > 0;
+  ["sec-wave", "card-hs", "card-periods", "card-fall", "card-spec"].forEach((id) =>
+    document.getElementById(id).toggleAttribute("hidden", !has));
+  if (!has) return;
+
+  const x = waveRows.map((r) => r.ts_start);
+
+  lineChart(document.getElementById("plot-hs"), document.getElementById("tip-hs"), {
+    x,
+    series: [{ name: "Hs", color: seriesColor(0), values: waveRows.map((r) => r.hs) }],
+    yUnit: "m",
+  });
+
+  const periods = [
+    { name: "Tp", color: seriesColor(0), values: waveRows.map((r) => r.tp) },
+    { name: "Tz", color: seriesColor(1), values: waveRows.map((r) => r.tz) },
+    { name: "Tc", color: seriesColor(2), values: waveRows.map((r) => r.tc) },
+  ];
+  document.getElementById("legend-periods").innerHTML = periods
+    .map((s) => '<span><i class="swatch" style="background:' + s.color + '"></i>' + s.name + "</span>").join("");
+  lineChart(document.getElementById("plot-periods"), document.getElementById("tip-periods"), { x, series: periods, yUnit: "s" });
+
+  drawWaterfall(document.getElementById("plot-fall"), document.getElementById("tip-fall"));
+  renderSpectrum();
+}
+
+function renderGps() {
+  const has = gpsRows.length > 0;
+  ["sec-gps", "card-track", "card-speed"].forEach((id) =>
+    document.getElementById(id).toggleAttribute("hidden", !has));
+  if (!has) return;
+
+  trackChart(document.getElementById("plot-track"), document.getElementById("tip-track"), gpsRows);
+
+  const speed = [{ name: "Speed", color: seriesColor(0), values: gpsRows.map((r) => r.vel) }];
+  // Heading shares the x but not the unit, so it rides in the tooltip instead of
+  // getting a second y-axis.
+  speed.extraTip = (i) => '<div class="row">heading ' + fmtNum(gpsRows[i].direction, 0) + "°</div>";
+  lineChart(document.getElementById("plot-speed"), document.getElementById("tip-speed"), {
+    x: gpsRows.map((r) => r.timestamp),
+    series: speed,
+    yFormat: (v) => v.toFixed(2),
+    yUnit: "m/s",
+  });
+}
+
+function renderTemp() {
+  const has = tempRows.length > 0;
+  ["sec-temp", "card-temp"].forEach((id) => document.getElementById(id).toggleAttribute("hidden", !has));
+  if (!has) return;
+
+  // Slots are assigned by sensor index and never by rank, so a sensor keeps its
+  // colour when another one drops out of the slice. Eight is the hardware limit
+  // and also the palette's limit - nothing is ever cycled.
+  const sensors = Math.min(8, Math.max(...tempRows.map((r) => r.temps.length)));
+  const series = [];
+  for (let s = 0; s < sensors; s++) {
+    const values = tempRows.map((r) => plausibleTemp(r.temps[s]));
+    if (values.every((v) => v === null)) continue;
+    series.push({ name: "Sensor " + (s + 1), color: seriesColor(s), values });
+  }
+
+  document.getElementById("legend-temp").innerHTML = series
+    .map((s) => '<span><i class="swatch" style="background:' + s.color + '"></i>' + s.name + "</span>").join("");
+
+  lineChart(document.getElementById("plot-temp"), document.getElementById("tip-temp"), {
+    x: tempRows.map((r) => r.timestamp),
+    series,
+    yFormat: (v) => v.toFixed(1),
+    yUnit: "°C",
+  });
+}
+
+function buildTable(id, head, rows, cells) {
+  const t = document.getElementById(id);
+  t.innerHTML = "<thead><tr>" + head.map((h) => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>" +
+    rows.slice().reverse().map((r) => "<tr>" + cells(r).map((c) => "<td>" + c + "</td>").join("") + "</tr>").join("") +
+    "</tbody>";
+}
+
+function renderTables() {
+  document.getElementById("card-table-wave").toggleAttribute("hidden", !waveRows.length);
+  document.getElementById("card-table-gps").toggleAttribute("hidden", !gpsRows.length);
+  document.getElementById("card-table-temp").toggleAttribute("hidden", !tempRows.length);
+
+  buildTable("table-wave",
+    ["Received", "Window start", "Buoy", "Reading", "Hs (m)", "Tp (s)", "Tz (s)", "Tc (s)", "Peak PSD", "Bins", "RSSI"],
+    waveRows,
+    (r) => [fmtTime(r.received), fmtTime(r.ts_start), r.buoy_id, r.reading_id, fmtNum(r.hs), fmtNum(r.tp),
+            fmtNum(r.tz), fmtNum(r.tc), fmtNum(r.max_value, 4), r.num_bins, r.rssi === null ? "—" : r.rssi]);
+
+  buildTable("table-gps",
+    ["Received", "Fix time", "Buoy", "Reading", "Latitude", "Longitude", "Speed (m/s)", "Heading (°)", "RSSI"],
+    gpsRows,
+    (r) => [fmtTime(r.received), fmtTime(r.timestamp), r.buoy_id, r.reading_id, r.lat.toFixed(5), r.lng.toFixed(5),
+            fmtNum(r.vel), fmtNum(r.direction, 0), r.rssi === null ? "—" : r.rssi]);
+
+  const maxSensors = tempRows.length ? Math.max(...tempRows.map((r) => r.temps.length)) : 0;
+  const tempHead = ["Received", "Reading time", "Buoy", "Reading"];
+  for (let s = 0; s < maxSensors; s++) tempHead.push("S" + (s + 1) + " (°C)");
+  tempHead.push("RSSI");
+  buildTable("table-temp", tempHead, tempRows, (r) => {
+    const cells = [fmtTime(r.received), fmtTime(r.timestamp), r.buoy_id, r.reading_id];
+    for (let s = 0; s < maxSensors; s++) cells.push(fmtNum(r.temps[s], 2));
+    cells.push(r.rssi === null ? "—" : r.rssi);
+    return cells;
+  });
+}
+
+function renderAll() {
+  renderTiles();
+  renderWave();
+  renderGps();
+  renderTemp();
+  renderTables();
+}
+
+/* ---------- data ---------- */
+
+async function load() {
+  const params = new URLSearchParams();
+  if (buoy !== "all") params.set("buoy", buoy);
+  if (hours > 0) params.set("hours", String(hours));
+  const q = "?" + params.toString();
+
+  const sub = document.getElementById("subtitle");
+  try {
+    const [wave, gps, temp] = await Promise.all([
+      fetch("/api/wave" + q).then((r) => r.json()),
+      fetch("/api/gps" + q).then((r) => r.json()),
+      fetch("/api/temperature" + q).then((r) => r.json()),
+    ]);
+    waveRows = wave.rows || [];
+    gpsRows = gps.rows || [];
+    tempRows = temp.rows || [];
+    pinned = false;
+    selectedIndex = -1;
+
+    const total = waveRows.length + gpsRows.length + tempRows.length;
+    const newest = Math.max(0, ...[...waveRows, ...gpsRows, ...tempRows].map((r) => r.received));
+    sub.textContent = total
+      ? waveRows.length + " wave · " + gpsRows.length + " GPS · " + tempRows.length +
+        " temperature — last received " + fmtTime(newest)
+      : "No measurements yet.";
+    renderAll();
+  } catch (err) {
+    sub.textContent = "Could not load data: " + err.message;
+  }
+}
+
+async function loadBuoys() {
+  const sel = document.getElementById("buoy");
+  try {
+    const { buoys } = await fetch("/api/buoys").then((r) => r.json());
+    sel.innerHTML = '<option value="all">All buoys</option>' +
+      buoys.map((b) => '<option value="' + b.buoy_id + '">Buoy ' + b.buoy_id + " (" + b.readings + ")</option>").join("");
+  } catch {
+    sel.innerHTML = '<option value="all">All buoys</option>';
+  }
+}
+
+document.getElementById("range").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  document.querySelectorAll("#range button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+  hours = Number(btn.dataset.hours);
+  load();
+});
+document.getElementById("buoy").addEventListener("change", (e) => { buoy = e.target.value; load(); });
+document.getElementById("refresh").addEventListener("click", load);
+document.getElementById("toggleTable").addEventListener("click", (e) => {
+  const tables = document.getElementById("tables");
+  const show = tables.hasAttribute("hidden");
+  tables.toggleAttribute("hidden", !show);
+  e.currentTarget.setAttribute("aria-pressed", String(show));
+});
+
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(renderAll, 150);
+});
+
+loadBuoys().then(load);
+</script>
+</body>
+</html>
