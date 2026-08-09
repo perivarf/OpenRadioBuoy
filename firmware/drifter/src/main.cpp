@@ -144,15 +144,16 @@ void setup() {
   */
   etl::error_handler::set_callback<etl_error_func>();
 
-#if DEBUG_WAVE_MSG
+#if DEBUG_TEST_MSG
   /*
     Bench mode: the GPS is never brought up. A unit on a desk gets no fix, so the
-    wait-for-fix loop below would spin forever and the wave message under test
-    would never be reached.
+    wait-for-fix loop below would spin forever and the message under test would
+    never be reached - which is as true for the GPS and temperature tests as for
+    the wave one, since all three synthesise their own values.
   */
-  sd_writer.logString("DEBUG_WAVE_MSG: GPS not started");
+  sd_writer.logString("bench test build: GPS not started");
   if (debug_serial){
-    Serial.println(F("DEBUG_WAVE_MSG: skipping GPS init and fix wait"));
+    Serial.println(F("bench test build: skipping GPS init and fix wait"));
   }
 #else
   sd_writer.logString("Beginning GPS");
@@ -180,7 +181,7 @@ void setup() {
   */
   thermo_manager.begin(THERMO_DATA_PIN, THERMO_POWER_PIN);
 
-#if !DEBUG_WAVE_MSG
+#if !DEBUG_TEST_MSG
   // Skipped on the bench: getDeploymentMessage reads GPSReadings.back(), and
   // without a fix that deque is empty.
   gps_manager.getDeploymentMessage(LORA.WiO_ID);
@@ -221,7 +222,7 @@ void setup() {
     enabling them again in the loop. 
   */ 
   LowPower.begin();
-#if !DEBUG_WAVE_MSG
+#if !DEBUG_TEST_MSG
   gps_manager.shutdownGPS();  // never started in bench mode
 #endif
   sd_writer.closeLog();
@@ -305,6 +306,27 @@ void task_measure_gps_temp() {
 }
 
 
+#if DEBUG_TEST_MSG
+/*
+  Shared scaffolding for the bench-test messages.
+
+  The RTC is never synced in these builds (no GPS), so now() starts at 0 and
+  counts up from there. Deriving a window as now() - 30 min would wrap
+  timestamp_start around to ~4.29e9 for the first half hour of runtime. Anchor to
+  a fixed plausible instant instead and let now() only advance it, so every
+  timestamp is sane and ordered.
+*/
+static constexpr time_t test_epoch = 1767225600UL;  // 2026-01-01 00:00:00 UTC
+
+static uint16_t test_transmissions_done = 0;
+
+// max_test_transmissions == 0 means run forever; see config.h.
+static bool test_sends_remaining(void){
+  return max_test_transmissions == 0 || test_transmissions_done < max_test_transmissions;
+}
+#endif  // DEBUG_TEST_MSG
+
+
 #if DEBUG_WAVE_MSG
 /*
   Bench test of the wave-analysis ('W') message. There is no wave_manager on this
@@ -371,15 +393,7 @@ static TestWaveResult make_test_wave_result(void){
     res.wave_spectrum[j] = (uint16_t)lroundf(norm * 65535.0f);
   }
 
-  /*
-    time_t is unsigned long, and the RTC is never synced in this build (no GPS),
-    so now() starts at 0 and counts up from there. Deriving the pair as
-    now() - 30 min therefore wraps timestamp_start around to ~4.29e9 for the
-    first half hour of runtime. Anchor to a fixed plausible instant instead and
-    let now() only advance it, so both ends are always sane and ordered.
-  */
-  static constexpr time_t test_wave_epoch = 1767225600UL;  // 2026-01-01 00:00:00 UTC
-  res.timestamp_start = test_wave_epoch + now();
+  res.timestamp_start = test_epoch + now();
   res.timestamp_end   = res.timestamp_start + 30*min_2_s;
 
   return res;
@@ -476,6 +490,143 @@ void task_test_wave(void){
 #endif  // DEBUG_WAVE_MSG
 
 
+#if DEBUG_GPS_MSG
+/*
+  Bench test of the GPS ('G') message. Byte layout is the contract with
+  GPS_Manager::updateTransmitMessage and Message_Parser::parse_gps_message:
+  'G' + reading_ID(u16) + {lat,lng,vel,direction}(4x i32, scaled by scale_factor)
+  + timestamp(time_t) + 'E'.
+
+  The position walks a few metres per send rather than repeating, so a receiver
+  plotting the fixes gets a track instead of a single dot, and a stuck or
+  duplicated reading is visible as a flat one.
+*/
+static constexpr float test_gps_lat  {59.91390f};  // Oslofjorden, roughly
+static constexpr float test_gps_lng  {10.75220f};
+static constexpr float test_gps_step {0.00012f};   // ~13 m per send
+static constexpr float test_gps_vel  {0.42f};      // m/s over ground
+static constexpr float test_gps_dir  {275.5f};     // degrees
+
+/*
+  msg_insert_uint silently writes nothing and returns an error code when a field
+  would run past msgSize, so a buffer that is too small loses fields rather than
+  failing loudly. Assert the exact byte count instead.
+*/
+static_assert(1 + sizeof(uint16_t) + 4 * sizeof(uint32_t) + sizeof(time_t) + 1 == GPS_message_size,
+    "the test 'G' message no longer matches GPS_message_size");
+
+void task_test_gps(void){
+  static uint16_t test_gps_reading_ID = 0;
+  test_gps_reading_ID++;
+
+  const time_t timestamp = test_epoch + now();
+  const float  lat = test_gps_lat + test_gps_reading_ID * test_gps_step;
+  const float  lng = test_gps_lng + test_gps_reading_ID * test_gps_step * 1.7f;
+
+  byte msgB[GPS_message_size];
+  uint8_t offset = 0;
+  msgB[offset++] = 'G';
+  msg_insert_uint(msgB, test_gps_reading_ID, offset, GPS_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)lroundf(lat * scale_factor),          offset, GPS_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)lroundf(lng * scale_factor),          offset, GPS_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)lroundf(test_gps_vel * scale_factor), offset, GPS_message_size, offset, true);
+  msg_insert_uint(msgB, (uint32_t)lroundf(test_gps_dir * scale_factor), offset, GPS_message_size, offset, true);
+  msg_insert_uint(msgB, timestamp, offset, GPS_message_size, offset, true);
+  msgB[offset++] = 'E';
+
+  if (debug_serial){
+    Serial.print(F("Sending G: ")); Serial.print(offset); Serial.println(F(" bytes"));
+    Serial.print(F("  lat ")); Serial.print(lat, 5);
+    Serial.print(F("  lng ")); Serial.print(lng, 5);
+    Serial.print(F("  vel ")); Serial.print(test_gps_vel, 2);
+    Serial.print(F(" m/s  dir ")); Serial.print(test_gps_dir, 1);
+    Serial.println(F(" deg"));
+  }
+
+  Message_Data message_data = LORA.sendData(msgB, offset, 10000);
+  IWatchdog.reload();
+  delay(500);
+  sd_writer.logByteArray(msgB, offset);
+  sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
+  LORA.packet_count++;
+  delay(200);
+  IWatchdog.reload();
+}
+#endif  // DEBUG_GPS_MSG
+
+
+#if DEBUG_TEMP_MSG
+/*
+  Bench test of the temperature ('T') message. Byte layout is the contract with
+  Thermo_Manager::updateTransmitMessage and
+  Message_Parser::parse_temperature_message: 'T' + reading_ID(u16) +
+  num_sensors(u8) + per sensor {sign byte, magnitude(u32)} + timestamp(time_t)
+  + 'E'. The sign byte is msg_insert_int's own encoding, NOT two's complement,
+  which is exactly the part worth exercising on a bench.
+
+  Hence the alternating base: odd readings send a warm profile, even readings one
+  that starts below zero, so a two-cycle run covers both the 'P' and the 'N'
+  branch. The message is only as long as num_sensors, so it is shorter than
+  thermo_message_size whenever fewer sensors are configured.
+*/
+static constexpr float test_temp_base_warm {12.40f};
+static constexpr float test_temp_base_cold {-0.85f};
+static constexpr float test_temp_step      {1.90f};  // per sensor down the string
+
+// Same reasoning as the 'G' assert above. The message is variable-length, so
+// this is a bound rather than an equality: one sign byte plus a uint32 magnitude
+// per sensor, framed and stamped.
+static_assert(1 + sizeof(uint16_t) + 1
+                + max_number_of_thermometres * (1 + sizeof(uint32_t))
+                + sizeof(time_t) + 1 <= thermo_message_size,
+    "the test 'T' message would overrun thermo_message_size");
+
+void task_test_temp(void){
+  static uint16_t test_temp_reading_ID = 0;
+  test_temp_reading_ID++;
+
+  const time_t timestamp = test_epoch + now();
+  const float  base = (test_temp_reading_ID % 2) ? test_temp_base_warm : test_temp_base_cold;
+
+  byte msgB[thermo_message_size];
+  uint8_t offset = 0;
+  msgB[offset++] = 'T';
+  msg_insert_uint(msgB, test_temp_reading_ID, offset, thermo_message_size, offset, true);
+  msgB[offset++] = max_number_of_thermometres;
+
+  if (debug_serial){
+    Serial.print(F("Sending T: ")); Serial.print((uint32_t)max_number_of_thermometres);
+    Serial.println(F(" sensors"));
+  }
+
+  for (uint8_t sensor = 0; sensor < max_number_of_thermometres; sensor++){
+    const float celsius = base - sensor * test_temp_step;
+    msg_insert_int(msgB, (int32_t)lroundf(celsius * scale_factor), offset, thermo_message_size, offset, true);
+    if (debug_serial){
+      Serial.print(F("  sensor ")); Serial.print(sensor);
+      Serial.print(F(": ")); Serial.print(celsius, 2); Serial.println(F(" C"));
+    }
+  }
+
+  msg_insert_uint(msgB, timestamp, offset, thermo_message_size, offset, true);
+  msgB[offset++] = 'E';
+
+  if (debug_serial){
+    Serial.print(F("  ")); Serial.print(offset); Serial.println(F(" bytes"));
+  }
+
+  Message_Data message_data = LORA.sendData(msgB, offset, 10000);
+  IWatchdog.reload();
+  delay(500);
+  sd_writer.logByteArray(msgB, offset);
+  sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
+  LORA.packet_count++;
+  delay(200);
+  IWatchdog.reload();
+}
+#endif  // DEBUG_TEMP_MSG
+
+
 void task_transmit() {
 
   if (debug_serial){
@@ -552,11 +703,37 @@ void task_transmit() {
     delay(500);
   }
   
+#if DEBUG_TEST_MSG
+  /*
+    The G/T loop above runs zero rounds on the bench (the thermo queue is empty
+    without task_measure_gps_temp), so these synthetic messages are the whole
+    payload of the cycle. Each enabled type goes out once, in the same order the
+    production path would send them, and the cycle counter stops the build from
+    transmitting forever - see max_test_transmissions in config.h.
+  */
+  if (LORA.available && test_sends_remaining()){
+#if DEBUG_GPS_MSG
+    task_test_gps();
+#endif
+#if DEBUG_TEMP_MSG
+    task_test_temp();
+#endif
 #if DEBUG_WAVE_MSG
-  // The G/T loop above runs zero rounds on the bench (the thermo queue is empty
-  // without task_measure_gps_temp), so this is the only payload of the cycle.
-  if (LORA.available){
     task_test_wave();
+#endif
+    test_transmissions_done++;
+
+    if (debug_serial){
+      Serial.print(F("Test transmission "));
+      Serial.print(test_transmissions_done);
+      if (max_test_transmissions){
+        Serial.print(F(" of ")); Serial.print(max_test_transmissions);
+        if (!test_sends_remaining()){
+          Serial.print(F(" - limit reached, going quiet"));
+        }
+      }
+      Serial.println();
+    }
   }
 #endif
 
@@ -610,7 +787,7 @@ void loop() {
   }
 
   // Measurement loop (temperature and GPS)
-#if !DEBUG_WAVE_MSG
+#if !DEBUG_TEST_MSG
   if (millis_time_corrected(sleep_cycles_measurement) - measurement_timer > LORA.measurement_period){
       task_measure_gps_temp();
   }
@@ -619,11 +796,12 @@ void loop() {
   // Transmission protocol
   bool transmission_due = millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period;
   bool have_payload     = gps_manager.GPSReadings.size() > packet_count_send_treshold;
-#if DEBUG_WAVE_MSG
+#if DEBUG_TEST_MSG
   // The GPS threshold is the production trigger, but a bench unit indoors never
-  // gets a fix - so the test wave message has to be reason enough to transmit,
-  // or it would never go out at all.
-  have_payload = true;
+  // gets a fix - so a pending test message has to be reason enough to transmit,
+  // or it would never go out at all. Once the cycle limit is reached this goes
+  // false again and the bench unit stops calling task_transmit.
+  have_payload = test_sends_remaining();
 #endif
   if (transmission_due && have_payload) {
         task_transmit();

@@ -119,6 +119,17 @@ static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
 #define DEBUG_TEST_MSG (DEBUG_WAVE_MSG || DEBUG_GPS_MSG || DEBUG_TEMP_MSG)
 
 /*
+  How many transmission cycles send test messages before the bench build goes
+  quiet. Once the handshake has succeeded and the base station has acknowledged
+  a cycle, the format is proven - repeating it forever only fills the SD card
+  and the Notehub queue. Every enabled message type goes out once per cycle.
+
+  0 means no limit, for when you do want a continuous stream (a link-margin
+  walk-around, say).
+*/
+static constexpr uint16_t max_test_transmissions {2};
+
+/*
   Bus wiring on this PCB. Do not change unless you have rewired the ORB.
 */
 static constexpr uint32_t SPI_MOSI_PIN                   {PA10};
