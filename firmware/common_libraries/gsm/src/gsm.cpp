@@ -47,12 +47,12 @@ void GSM_module::init_aux()
     JAddItemToArray(pins, JCreateString("off"));  // AUX4
 
     J *rsp = notecard.requestAndResponse(req);
-    const char *err = JGetString(rsp, "err");
-    if (err != "")
+    if (notecard.responseError(rsp))
     {
         sd_writer.debugSerialPrint("Error: ");
-        sd_writer.debugSerialPrintln(err);
+        sd_writer.debugSerialPrintln(JGetString(rsp, "err"));
     }
+    notecard.deleteResponse(rsp);
 }
 
 long GSM_module::getTime()
@@ -127,11 +127,15 @@ void GSM_module::sendBuoyMessage(BuoyMessage *msg, uint32_t buoy_id)
         }
 
         J *rsp = notecard.requestAndResponse(req);
-        const char *err = JGetString(rsp, "err");
-        if (err != "")
+        const bool failed = notecard.responseError(rsp);
+        if (failed)
         {
             sd_writer.debugSerialPrint("Error in notecard communication: ");
-            sd_writer.debugSerialPrintln(err);
+            sd_writer.debugSerialPrintln(JGetString(rsp, "err"));
+        }
+        notecard.deleteResponse(rsp);
+        if (failed)
+        {
             reset();
         }
     }
@@ -193,6 +197,7 @@ BeaconIncomingMessage GSM_module::receiveBeaconMessage(bool rescue_mode, time_t 
         sd_writer.debugSerialPrint("Timeout for rescue mode: ");
         sd_writer.debugSerialPrintln(beacon_message.timeout_rescue_mode);
     }
+    notecard.deleteResponse(rsp);
 
     return beacon_message;
 }
@@ -217,11 +222,15 @@ void GSM_module::sendBeaconMessage(BeaconOutgoingMessage* msg)
         }
 
         J *rsp = notecard.requestAndResponse(req);
-        const char *err = JGetString(rsp, "err");
-        if (err != "")
+        const bool failed = notecard.responseError(rsp);
+        if (failed)
         {
             sd_writer.debugSerialPrint("Error in notecard communication: ");
-            sd_writer.debugSerialPrintln(err);
+            sd_writer.debugSerialPrintln(JGetString(rsp, "err"));
+        }
+        notecard.deleteResponse(rsp);
+        if (failed)
+        {
             reset();
         }
     }
@@ -240,5 +249,6 @@ time_t GSM_module::getDate()
     {
         time = JGetInt(rsp, "time");
     }
+    notecard.deleteResponse(rsp);
     return time;
 }
