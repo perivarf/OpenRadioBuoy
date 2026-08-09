@@ -41,7 +41,7 @@ static constexpr uint8_t  packet_count_send_treshold     {2};
 static constexpr int16_t  transmission_grace_period      {5*s_2_ms};
 static constexpr uint32_t max_radio_fix_look_time        {90*s_2_ms};
 static constexpr uint32_t max_radio_wait_time            {40*s_2_ms};
-static constexpr uint8_t  max_message_length             {128};
+static constexpr uint8_t  max_message_length             {255};
 static constexpr uint32_t beacon_ping_period             {2*min_2_s*s_2_ms};
 static constexpr float    LoRa_freq_beacon               {868};
 static constexpr uint32_t send_delay_after_handshake     {1000};
@@ -91,16 +91,36 @@ static constexpr bool enable_bootloader_menu                {true};
 static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
 
 /*
-  Bench test of the wave ('W') message. Set from the build, not here: the
-  orb_drifter_test_wave environment in platformio.ini passes -DDEBUG_WAVE_MSG=1.
-  In that build the GPS is never started and the GPS/thermo measurement is
-  skipped, so a synthetic wave message can be sent indoors without a fix; the
-  handshake and the rest of the transmit path are unchanged. Defaults to 0 so
-  the normal orb_drifter build compiles exactly as before.
+  Bench tests of the transmit messages. Set from the build, not here: the
+  orb_drifter_test_* environments in platformio.ini pass -DDEBUG_WAVE_MSG=1,
+  -DDEBUG_GPS_MSG=1 and/or -DDEBUG_TEMP_MSG=1.
+
+  Each flag adds one synthetic message to every transmission cycle - 'W' wave
+  analysis, 'G' GPS, 'T' temperature - so the wire format and the base station's
+  parser can be exercised indoors, with no fix, no wave capture and no
+  thermistor attached. The flags are independent and combine freely;
+  orb_drifter_test_msgs turns on all three.
+
+  All default to 0, so the normal orb_drifter build compiles exactly as before.
 */
 #ifndef DEBUG_WAVE_MSG
 #define DEBUG_WAVE_MSG 0
 #endif
+#ifndef DEBUG_GPS_MSG
+#define DEBUG_GPS_MSG 0
+#endif
+#ifndef DEBUG_TEMP_MSG
+#define DEBUG_TEMP_MSG 0
+#endif
+
+/*
+  True in any bench-test build. The hardware is skipped per build, not per
+  message: a unit on a desk gets no fix, so the wait-for-fix loop in setup()
+  would spin forever and the message under test would never be reached - and
+  that is just as true for a GPS-only or temperature-only test as for a wave
+  one. The handshake and the rest of the transmit path are unchanged.
+*/
+#define DEBUG_TEST_MSG (DEBUG_WAVE_MSG || DEBUG_GPS_MSG || DEBUG_TEMP_MSG)
 
 // Debug console on USART1, the header pins on this PCB. The ROM bootloader
 // listens on the same pair, so the menu and the flashing use one cable.
@@ -111,17 +131,14 @@ static constexpr uint32_t DEBUG_SERIAL_RX_PIN               {PB7};
 
 /*
   Bus wiring on this PCB. Do not change unless you have rewired the ORB.
-
-  SPI1 is shared by the SD card and the LSM6DSVTR IMU, so both chip selects
-  must be driven high before either slave is addressed.
 */
-static constexpr uint32_t SPI_MOSI_PIN                   {PA7};
-static constexpr uint32_t SPI_MISO_PIN                   {PA6};
-static constexpr uint32_t SPI_SCK_PIN                    {PA5};
-static constexpr uint32_t SPI_CS_SD_PIN                  {PA4};
-static constexpr uint32_t SPI_CS_IMU_PIN                 {PB3};
-static constexpr uint32_t I2C_SDA_PIN                    {PA11};
-static constexpr uint32_t I2C_SCL_PIN                    {PA12};
+static constexpr uint32_t SPI_MOSI_PIN                   {PA10};
+static constexpr uint32_t SPI_MISO_PIN                   {PB14};
+static constexpr uint32_t SPI_SCK_PIN                    {PB13};
+static constexpr uint32_t SPI_CS_SD_PIN                  {PB9};
+static constexpr uint32_t I2C_SDA_PIN                    {PIN_WIRE_SDA};
+static constexpr uint32_t I2C_SCL_PIN                    {PIN_WIRE_SCL};
+
 
 // Motion parameters
 static float    motion_treshold                          {0.5};

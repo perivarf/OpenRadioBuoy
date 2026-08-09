@@ -42,8 +42,6 @@ bool SDWriter::begin(void){
     answers while the other is being addressed. setMOSI/setMISO/setSCLK must
     be called before SPI.begin().
   */
-  pinMode(SPI_CS_IMU_PIN, OUTPUT);
-  digitalWrite(SPI_CS_IMU_PIN, HIGH);
   pinMode(SPI_CS_SD_PIN, OUTPUT);
   digitalWrite(SPI_CS_SD_PIN, HIGH);
 

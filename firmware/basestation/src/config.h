@@ -35,13 +35,12 @@ const int8_t DISABLE_CS_PIN = -1;
   must be driven high before either slave is addressed. RF_SWITCH pins are the
   RAK3172 module's antenna switch, per the core's variant_RAK3172_MODULE.h.
 */
-static constexpr uint32_t SPI_MOSI_PIN                   {PA7};
-static constexpr uint32_t SPI_MISO_PIN                   {PA6};
-static constexpr uint32_t SPI_SCK_PIN                    {PA5};
-static constexpr uint32_t SPI_CS_SD_PIN                  {PA4};
-static constexpr uint32_t SPI_CS_IMU_PIN                 {PB3};
-static constexpr uint32_t I2C_SDA_PIN                    {PA11};
-static constexpr uint32_t I2C_SCL_PIN                    {PA12};
+static constexpr uint32_t SPI_MOSI_PIN                   {PA10};
+static constexpr uint32_t SPI_MISO_PIN                   {PB14};
+static constexpr uint32_t SPI_SCK_PIN                    {PB13};
+static constexpr uint32_t SPI_CS_SD_PIN                  {PB9};
+static constexpr uint32_t I2C_SDA_PIN                    {PIN_WIRE_SDA};
+static constexpr uint32_t I2C_SCL_PIN                    {PIN_WIRE_SCL};
 
 // Radio parameters
 static constexpr float LoRa_freq_send               {863};
