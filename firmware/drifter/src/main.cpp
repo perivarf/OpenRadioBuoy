@@ -462,6 +462,9 @@ void task_transmit() {
     wave_manager.printPendingResult(mySerial);
 #endif
     size_t wave_len = wave_manager.updateTransmitMessage();
+    if (wave_len == 0){
+      break;  // nothing serialised, so there is nothing to send or to pop
+    }
     if (debug_serial){
       mySerial.print("Sending W: "); mySerial.print(wave_len);
       mySerial.print(" bytes on "); mySerial.print(LORA.current_frequency, 3);
@@ -470,6 +473,20 @@ void task_transmit() {
     message_data = LORA.sendData(wave_manager.msgB, (uint8_t)wave_len, 10000);
     IWatchdog.reload();
     delay(500);
+
+    /*
+      The result is only dropped once the radio confirmed TxDone. 
+    */
+    if (!message_data.sent){
+      if (debug_serial){
+        mySerial.println(F("Wave send got no TxDone - keeping result for the next window"));
+      }
+      break;
+    }
+    wave_manager.popTransmittedResult();
+
+    // Logged only on success, so a result that is retried next window does not end
+    // up on the SD card twice.
     sd_writer.logByteArray(wave_manager.msgB, wave_len);
     sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
     LORA.packet_count++;
@@ -511,6 +528,23 @@ void task_beacon(){
     LORA.sleep();
 }
 
+/*
+  Transmit if the radio is due and either queue has something in it
+*/
+static bool transmit_if_due(void){
+  const bool transmission_due =
+      millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period;
+  const bool have_payload =
+      gps_manager.GPSReadings.size() > packet_count_send_treshold
+      || !wave_manager.wave_analysis_results.empty();
+
+  if (transmission_due && have_payload){
+    task_transmit();
+    return true;
+  }
+  return false;
+}
+
 void loop() {
   /*
     We start by checking if we should switch on each sensor
@@ -532,6 +566,15 @@ void loop() {
       task_measure_gps_temp();
   }
 #endif
+
+  /*
+    Early transmission window. Require handshake etc (radio uptime), so use for debugging purposes.
+  */
+  if (transmit_before_wave_capture){
+    if (transmit_if_due() && debug_serial){
+      mySerial.println(F("Transmitted before wave capture (transmit_before_wave_capture)"));
+    }
+  }
 
   // Wave measurement loop (IMU): independent gate, own enable flag and period.
   //Debug print enable wave analysis and measurement period, and time since last measurement
@@ -559,17 +602,7 @@ void loop() {
 #endif
 
   // Transmission protocol
-  bool transmission_due = millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period;
-  bool have_payload     = gps_manager.GPSReadings.size() > packet_count_send_treshold;
-#if DEBUG_WAVE_MSG
-  // The GPS threshold is the production trigger, but a bench unit indoors never gets
-  // a fix - so a pending wave result has to be reason enough to transmit, or the
-  // fake message would sit in the queue forever and test nothing.
-  have_payload = have_payload || !wave_manager.wave_analysis_results.empty();
-#endif
-  if (transmission_due && have_payload) {
-        task_transmit();
-  }
+  transmit_if_due();
 
   // Recovery protocol
   if ((millis_time_corrected(sleep_cycles_beacon) - beacon_timer > beacon_ping_period) && (enable_recovery_beacon)){

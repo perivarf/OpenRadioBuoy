@@ -57,6 +57,7 @@ struct StringMessage{
 struct Message_Data{
   uint32_t RSSI{0};
   uint32_t SNR{0};
+  bool     sent{false};
 };
 
 struct buoyInfo{

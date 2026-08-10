@@ -462,6 +462,7 @@ Message_Data LoRa_Transceiver::sendData(byte * message, uint8_t msgSize,  uint32
   }
   if (operationDone){
     operationDone = false;
+    message_data.sent = true;
     message_data.RSSI = (uint32_t) 1e4*radio.getRSSI();
     message_data.SNR  = (uint32_t) 1e4*radio.getSNR();
   } else if (debug_serial){

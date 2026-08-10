@@ -56,8 +56,12 @@ class WaveManager {
   // Returns 0 on success, non-zero if no usable spectrum was produced.
   uint8_t processReading(void);
 
-  // Serialise the front result into msgB ('W' ... 'E'), pop it, return the length.
+  // Serialise the front result into msgB ('W' ... 'E') and return the length, or 0
+  // if the queue is empty. Does NOT pop - see popTransmittedResult.
   size_t updateTransmitMessage(void);
+
+  // Drop the result updateTransmitMessage just serialised
+  void popTransmittedResult(void);
 
 #if DEBUG_WAVE_MSG
   // Bench only (see DEBUG_WAVE_MSG in wave_config.h): push a synthetic result onto

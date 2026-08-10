@@ -20,7 +20,8 @@ static constexpr float    mps_2_kmph                       {3.6};
 static           uint32_t minimal_transmission_period    {2*s_2_ms};
 static           float    LoRa_freq_receive              {863};
 static constexpr uint8_t  LoRa_power                     {15};
-static constexpr uint8_t  packet_count_send_treshold     {2};
+
+static constexpr uint8_t  packet_count_send_treshold     {0}; // Default 2 -> this is expensive
 static constexpr int16_t  transmission_grace_period      {5*s_2_ms};
 static constexpr uint32_t max_radio_fix_look_time        {90*s_2_ms};
 static constexpr uint32_t beacon_ping_period             {2*min_2_s*s_2_ms};
@@ -54,6 +55,23 @@ static constexpr bool resync_RTC_using_GPS                  {true};
 static constexpr bool enable_bootloader_menu                {true};
 static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
 
+/*
+  Run the transmission check before the wave capture as well as after it.
+
+  A capture blocks loop() for wave_measurement_duration - half an hour as configured
+  - so with the check only after it, a freshly booted buoy shows no sign of life at
+  the base station, and hence on Notehub, until the first capture has finished.
+  Checking first as well gets whatever is already queued out the door immediately,
+  which is what you want when you are standing next to the buoy wondering whether it
+  came up at all.
+
+  Diagnostic convenience, not a measurement requirement: it costs one extra handshake
+  per loop whenever something is queued (connectToBaseStation is up to
+  max_radio_fix_look_time + max_radio_wait_time). Set false for a deployment where
+  radio power matters more than seeing the buoy quickly.
+*/
+static constexpr bool transmit_before_wave_capture          {true};
+
 // Motion parameters
 static bool     enable_motion_detection                  {false};
 static float    motion_treshold                          {0.5};
@@ -64,7 +82,7 @@ static uint32_t target_reading_distance                  {30};
 // live in common_config.h; this is the length of one blocking capture window).
 // -----------------------------------------------------------------------------
 static constexpr uint8_t  max_number_of_wave_measurements {5};
-static constexpr uint32_t wave_measurement_duration       {30*min_2_s*s_2_ms}; // 5 min capture
+static constexpr uint32_t wave_measurement_duration       {30*min_2_s*s_2_ms}; // 30 min capture
 
 // AHRS settling time at the start of a capture. The filter (Madgwick/Kalman) starts
 // from a single accel sample and needs a while to converge on the true orientation;

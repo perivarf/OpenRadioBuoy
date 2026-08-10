@@ -693,8 +693,16 @@ size_t WaveManager::updateTransmitMessage(void) {
   }
   msgB[offset++] = 'E';
 
-  wave_analysis_results.pop_front();
+  /*
+    The result is deliberately NOT popped here. The caller pops with
+    popTransmittedResult() once the radio has confirmed TxDone, and a failure
+    leaves the result at the head of the queue for the next window.
+  */
   return offset;
+}
+
+void WaveManager::popTransmittedResult(void) {
+  if (!wave_analysis_results.empty()) wave_analysis_results.pop_front();
 }
 
 #if DEBUG_WAVE_MSG
