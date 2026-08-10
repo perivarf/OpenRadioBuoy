@@ -114,4 +114,15 @@ template<typename T, std::size_t S> uint8_t msg_insert_int(byte (&msg)[S], T num
   return state;
 }
 
+/*
+  Mirror of msg_insert_int: reads a sign char and then the magnitude, returning a signed integer.
+*/
+template <typename T>
+T msg_extract_int(const byte *msg, uint8_t start, bool leftOrdering, uint8_t& next_offset)
+{
+  const bool negative = (msg[start] == 'N');
+  T magnitude = msg_extract_uint<T>(msg, start + 1, leftOrdering, next_offset);
+  return negative ? (T) (-magnitude) : magnitude;
+}
+
 #endif

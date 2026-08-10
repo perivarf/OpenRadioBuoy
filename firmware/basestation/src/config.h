@@ -71,6 +71,10 @@ static constexpr int serial_baud                    {115200};
 static constexpr int max_number_of_thermometres          {8};
 static constexpr uint32_t scale_factor              {100000};
 
+// Latitude/longitude keep the receiver's native 1e-7 deg and travel signed,
+// see the drifter config for why
+static constexpr int32_t  gps_coord_scale           {10000000};
+
 // Watchdog parameters
 static constexpr bool enable_watchdog               {true};
 static constexpr uint32_t watchdog_wait_time        {32000};

@@ -19,18 +19,30 @@ struct temperature_Reading
     time_t timestamp;
 };
 
+/*
+  Units, matching GPS_Data on the drifter side:
+    lat, lng   1e-7 deg   (gps_coord_scale, the receiver's native resolution)
+    vel        m/s * scale_factor
+    direction  deg * scale_factor
+
+  lat/lng are deliberately not scale_factor-scaled: 5 decimals is ~1.1 m, and the
+  raw 1e-7 deg value fits an int32 as it stands. They are also the only signed
+  fields, and the only ones carrying a 'P'/'N' sign char on the wire - speed and
+  course over ground are magnitudes.
+*/
 struct GPS_Reading
-{   
+{
     uint16_t reading_ID;
     int32_t lat;
     int32_t lng;
-    int32_t vel;
-    int32_t direction;
+    uint32_t vel;
+    uint32_t direction;
     time_t timestamp;
 };
 
+// lat/lng in 1e-7 deg (gps_coord_scale), sign-magnitude on the wire
 struct beacon_Reading
-{   
+{
     time_t timestamp;
     int32_t lat;
     int32_t lng;

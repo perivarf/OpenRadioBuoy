@@ -13,10 +13,21 @@
 #include "IWatchdog.h"
 #include "TimeLib.h"
 
+/*
+  One averaged (or single) GPS solution in the units it is stored, logged and
+  transmitted in. Units:
+    lat, lng   1e-7 deg   (gps_coord_scale, straight from NAV-PVT)
+    vel        m/s   * scale_factor
+    direction  deg   * scale_factor
+
+  Only the coordinates are signed - the southern hemisphere and everything west
+  of Greenwich is negative. Ground speed and direction over ground are magnitudes that
+  are non-negative.
+*/
 struct GPS_Data{
   time_t timestamp;
-  uint32_t lat;
-  uint32_t lng;
+  int32_t lat;
+  int32_t lng;
   uint32_t vel;
   uint32_t direction;
   uint16_t readingID;
@@ -65,9 +76,19 @@ static constexpr uint16_t GPS_pvt_frame_size             {100};     // header 6 
 static constexpr uint32_t GPS_probe_timeout              {3000};    // how long begin() retries the MON-VER probe
 
 
-static constexpr uint32_t beaconMsgSize  {3 + sizeof(time_t) + 3*sizeof(uint32_t)};
-static constexpr uint8_t GPS_message_size {2+sizeof(time_t)+4*sizeof(uint32_t) + sizeof(uint16_t)};
-static constexpr uint8_t deployment_message_size {2 + sizeof(uint32_t) + sizeof(time_t) + 2*sizeof(uint32_t) + 1};
+/*
+   Int it coded as P/N + uint, so the sign is preserved on the wire.
+*/
+static constexpr size_t gps_coord_field_size {1 + sizeof(int32_t)};
+
+// 'U','R' + timestamp + lat + lng + WiO_ID + 'E'
+static constexpr uint32_t beaconMsgSize  {3 + sizeof(time_t) + sizeof(uint32_t) + 2*gps_coord_field_size};
+// 'G' + readingID + lat + lng + vel + direction + timestamp + 'E'
+static constexpr uint8_t GPS_message_size {2 + sizeof(uint16_t) + 2*gps_coord_field_size \
+                                           + 2*sizeof(uint32_t) + sizeof(time_t)};
+// 'U','I' + buoy_ID + timestamp + lat + lng + 'E'
+static constexpr uint8_t deployment_message_size {2 + sizeof(uint32_t) + sizeof(time_t) \
+                                                  + 2*gps_coord_field_size + 1};
 class GPS_Manager{
   public:
     GPS_Manager(uint32_t sdapin, uint32_t sclpin) : sda_pin(sdapin), scl_pin(sclpin) {};

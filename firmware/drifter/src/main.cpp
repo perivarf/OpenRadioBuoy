@@ -512,7 +512,8 @@ static constexpr float test_gps_dir  {275.5f};     // degrees
   would run past msgSize, so a buffer that is too small loses fields rather than
   failing loudly. Assert the exact byte count instead.
 */
-static_assert(1 + sizeof(uint16_t) + 4 * sizeof(uint32_t) + sizeof(time_t) + 1 == GPS_message_size,
+static_assert(1 + sizeof(uint16_t) + 2 * gps_coord_field_size + 2 * sizeof(uint32_t) \
+              + sizeof(time_t) + 1 == GPS_message_size,
     "the test 'G' message no longer matches GPS_message_size");
 
 void task_test_gps(void){
@@ -527,8 +528,8 @@ void task_test_gps(void){
   uint8_t offset = 0;
   msgB[offset++] = 'G';
   msg_insert_uint(msgB, test_gps_reading_ID, offset, GPS_message_size, offset, true);
-  msg_insert_uint(msgB, (uint32_t)lroundf(lat * scale_factor),          offset, GPS_message_size, offset, true);
-  msg_insert_uint(msgB, (uint32_t)lroundf(lng * scale_factor),          offset, GPS_message_size, offset, true);
+  msg_insert_int (msgB, (int32_t)lround((double)lat * gps_coord_scale), offset, GPS_message_size, offset, true);
+  msg_insert_int (msgB, (int32_t)lround((double)lng * gps_coord_scale), offset, GPS_message_size, offset, true);
   msg_insert_uint(msgB, (uint32_t)lroundf(test_gps_vel * scale_factor), offset, GPS_message_size, offset, true);
   msg_insert_uint(msgB, (uint32_t)lroundf(test_gps_dir * scale_factor), offset, GPS_message_size, offset, true);
   msg_insert_uint(msgB, timestamp, offset, GPS_message_size, offset, true);

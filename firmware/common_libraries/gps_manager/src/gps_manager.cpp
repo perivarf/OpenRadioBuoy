@@ -379,17 +379,25 @@ uint8_t GPS_Manager::performNReadings(uint8_t N, uint32_t max_wait_time, bool lo
   }
 }
 
+/*
+  The unit conversions in getGPSData are exact integer factors only as long as
+  scale_factor is 1e5: NAV-PVT reports heading as deg*1e5, which is then already
+  deg*scale_factor
+*/
+static_assert(scale_factor == 100000,
+              "getGPSData's integer unit conversions assume scale_factor == 1e5");
+
 uint8_t GPS_Manager::getGPSData(uint32_t max_wait_time){
   /*
     Read a single full measurement packet from the GPS,
     or return a dummy value in case the GPS is disabled for debugging in config.h
     If the GPS spends more than max_wait_time milliseconds, then a reading filled with zeros is returned
   */
-  GPS_Data reading = {0,0,0,0,0};
+  GPS_Data reading = {0,0,0,0,0,0};
   if (!enable_GPS){
     reading.timestamp = timestamp;
-    reading.lat       = scale_factor*4;
-    reading.lng       = scale_factor*5;
+    reading.lat       = gps_coord_scale*4;
+    reading.lng       = gps_coord_scale*5;
     reading.vel       = scale_factor*6;
     reading.direction = scale_factor*7;
     date.year = 2025;
@@ -411,11 +419,17 @@ uint8_t GPS_Manager::getGPSData(uint32_t max_wait_time){
 
     reading.timestamp = timestamp;
     if (pvt.valid){
-      // 1e-7 deg -> deg and mm/s -> m/s before the shared scale_factor is applied
-      reading.lat       = (uint32_t) (scale_factor*(pvt.lat_e7*1e-7));
-      reading.lng       = (uint32_t) (scale_factor*(pvt.lng_e7*1e-7));
-      reading.vel       = (uint32_t) (scale_factor*(pvt.gSpeed_mms/1000.0));
-      reading.direction = (uint32_t) (scale_factor*(pvt.headMot_e5*1e-5));
+      /*
+        Native NAV-PVT units throughout, no floating point: lat/lng are already
+        1e-7 deg (gps_coord_scale) and are copied unchanged
+
+        Both UBX speed/heading fields are declared I4 but carry magnitudes, so
+        they are floored at zero
+      */
+      reading.lat       = pvt.lat_e7;
+      reading.lng       = pvt.lng_e7;
+      reading.vel       = pvt.gSpeed_mms > 0 ? (uint32_t) pvt.gSpeed_mms * (scale_factor/1000) : 0;
+      reading.direction = pvt.headMot_e5 > 0 ? (uint32_t) pvt.headMot_e5 : 0;
     }
 
     if (pvt.timeValid || iterations < 1){
@@ -432,14 +446,15 @@ uint8_t GPS_Manager::getGPSData(uint32_t max_wait_time){
 void GPS_Manager::getDeploymentMessage(uint32_t buoy_ID){
   /*
     Deployment message format:
-    UIzzzzttttttttyyyyxxxxE
+    UIzzzzttttttttsyyyysxxxxE
     Where
     z is the 4 byte buoy ID
-    t is the 8 byte timestamp
-    y is the 4 byte latitude
-    x is the 4 byte longitude
+    t is the timestamp, sizeof(time_t) bytes (8 here: TimeLib defers to newlib)
+    s is the 'P'/'N' sign char written by msg_insert_int
+    y is the 4 byte latitude magnitude,  1e-7 deg
+    x is the 4 byte longitude magnitude, 1e-7 deg
 
-    Total size: 23
+    Total size: deployment_message_size (25)
   */
   struct GPS_Data initial_fix = GPSReadings.back();
   
@@ -454,8 +469,8 @@ void GPS_Manager::getDeploymentMessage(uint32_t buoy_ID){
   
   msg_insert_uint(deploymentMessage, buoy_ID, offset, deployment_message_size, offset, true);
   msg_insert_uint(deploymentMessage, timestamp, offset, deployment_message_size, offset, true);
-  msg_insert_uint(deploymentMessage, initial_fix.lat, offset, deployment_message_size, offset, true);
-  msg_insert_uint(deploymentMessage, initial_fix.lng, offset, deployment_message_size, offset, true);
+  msg_insert_int(deploymentMessage, initial_fix.lat, offset, deployment_message_size, offset, true);
+  msg_insert_int(deploymentMessage, initial_fix.lng, offset, deployment_message_size, offset, true);
   deploymentMessage[offset++] = 'E';
   
   if (debug_serial){
@@ -473,8 +488,9 @@ void GPS_Manager::processReadings(bool fullProcessingToggle){
     an average. Pushes the averaged GPS reading to the GPSReadings deque.
   */
 
-  // Storage variables
-  etl::vector<uint32_t, readings_per_measurement> int32vals;
+  // Storage variables. Coordinates are signed, so they get their own vector -
+  // see the unsigned one further down for speed and heading.
+  etl::vector<int32_t, readings_per_measurement> int32vals;
 
   // As it is, afaik, not possible to iterate over struct variables
   // We instead have to perform the iteration though code repetition
@@ -484,8 +500,8 @@ void GPS_Manager::processReadings(bool fullProcessingToggle){
   if (fullProcessingToggle){
     mean_values.lat = filter_vector(int32vals);
   } else {
-    etl::mean<uint32_t, double> mean_int32vals(int32vals.begin(), int32vals.end());
-    mean_values.lat = (uint32_t) mean_int32vals;
+    etl::mean<int32_t, double> mean_int32vals(int32vals.begin(), int32vals.end());
+    mean_values.lat = (int32_t) mean_int32vals;
   }
   mean_values.timestamp = timestamp;
   int32vals.clear();
@@ -501,41 +517,42 @@ void GPS_Manager::processReadings(bool fullProcessingToggle){
   if (fullProcessingToggle){
     mean_values.lng = filter_vector(int32vals);
   } else {
-    etl::mean<uint32_t, double> mean_int32vals(int32vals.begin(), int32vals.end());
-    mean_values.lng = (uint32_t) mean_int32vals;
+    etl::mean<int32_t, double> mean_int32vals(int32vals.begin(), int32vals.end());
+    mean_values.lng = (int32_t) mean_int32vals;
   }
   int32vals.clear();
   delay(50);
-  
+
+  etl::vector<uint32_t, readings_per_measurement> uint32vals;
   for (int i = 0; i < packet.size(); i++){
-    int32vals.push_back(packet[i].vel);
+    uint32vals.push_back(packet[i].vel);
   }
 
   if (fullProcessingToggle){
-    mean_values.vel = filter_vector(int32vals);
+    mean_values.vel = filter_vector(uint32vals);
   } else {
-    etl::mean<uint32_t, double> mean_int32vals(int32vals.begin(), int32vals.end());
-    mean_values.vel = (uint32_t) (mean_int32vals);
+    etl::mean<uint32_t, double> mean_uint32vals(uint32vals.begin(), uint32vals.end());
+    mean_values.vel = (uint32_t) (mean_uint32vals);
   }
   current_buoy_velocity = mean_values.vel;
   IWatchdog.reload();
-  int32vals.clear();
+  uint32vals.clear();
   delay(50);
-  
+
   for (int i = 0; i < packet.size(); i++){
-    int32vals.push_back(packet[i].direction);
+    uint32vals.push_back(packet[i].direction);
   }
   if (fullProcessingToggle){
-    mean_values.direction = filter_vector(int32vals);
+    mean_values.direction = filter_vector(uint32vals);
   } else {
-    etl::mean<uint32_t, double> mean_int32vals(int32vals.begin(), int32vals.end());
-    mean_values.direction = (uint32_t) mean_int32vals;
+    etl::mean<uint32_t, double> mean_uint32vals(uint32vals.begin(), uint32vals.end());
+    mean_values.direction = (uint32_t) mean_uint32vals;
   }
 
   IWatchdog.reload();
-  int32vals.clear();
+  uint32vals.clear();
   delay(50);
-  
+
 
   if (GPSReadings.size() == max_number_of_measurements){
     GPSReadings.pop_front();
@@ -589,8 +606,8 @@ size_t GPS_Manager::updateTransmitMessage(){
   uint8_t offset = 0;
   msgB[offset++] = 'G';
   msg_insert_uint(msgB, gpsdata.readingID, offset, GPS_message_size, offset, true);
-  msg_insert_uint(msgB, gpsdata.lat, offset, GPS_message_size, offset, true);
-  msg_insert_uint(msgB, gpsdata.lng, offset, GPS_message_size, offset, true);
+  msg_insert_int(msgB, gpsdata.lat, offset, GPS_message_size, offset, true);
+  msg_insert_int(msgB, gpsdata.lng, offset, GPS_message_size, offset, true);
   msg_insert_uint(msgB, gpsdata.vel, offset, GPS_message_size, offset, true);
   msg_insert_uint(msgB, gpsdata.direction, offset, GPS_message_size, offset, true);
   msg_insert_uint(msgB, gpsdata.timestamp, offset, GPS_message_size, offset, true);  
@@ -605,14 +622,14 @@ uint8_t GPS_Manager::logReading(GPS_Data & data){
     The latest reading is written to an SD file. 
   */
 
-  byte data_reading[1 + sizeof(data.readingID) + 4*sizeof(data.lat) + sizeof(data.timestamp) + 1];
-  size_t data_reading_size = sizeof(data_reading);
+  byte data_reading[GPS_message_size];
+  uint8_t data_reading_size = sizeof(data_reading);
 
   uint8_t offset = 0;
   data_reading[offset++] = 'G';
   msg_insert_uint(data_reading, data.readingID, offset, data_reading_size, offset, true);
-  msg_insert_uint(data_reading, data.lat, offset, data_reading_size, offset, true);
-  msg_insert_uint(data_reading, data.lng, offset, data_reading_size, offset, true);
+  msg_insert_int(data_reading, data.lat, offset, data_reading_size, offset, true);
+  msg_insert_int(data_reading, data.lng, offset, data_reading_size, offset, true);
   msg_insert_uint(data_reading, data.vel, offset, data_reading_size, offset, true);
   msg_insert_uint(data_reading, data.direction, offset, data_reading_size, offset, true);
   msg_insert_uint(data_reading, data.timestamp, offset, data_reading_size, offset, true);
@@ -644,51 +661,60 @@ void GPS_Manager::getMeasurementFromFile(void){
       if ((strncmp(prevLine.line, "Filtered:", 4) == 0) \
           && (strncmp(currentLine.line, "71b", 3) == 0)){
 
-            byte filteredData[GPS_message_size];
+            byte filteredData[GPS_message_size] = {0};
 
-            // Make a copy
-            char tmpHolder[max_line_length];
-            sscanf(currentLine.line, "%s", tmpHolder);
-            
-            // Filter for data
-            for (uint8_t index = 0; index < GPS_message_size; index++){
-              sscanf(tmpHolder, "%db%s", &filteredData[index], tmpHolder);
+            /*
+              logByteArray writes each byte as a decimal number followed by 'b',
+              so the line is parsed by walking it with strtoul. 
+            */
+            const char * cursor = currentLine.line;
+            uint8_t nbytes = 0;
+            while (nbytes < GPS_message_size && *cursor != '\0'){
+              char * end = nullptr;
+              unsigned long value = strtoul(cursor, &end, 10);
+              if (end == cursor){
+                break;  // no digits here: malformed or truncated line
+              }
+              filteredData[nbytes++] = (byte) value;
+              cursor = (*end == 'b') ? end + 1 : end;
             }
-            uint8_t offset = 1;
-            readData.readingID = msg_extract_uint<uint16_t>(filteredData, offset, true, offset);
-            readData.lat       = msg_extract_uint<uint32_t>(filteredData, offset, true, offset);
-            readData.lng       = msg_extract_uint<uint32_t>(filteredData, offset, true, offset);
-            readData.vel       = msg_extract_uint<uint32_t>(filteredData, offset, true, offset);
-            readData.direction = msg_extract_uint<uint32_t>(filteredData, offset, true, offset);
-            readData.timestamp = msg_extract_uint<uint64_t>(filteredData, offset, true, offset);
 
+            if (nbytes == GPS_message_size){
+              uint8_t offset = 1;
+              readData.readingID = msg_extract_uint<uint16_t>(filteredData, offset, true, offset);
+              readData.lat       = msg_extract_int<int32_t>(filteredData, offset, true, offset);
+              readData.lng       = msg_extract_int<int32_t>(filteredData, offset, true, offset);
+              readData.vel       = msg_extract_uint<uint32_t>(filteredData, offset, true, offset);
+              readData.direction = msg_extract_uint<uint32_t>(filteredData, offset, true, offset);
+              readData.timestamp = msg_extract_uint<time_t>(filteredData, offset, true, offset);
 
-            if (debug_serial){
-              delay(300);
-              Serial.println(sd_writer.file_buffer.at(lineNo).line);
-              Serial.println("Recovered data:\n---------------\n");
-              Serial.print("ID = ");
-              Serial.println(readData.readingID);
-              Serial.print("Lat = ");
-              Serial.println(readData.lat);
-              Serial.print("Lon = ");
-              Serial.println(readData.lng);
-              Serial.print("Vel = ");
-              Serial.println(readData.vel);
-              Serial.print("Dir = ");
-              Serial.println(readData.direction);
-              Serial.print("t = ");
-              Serial.println(readData.timestamp);
-              Serial.println("---------------\n");
-              delay(200);
+              if (debug_serial){
+                delay(300);
+                Serial.println(sd_writer.file_buffer.at(lineNo).line);
+                Serial.println("Recovered data:\n---------------\n");
+                Serial.print("ID = ");
+                Serial.println(readData.readingID);
+                Serial.print("Lat = ");
+                Serial.println(readData.lat);
+                Serial.print("Lon = ");
+                Serial.println(readData.lng);
+                Serial.print("Vel = ");
+                Serial.println(readData.vel);
+                Serial.print("Dir = ");
+                Serial.println(readData.direction);
+                Serial.print("t = ");
+                Serial.println(readData.timestamp);
+                Serial.println("---------------\n");
+                delay(200);
+              }
+
+              // New measurements take precedence in memory over old measurements
+              if (GPSReadings.full()){
+                GPSReadings.pop_front();
+              }
+              GPSReadings.push_back(readData);
+              break;
             }
-            
-            // New measurements take precedence in memory over old measurements
-            if (GPSReadings.full()){
-              GPSReadings.pop_front();
-            }
-            GPSReadings.push_back(readData);
-            break;
       }
       lineNo++;
 
@@ -703,8 +729,8 @@ void GPS_Manager::updateBeaconMsg(uint32_t WiO_ID){
   beaconMsg[offset++] = 'U';
   beaconMsg[offset++] = 'R';
   msg_insert_uint(beaconMsg, currentPosition.timestamp, offset, beaconMsgSize, offset, true);
-  msg_insert_uint(beaconMsg, currentPosition.lat, offset, beaconMsgSize, offset, true);
-  msg_insert_uint(beaconMsg, currentPosition.lng, offset, beaconMsgSize, offset, true);
+  msg_insert_int(beaconMsg, currentPosition.lat, offset, beaconMsgSize, offset, true);
+  msg_insert_int(beaconMsg, currentPosition.lng, offset, beaconMsgSize, offset, true);
   msg_insert_uint(beaconMsg, WiO_ID, offset, beaconMsgSize, offset, true);
   beaconMsg[offset++] = 'E';
 }
