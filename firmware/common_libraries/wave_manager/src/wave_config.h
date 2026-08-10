@@ -455,11 +455,7 @@ static constexpr WindowType kWelchWindow = WindowType::Hann;
 
 // -----------------------------------------------------------------------------
 // Kalman: quaternion error-state EKF with an adaptive measurement noise; see kalman.h
-// for what R's three terms do. r0 = 1e-3 is the value that is never much worse than
-// Madgwick on any capture, but it was swept on four captures from one site - re-measure
-// before trusting it. R scales by dtRef/dt, so r0 cannot be read without knowing
-// kAhrsInputOdrHz: 1e-3 at 960 Hz is an effective 1.9e-2.
-// The accel unit is load-bearing - m/s^2, since (|a|-g)/g asks how far a sample is from 1 g.
+// for what R's three terms do
 // -----------------------------------------------------------------------------
 static constexpr KalmanAhrsParams kKalmanParams = {
     /* sigmaG  */ 0.005f,        // rad/s/sqrt(Hz), ~0.3 deg/s/sqrt(Hz)
