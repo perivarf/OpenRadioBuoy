@@ -18,17 +18,17 @@ struct temperature_Reading
 };
 
 struct GPS_Reading
-{   
+{
     uint16_t reading_ID;
     int32_t lat;
     int32_t lng;
-    int32_t vel;
-    int32_t direction;
+    uint32_t vel;
+    uint32_t direction;
     time_t timestamp;
 };
 
 struct beacon_Reading
-{   
+{
     time_t timestamp;
     int32_t lat;
     int32_t lng;

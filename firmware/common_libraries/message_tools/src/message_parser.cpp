@@ -33,8 +33,8 @@ GPS_Reading Message_Parser::parse_gps_message(byte *msg)
     GPS_Reading gps_reading_packet;
     uint8_t offset = 1;
     gps_reading_packet.reading_ID = msg_extract_uint<uint16_t>(msg, offset, true, offset);
-    gps_reading_packet.lat = msg_extract_uint<uint32_t>(msg, offset, true, offset);
-    gps_reading_packet.lng = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    gps_reading_packet.lat = msg_extract_int<int32_t>(msg, offset, true, offset);
+    gps_reading_packet.lng = msg_extract_int<int32_t>(msg, offset, true, offset);
     gps_reading_packet.vel = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     gps_reading_packet.direction = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     gps_reading_packet.timestamp = msg_extract_uint<time_t>(msg, offset, true, offset);
@@ -47,8 +47,8 @@ beacon_Reading Message_Parser::parse_beacon_message(byte *msg)
     beacon_Reading beacon_reading_packet;
     uint8_t offset = 2;
     beacon_reading_packet.timestamp = msg_extract_uint<time_t>(msg, offset, true, offset);
-    beacon_reading_packet.lat = msg_extract_uint<int32_t>(msg, offset, true, offset);
-    beacon_reading_packet.lng = msg_extract_uint<int32_t>(msg, offset, true, offset);
+    beacon_reading_packet.lat = msg_extract_int<int32_t>(msg, offset, true, offset);
+    beacon_reading_packet.lng = msg_extract_int<int32_t>(msg, offset, true, offset);
     beacon_reading_packet.buoy_id = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     return beacon_reading_packet;
 

@@ -57,6 +57,7 @@ static constexpr uint8_t max_message_length {255};
 
 // Measurement scaling
 static constexpr uint32_t scale_factor              {100000};
+static constexpr int32_t gps_coord_scale            {10000000};
 static constexpr uint8_t  max_number_of_thermometres {1};
 
 // Wave analysis message wire format: the largest number of uint16 spectrum values a

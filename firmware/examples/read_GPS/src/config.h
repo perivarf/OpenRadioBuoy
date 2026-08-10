@@ -25,6 +25,8 @@ static           uint32_t base_measurement_period            {5*min_2_s*s_2_ms};
 static constexpr uint32_t maximal_measurement_period         {30*min_2_s*s_2_ms};
 static constexpr bool     resync_RTC_using_GPS               {true};
 static constexpr uint32_t scale_factor                       {100000};
+// Latitude/longitude keep the receiver's native 1e-7 deg, see common_config.h
+static constexpr int32_t  gps_coord_scale                    {10000000};
 
 // Pin config. Do not change unless you have rewired the OLB
 static constexpr uint8_t  GPS_RX_PIN                     {PC0};

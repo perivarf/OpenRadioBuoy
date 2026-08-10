@@ -15,8 +15,8 @@
 
 struct GPS_Data{
   time_t timestamp;
-  uint32_t lat;
-  uint32_t lng;
+  int32_t lat;
+  int32_t lng;
   uint32_t vel;
   uint32_t direction;
   uint16_t readingID;
@@ -65,9 +65,19 @@ static constexpr uint16_t GPS_pvt_frame_size             {100};     // header 6 
 static constexpr uint32_t GPS_probe_timeout              {3000};    // how long begin() retries the MON-VER probe
 
 
-static constexpr uint32_t beaconMsgSize  {3 + sizeof(time_t) + 3*sizeof(uint32_t)};
-static constexpr uint8_t GPS_message_size {2+sizeof(time_t)+4*sizeof(uint32_t) + sizeof(uint16_t)};
-static constexpr uint8_t deployment_message_size {2 + sizeof(uint32_t) + sizeof(time_t) + 2*sizeof(uint32_t) + 1};
+/*
+  Wire size of one coordinate
+*/
+static constexpr size_t gps_coord_field_size {1 + sizeof(int32_t)};
+
+// 'U','R' + timestamp + lat + lng + WiO_ID + 'E'
+static constexpr uint32_t beaconMsgSize  {3 + sizeof(time_t) + sizeof(uint32_t) + 2*gps_coord_field_size};
+// 'G' + readingID + lat + lng + vel + direction + timestamp + 'E'
+static constexpr uint8_t GPS_message_size {2 + sizeof(uint16_t) + 2*gps_coord_field_size \
+                                           + 2*sizeof(int32_t) + sizeof(time_t)};
+// 'U','I' + buoy_ID + timestamp + lat + lng + 'E'
+static constexpr uint8_t deployment_message_size {2 + sizeof(uint32_t) + sizeof(time_t) \
+                                                  + 2*gps_coord_field_size + 1};
 class GPS_Manager{
   public:
     GPS_Manager(uint32_t sdapin, uint32_t sclpin) : sda_pin(sdapin), scl_pin(sclpin) {};
