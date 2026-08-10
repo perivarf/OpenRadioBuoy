@@ -116,16 +116,9 @@ static constexpr uint8_t lpf2BwForDiv(uint16_t div) {
 static constexpr uint8_t kLpf2Bw       = lpf2BwForDiv(kLpf2Div);
 static constexpr float   kLpf2CutoffHz = (float)kImuOdrHz / kLpf2Div;  // 4.8 Hz @ 960 Hz
 
-// A guard, not a knob: lpf2DivForOdr already picks for the margin, so this can only
-// fire when no divisor clears it - kWaveFMax too high for the ODR, or the list changed.
 static_assert(kLpf2CutoffHz >= kLpf2MinHz,
               "no LPF2 divisor clears kWaveFMax by kLpf2Margin - raise kImuOdrHz, "
               "lower kWaveFMax, or accept a smaller margin");
-
-// Both describe a block kEnableSflp (bottom of this file) can switch off entirely -
-// with it false neither the rate nor the tag ever reaches the FIFO.
-static constexpr float   kSflpOdrHz = 240.0f;                  // on-chip fusion rate
-static constexpr uint8_t kSflpRotationTag = 0x13;          // FIFO tag: SFLP rotation vector
 
 // -----------------------------------------------------------------------------
 // Full-scale range. The enum value is the number passed to Set_X_FS/Set_G_FS (g / dps),
@@ -486,24 +479,27 @@ static constexpr KalmanAhrsParams kKalmanParams = {
 // only its state occupies RAM. The two share an API, so makeWaveAhrs() - which exists
 // because the constructors differ - is the only thing that has to change with it.
 // -----------------------------------------------------------------------------
+
+// Use chip built in AHRS (SFLP fusion) instead of the AHRS above. 
+static constexpr bool wave_use_sflp = false;
+
+// If not use built-in AHRS, select the software AHRS to run
 using WaveAhrs = Madgwick;
 inline WaveAhrs makeWaveAhrs(void) { return WaveAhrs{kMadgwickBeta}; }
 
-// kEnableSflp: Run the chip's own fusion block or not. 
-// Can be used as a comparison against Madgwick/Kalman, or can be used standalone to save CPU.
-static constexpr bool kEnableSflp = true;
 
-// Feed the wave chain the chip's SFLP fusion instead of the AHRS above. SFLP is logged
-// in every row whenever kEnableSflp is set; this picks which column the spectrum, the
-// wave parameters and the brake flag are built from.
-static constexpr bool wave_use_sflp = false;
+// Built in SFLP settings. The SFLP fusion is a 6-axis AHRS that runs on the chip, and outputs a quaternion at a fixed rate. 
+static constexpr bool kEnableSflp = true;                  // If we are to enable the SFLP fusion or not.
+static constexpr float   kSflpOdrHz = 240.0f;              // on-chip fusion rate
+static constexpr uint8_t kSflpRotationTag = 0x13;          // FIFO tag: SFLP rotation vector
 
+// Just a test that if we are to use SFLP as basis for PSD, then we need to have SFLP enabled.
 static_assert(kEnableSflp || !wave_use_sflp,
               "wave_use_sflp feeds the wave chain from the on-chip fusion, and "
               "kEnableSflp has switched that block off - enable it, or select the "
               "software AHRS");
 
-// What produced the vacc column, for ses.csv / cfg.csv
+// Choice of filter to config file as text.
 static constexpr const char *wave_orientation_name = wave_use_sflp ? "SFLP" : WaveAhrs::kName;
 
 #endif  // WAVE_CONFIG_H
