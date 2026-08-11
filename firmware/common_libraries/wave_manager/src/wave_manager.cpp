@@ -216,7 +216,11 @@ uint8_t WaveManager::takeReading(void) {
 
   IWatchdog.reload();
 
-  // Init done: start the FIFO stream and drain it immediately (no overflow window).
+  // Init done. Flush whatever the FIFO holds, THEN start the stream: from here on the
+  // loop below is what keeps it drained, and it is the only thing that does. The two
+  // calls belong together and in this order - resetFifo leaves the FIFO idle, so
+  // starting the stream anywhere but immediately before the drain loop reopens the
+  // window this split was made to close.
   imu_.resetWindowing(millis());
   imu_.resetFifo();
   imu_.startStreaming();
@@ -310,11 +314,8 @@ bool WaveManager::startSession(void) {
     snprintf(nm, sizeof(nm), "%s/%s_%s.bin", sessionDir_, logStamp_, WAVE_RAW_PREFIX);
     rawFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
     if (rawFile_) {
-      // Word rate is accel + gyro + SFLP, each at its own ODR - the SFLP fusion runs
-      // at kSflpOdrHz, NOT at kImuOdrHz, so it is not simply 3x.
-      const uint32_t wordsPerS = 2u * kImuOdrHz + (uint32_t)kSflpOdrHz;
-      const uint32_t rawBytes  = kRawHeaderBytes + durationS *
-                                 (wordsPerS * kRawWordBytes + 16u * kRawSyncBytes);
+      const uint32_t rawBytes = kRawHeaderBytes + durationS *
+                                (kFifoWordsPerSec * kRawWordBytes + 16u * kRawSyncBytes);
       if (!rawFile_.preAllocate(rawBytes) && debug_serial) {
         Serial.print("WaveManager: raw preAllocate failed, "); Serial.print(rawBytes);
         Serial.println(" B");

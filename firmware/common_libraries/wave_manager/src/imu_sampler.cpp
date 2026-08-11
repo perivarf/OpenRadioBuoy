@@ -134,6 +134,7 @@ void ImuSampler::applyConfig() {
 // STREAM_MODE is more stable as it allows for some missing reads, but it continues
 // to fill the FIFO
 void ImuSampler::startStreaming() {
+  fifoFlag_ = false;
   imu_.FIFO_Set_Mode(LSM6DSV16X_STREAM_MODE);
 }
 
@@ -171,16 +172,16 @@ bool ImuSampler::checkImu(Print &dbg) {
   return true;
 }
 
+// Flush the hardware FIFO and leave it OFF. Streaming is startStreaming's job
 void ImuSampler::resetFifo() {
-  imu_.FIFO_Set_Mode(LSM6DSV16X_BYPASS_MODE);  // flush hardware FIFO
-  imu_.FIFO_Set_Mode(LSM6DSV16X_STREAM_MODE);  // resume streaming
-
+  imu_.FIFO_Set_Mode(LSM6DSV16X_BYPASS_MODE);  // flush hardware FIFO, stay idle
   fifoFlag_ = false;
 }
 
 void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   sessionStartMs_ = captureStartMs;
   nOverflowTotal_ = 0;       // per-capture, reported in ana.csv
+  nOverflow_ = 0;
   lastDrainMs_ = captureStartMs;  // measure the INT1 deadline from t=0, not from boot
   logStarted_ = false;
   accelIdx_ = 0;

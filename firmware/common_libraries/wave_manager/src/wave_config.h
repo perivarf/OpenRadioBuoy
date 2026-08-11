@@ -153,8 +153,13 @@ static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 
 // -----------------------------------------------------------------------------
 // FIFO watermark + INT1. The sensor drives INT1 high at kFifoWatermark words, so the
-// drain runs on the sensor's cadence and update() costs a flag test otherwise. At 128
-// words that is a burst every ~107 ms, well inside the 512-word buffer.
+// drain runs on the sensor's cadence and update() costs a flag test otherwise.
+//
+// The budget every value here is spent against: accel + gyro + SFLP are batched at
+// their own ODRs, so the FIFO takes 2*kImuOdrHz + kSflpOdrHz words a second - 2160 at
+// 960 Hz. The buffer is 512 words deep (FIFO_STATUS' level field is 9 bits), so the
+// drain has 512/2160 = 237 ms before the oldest word is overwritten. At 128 words the
+// watermark burst arrives every ~59 ms, a quarter of that.
 //
 // false falls back to pure polling
 // -----------------------------------------------------------------------------
@@ -176,8 +181,17 @@ static constexpr uint8_t kInt1FifoTh  = 0x08;  // bit 3: FIFO watermark reached
 // Deadline after which update() drains whether or not INT1 fired: the interrupt is a
 // hint about when to drain and, never whether. A single lost edge would otherwise
 // stop the capture permanently.
-
-static constexpr uint32_t kFifoPollFallbackMs = 150;
+//
+// Sized against the 237 ms overwrite budget above, not against the watermark cadence:
+// this is what a lost edge costs, and whatever is left has to absorb the sd-card write
+// that follows. At the old 150 ms a single missed edge spent 63 % of the buffer before
+// the drain even started, leaving 87 ms - about one card stall - and the capture then
+// overflowed. 80 ms keeps two thirds of the budget in reserve, and still sits well
+// above the ~59 ms watermark burst, so it stays a fallback and does not become the
+// normal trigger.
+// (The word rate it is checked against needs kSflpOdrHz, which is declared with the
+// rest of the fusion settings further down - the static_assert lives there.)
+static constexpr uint32_t kFifoPollFallbackMs = 80;
 
 // FIFO_DATA_OUT_TAG. The six payload registers follow it (0x79..0x7E), and reading
 // 0x7E is what pops the word - so a 7-byte auto-incrementing burst from here takes
@@ -488,6 +502,19 @@ inline WaveAhrs makeWaveAhrs(void) { return WaveAhrs{kMadgwickBeta}; }
 static constexpr bool kEnableSflp = true;                  // If we are to enable the SFLP fusion or not.
 static constexpr float   kSflpOdrHz = 240.0f;              // on-chip fusion rate
 static constexpr uint8_t kSflpRotationTag = 0x13;          // FIFO tag: SFLP rotation vector
+
+// Words the FIFO takes in a second: accel and gyro at kImuOdrHz, plus the rotation
+// vector at the fusion's own rate when it is batched. This is the denominator behind
+// every timing claim in the INT1 section above.
+static constexpr uint32_t kFifoWordsPerSec =
+    2u * (uint32_t)kImuOdrHz + (kEnableSflp ? (uint32_t)kSflpOdrHz : 0u);
+
+// Deferred from the INT1 section: a lost edge costs kFifoPollFallbackMs of undrained
+// FIFO, and that alone must not fill the 512-word buffer - what is left over is the
+// margin the sd-card writes have to fit inside.
+static_assert(kFifoPollFallbackMs * kFifoWordsPerSec < 512u * 1000u,
+              "a lost INT1 edge would by itself overrun the 512-word FIFO - lower "
+              "kFifoPollFallbackMs, or batch fewer words per second");
 
 // Just a test that if we are to use SFLP as basis for PSD, then we need to have SFLP enabled.
 static_assert(kEnableSflp || !wave_use_sflp,

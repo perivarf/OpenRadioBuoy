@@ -93,10 +93,11 @@ class ImuSampler {
   // return value answers "is the IMU alive now", not "was it at boot".
   bool begin(Print &dbg);
 
-  // Put the FIFO into STREAM/continuous mode so it starts filling.
+  // Put the FIFO into STREAM/continuous mode so it starts filling, and drop any
+  // pending watermark flag
   void startStreaming();
 
-  // Flush the hardware FIFO (BYPASS -> STREAM) and clear pending state.
+  // Flush the hardware FIFO (BYPASS) and clear pending state. Leaves the FIFO IDLE -
   void resetFifo();
 
   // Park the sensor between captures; begin() is the other half, as with the GPS.
