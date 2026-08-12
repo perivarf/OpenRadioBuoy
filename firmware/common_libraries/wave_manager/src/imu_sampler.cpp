@@ -176,6 +176,9 @@ bool ImuSampler::checkImu(Print &dbg) {
 void ImuSampler::resetFifo() {
   imu_.FIFO_Set_Mode(LSM6DSV16X_BYPASS_MODE);  // flush hardware FIFO, stay idle
   fifoFlag_ = false;
+  // Belongs to the FIFO contents being thrown away here, so carrying it across would
+  // pin a previous capture's overrun on the first window of the next one.
+  pendingOvrLatched_ = false;
 }
 
 void ImuSampler::resetWindowing(uint32_t captureStartMs) {
@@ -205,6 +208,9 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   dbgLastPrint_ = captureStartMs;
   nAccDbg_ = nGyrDbg_ = 0;
   sumAccMag2_ = sumGyrMag2_ = 0.0;
+  nWordsDbg_ = nUnknownDbg_ = nFullDbg_ = 0;
+  maxLevelDbg_ = 0;
+  lastUnknownTag_ = 0;
 }
 
 // Evaluate the decimation filters and read the delay-matched quaternions into the
@@ -422,27 +428,37 @@ void ImuSampler::update(Print &dbg) {
   }
   fifoFlag_ = false;
 
-  // Diagnostic only - in STREAM mode there is nothing to recover from, the sensor
-  // just overwrote its oldest words. Note FIFO_FULL_IA is predictive ("full at the
-  // next ODR"), so treat a zero here as "probably fine", never as proof: r.n and
-  // fir_late_eval_windows are the ground truth for whether samples went missing.
-  uint8_t full = 0;
-  imu_.FIFO_Get_Full_Status(&full);
-  if (full) {
+  // Level and flags from one read, so the count and the flags describe the same
+  // instant - see readFifoStatus for the register and why it is not the wrapper's.
+  const FifoStatus st = readFifoStatus();
+  const uint16_t nSamples = st.level;
+
+  // Loss is OVR, not FULL. Counting FULL as loss over-reports - the brim can be reached
+  // and drained in time - which cuts both ways: it also means a capture reporting ZERO
+  // is strong evidence the level never even approached the top.
+  //
+  // pendingOvrLatched_ belongs to the PREVIOUS drain's pop loop, so it is reported one
+  // drain late. That is a coarser timestamp, not a false positive: the loss is real, and
+  // there is no earlier read that could have carried it.
+  const bool lost = st.ovr || st.ovrLatched || pendingOvrLatched_;
+  pendingOvrLatched_ = false;
+  if (lost) {
     nOverflow_++;       // reset by the debug print; nOverflowTotal_ is the per-capture one
     nOverflowTotal_++;
     winFifoOvf_ = true; // flag the window that was open when it happened (fifo_ovf in imu.csv)
   }
+  if (st.full) nFullDbg_++;
 
-  uint16_t nSamples = 0;
-  imu_.FIFO_Get_Num_Samples(&nSamples);
+  // Peak level over the debug interval
+  if (nSamples > maxLevelDbg_) maxLevelDbg_ = nSamples;
 
   // Sync record first, so the words that follow it are the ones it describes.
-  rawEmitSync(nSamples, full ? kRawFlagFifoOvf : 0);
+  rawEmitSync(nSamples, lost ? kRawFlagFifoOvf : 0);
 
   for (uint16_t i = 0; i < nSamples; i++) {
     uint8_t payload[6];
     const uint8_t tag = readFifoWord(payload);   // tag + data, one transfer
+    nWordsDbg_++;   // every word popped, whatever it turns out to be
     // EVERY word, including tags this code does not decode: the raw log is a record
     // of what the sensor produced, not of what the wave chain happens to consume.
     rawEmitWord(tag, payload);
@@ -573,10 +589,10 @@ void ImuSampler::update(Print &dbg) {
       } else {
         winSflpNan_ = true;
       }
+    } else {
+      nUnknownDbg_++;
+      lastUnknownTag_ = tag;
     }
-    // Unknown tag: nothing to do. readFifoWord() already popped the word, so the
-    // FIFO pointer has advanced either way - unlike the old path, which needed an
-    // explicit FIFO_Get_Data to avoid stalling on a tag it did not recognise.
   }
 
   lastDrainMs_ = millis();
@@ -588,9 +604,15 @@ void ImuSampler::update(Print &dbg) {
     // arrives, fifoFlag_ is never set again and the stream dies silently. Re-arm
     // ourselves whenever a backlog remains. ORB_test found this the hard way; it is
     // not defensive padding.
-    uint16_t remaining = 0;
-    imu_.FIFO_Get_Num_Samples(&remaining);
-    if (remaining >= kFifoWatermark) fifoFlag_ = true;
+    //
+    // readFifoStatus rather than FIFO_Get_Num_Samples: same single transaction, but it
+    // is also the only read positioned to catch FIFO_OVR_LATCHED from the pop loop
+    // above. A card stall mid-loop can fill the FIFO and overwrite words, and the rest
+    // of the loop then drains the level back under the brim - so the next drain's
+    // FIFO_OVR_IA reads zero and the loss would leave no trace anywhere else.
+    const FifoStatus after = readFifoStatus();
+    if (after.ovrLatched) pendingOvrLatched_ = true;
+    if (after.level >= kFifoWatermark) fifoFlag_ = true;
   }
 
   // Calibrate the accel sample period from real elapsed time / total samples, so
@@ -625,11 +647,21 @@ void ImuSampler::debugPrintStatus(Print &dbg) {
   dbg.print(" mg  |  Gyro: "); dbg.print(gyrHz, 0);
   dbg.print(" Hz, |g| = ");   dbg.print(avgGyr, 1);
   dbg.print(" mdps");
+  dbg.print("  |  words/s "); dbg.print(elapsedS > 0 ? nWordsDbg_ / elapsedS : 0.0, 0);
+  dbg.print(", peak ");       dbg.print(maxLevelDbg_);
+  dbg.print("/512");
+  if (nUnknownDbg_ > 0) {
+    dbg.print(", unk "); dbg.print(nUnknownDbg_);
+    dbg.print(" (tag 0x"); dbg.print(lastUnknownTag_, HEX); dbg.print(")");
+  }
+  if (nFullDbg_ > 0) { dbg.print(", full x"); dbg.print(nFullDbg_); }
   if (nOverflow_ > 0) {
-    dbg.print("  [WARN] FIFO overflow x"); dbg.print(nOverflow_);
+    dbg.print("  [WARN] FIFO overrun x"); dbg.print(nOverflow_);
     nOverflow_ = 0;
   }
   dbg.println();
+  nWordsDbg_ = nUnknownDbg_ = nFullDbg_ = 0;
+  maxLevelDbg_ = 0;
 
   nAccDbg_ = nGyrDbg_ = 0;
   sumAccMag2_ = sumGyrMag2_ = 0.0;

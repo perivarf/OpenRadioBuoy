@@ -53,7 +53,7 @@ static constexpr bool wave_measurement_require_gps {true};
 // IMU: datarate (ODR) + power mode for accel AND gyro.
 // -----------------------------------------------------------------------------
 
-static constexpr uint16_t kImuOdrHz    = 960;   // 120/240/480/960 Hz
+static constexpr uint16_t kImuOdrHz    = 480;   // 120/240/480/960 Hz
 static constexpr uint8_t  kImuLowPower = 0;     // 1 = low power (ODR<=240), 0 = high performance
 static_assert(kImuOdrHz == 120 || kImuOdrHz == 240 || kImuOdrHz == 480 || kImuOdrHz == 960,
               "kImuOdrHz must be 120, 240, 480 or 960 Hz");
@@ -192,6 +192,11 @@ static constexpr uint8_t kInt1FifoTh  = 0x08;  // bit 3: FIFO watermark reached
 // (The word rate it is checked against needs kSflpOdrHz, which is declared with the
 // rest of the fusion settings further down - the static_assert lives there.)
 static constexpr uint32_t kFifoPollFallbackMs = 80;
+
+// FIFO_STATUS1/FIFO_STATUS2. Read as a 2-byte burst rather than through the wrapper:
+// lsm6dsv16x_fifo_status_get drops FIFO_OVR_LATCHED, and that bit is reset by the very
+// read that drops it, so going through the wrapper makes it permanently unobservable.
+static constexpr uint8_t kFifoStatus1Reg = 0x1B;
 
 // FIFO_DATA_OUT_TAG. The six payload registers follow it (0x79..0x7E), and reading
 // 0x7E is what pops the word - so a 7-byte auto-incrementing burst from here takes
@@ -413,10 +418,13 @@ static_assert(kTaperF1 < kTaperF2 && kTaperF2 <= kWaveFMax, "need kTaperF1 < kTa
 
 // ---- Transmitted spectrum slice ----
 // Each wire bin is the band average of kSpecBinGroup PSD bins, so the moments and Tp
-// keep the full kPsdDfHz while the message spans the whole wave band.
+// keep the full kPsdDfHz while the message spans kPsdMinFreq..kPsdMaxFreq.
 // Averaging, so the energy is preserved
 
+static constexpr bool kSendPsd = true; // To send PSD or not
+static constexpr float kPsdMinFreq = 0.03f;
 static constexpr float kPsdMaxFreq = 1.0f;
+static_assert(kPsdMinFreq < kPsdMaxFreq, "the transmitted band would be empty");
 static_assert(kPsdMaxFreq <= kWaveFMax,
               "the transmitted spectrum would reach past the analysed band and be "
               "normalised against a peak that never saw it - raise kWaveFMax or lower "
@@ -427,21 +435,30 @@ static_assert(kPsdMaxFreq <= kWaveFMax,
 // Everything below floors as well, so the transmitted band never exceeds kPsdMaxFreq.
 static constexpr size_t kPsdMaxBin = (size_t)(kPsdMaxFreq / kPsdDfHz);
 
-static constexpr size_t welch_bin_min {0};
+static constexpr size_t kPsdMinBinFloor = (size_t)(kPsdMinFreq / kPsdDfHz); // First PSD bin whose lower edge clears kPsdMinFreq
+static constexpr size_t kPsdMinBin =
+    kPsdMinBinFloor + ((float)kPsdMinBinFloor * kPsdDfHz < kPsdMinFreq ? 1u : 0u);
+
+static constexpr size_t welch_bin_min {kPsdMinBin};
+
+static_assert(kPsdMaxBin > welch_bin_min,
+              "kPsdMinFreq and kPsdMaxFreq are inside the same PSD bin - widen the "
+              "band, or raise kWelchSegLen so the bins get finer");
 
 // welch_bins (common_config.h) is the the size of wave_spectrum[] 
 // and max wave_message_size budgets, not the actual count (num_bins)
 // num_bins rides in the message, and the spectrum is the last field, so
 // shipping fewer bins simply makes the message shorter (see readings.h).
 //
-// kSpecBinGroup is chosen as the smallest that squeezes kPsdMaxBin into the capacity,
-// so the transmitted resolution is the finest the budget allows. 
-// The count is then however many whole groups fit inside kPsdMaxBin, 
+// kSpecBinGroup is chosen as the smallest that squeezes welch_bin_min..kPsdMaxBin into
+// the capacity, so the transmitted resolution is the finest the budget allows
+// The count is then however many whole groups fit inside kPsdMaxBin,
 // but limited to corresponding kPsdMaxFreq
 static constexpr size_t kSpecBinGroup =
     (kPsdMaxBin - welch_bin_min + welch_bins - 1) / welch_bins;
 static constexpr size_t kSpecNBins     = (kPsdMaxBin - welch_bin_min) / kSpecBinGroup;
 static constexpr size_t welch_bin_max  = welch_bin_min + kSpecNBins * kSpecBinGroup;
+static constexpr float  kSpecBandMinHz = welch_bin_min * kPsdDfHz;
 static constexpr float  kSpecBandMaxHz = welch_bin_max * kPsdDfHz;
 
 static_assert(kSpecBinGroup >= 1,
@@ -457,12 +474,17 @@ static_assert(welch_bin_max <= kWelchSegLen / 2 + 1,
 static_assert(kSpecBandMaxHz <= kPsdMaxFreq,
               "flooring is what keeps the transmitted band inside kPsdMaxFreq - this "
               "cannot fire unless the derivation above was changed");
+static_assert(kSpecBandMinHz >= kPsdMinFreq,
+              "rounding up is what keeps the transmitted band above kPsdMinFreq - this "
+              "cannot fire unless the derivation above was changed");
 
 // Frequency axis of the transmitted spectrum, as the receiver must reconstruct it:
 //   f_j = kSpecFMinHz + j * kSpecBinWidthHz,  j = 0 .. kSpecNBins-1
 static constexpr float kSpecBinWidthHz = kSpecBinGroup * kPsdDfHz;          // 0.019531 Hz
 static constexpr float kSpecFMinHz     = (welch_bin_min + 0.5f * (kSpecBinGroup - 1)) * kPsdDfHz;
 static constexpr float kSpecFMaxHz     = kSpecFMinHz + (kSpecNBins - 1) * kSpecBinWidthHz;
+
+static constexpr size_t kSpecTxBins = kSendPsd ? kSpecNBins : 0; // Number of sent PSD bins
 
 enum class WindowType { Hann, Hamming };
 static constexpr WindowType kWelchWindow = WindowType::Hann;

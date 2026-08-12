@@ -257,7 +257,7 @@ uint8_t WaveManager::takeReading(void) {
 
 // -----------------------------------------------------------------------------
 // Session logging (ORB_test Logger style): one timestamped directory per capture,
-// created as "<stamp>_tmp" and renamed to "<stamp>" on a clean stop.
+// created as "<stamp>_r<id>_tmp" and renamed to "<stamp>_r<id>" on a clean stop.
 // -----------------------------------------------------------------------------
 bool WaveManager::startSession(void) {
   SdFat &card = sd_writer.card();
@@ -267,7 +267,9 @@ bool WaveManager::startSession(void) {
   sprintf(logStamp_, "%04d%02d%02d_%02d%02d%02d",
           year(captureStart_), month(captureStart_), day(captureStart_),
           hour(captureStart_), minute(captureStart_), second(captureStart_));
-  snprintf(sessionDir_, sizeof(sessionDir_), "%s/%s_tmp", wave_log_dir, logStamp_);
+  
+  snprintf(sessionDir_, sizeof(sessionDir_), "%s/%s_r%04u_tmp",
+           wave_log_dir, logStamp_, readingID_);
 
   // mkdir creates the missing "waves/" parent too.
   if (!card.exists(sessionDir_) && !card.mkdir(sessionDir_)) {
@@ -468,18 +470,23 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("welch_window,");       f.println(kWelchWindow == WindowType::Hann ? "Hann" : "Hamming");
   f.print("psd_df_hz,");          f.println(kPsdDfHz, 6);
   f.print("wave_fmax_hz,");       f.println(kWaveFMax, 3);
+  f.print("psd_min_freq_hz,");    f.println(kPsdMinFreq, 3);
   f.print("psd_max_freq_hz,");    f.println(kPsdMaxFreq, 3);
   f.print("taper_f1_hz,");        f.println(kTaperF1, 3);
   f.print("taper_f2_hz,");        f.println(kTaperF2, 3);
   f.print("welch_bin_min,");      f.println((uint32_t)welch_bin_min);
   f.print("welch_bin_max,");      f.println((uint32_t)welch_bin_max);
   f.print("welch_bins,");         f.println((uint32_t)welch_bins);
+  f.print("spec_sent,");          f.println(kSendPsd ? 1 : 0);
+  f.print("spec_tx_bins,");       f.println((uint32_t)kSpecTxBins);
   f.print("spec_n_bins,");        f.println((uint32_t)kSpecNBins);
   f.print("spec_bin_group,");     f.println((uint32_t)kSpecBinGroup);
   f.print("spec_bin_width_hz,");  f.println(kSpecBinWidthHz, 6);
   f.print("spec_f_min_hz,");      f.println(kSpecFMinHz, 5);
   f.print("spec_f_max_hz,");      f.println(kSpecFMaxHz, 5);
-
+  f.print("spec_quantity,");      f.println("acc");   // acc | eta
+  f.print("spec_taper_applied,"); f.println(0);
+  f.print("spec_band_min_hz,");   f.println(kSpecBandMinHz, 5);
   f.print("spec_band_max_hz,");   f.println(kSpecBandMaxHz, 5);
   f.print("scale_factor,");       f.println(scale_factor);
 }
@@ -671,7 +678,18 @@ size_t WaveManager::updateTransmitMessage(void) {
   msg_insert_uint(msgB, toFixed(res.Tc),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tp),        offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, toFixed(res.Tz),        offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, toFixed(res.max_value), offset, wave_message_size, offset, true);
+
+  // max_value gets wave_psd_scale, not toFixed's scale_factor. An acceleration PSD is
+  // orders of magnitude smaller than a wave height or a period, and at 1e5 a calm-sea
+  // peak rounds to 0 - which zeroes the whole spectrum on the far side, since every bin
+  // is reconstructed as value/65535 * max_value. See readings.h for the range.
+  auto toPsdFixed = [](float v) -> uint32_t {
+    if (!(v > 0.0f)) return 0;                       // undefined (-1) or negative -> 0
+    double scaled = (double)v * (double)wave_psd_scale;
+    if (scaled > 4294967295.0) return 0xFFFFFFFFUL;  // clamp to uint32 range
+    return (uint32_t)llround(scaled);
+  };
+  msg_insert_uint(msgB, toPsdFixed(res.max_value), offset, wave_message_size, offset, true);
 
   // Frequency axis, so the base station can label the bins it is about to read. Bin
   // CENTRES, and the count immediately before the bins themselves - the receiver
@@ -681,15 +699,15 @@ size_t WaveManager::updateTransmitMessage(void) {
   auto toFreqFixed = [](float f) -> uint32_t {
     return (uint32_t)llround((double)f * (double)wave_freq_scale);
   };
-  msg_insert_uint(msgB, toFreqFixed(kSpecFMinHz), offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, toFreqFixed(kSpecFMaxHz), offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, (uint16_t)kSpecNBins,     offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, kSendPsd ? toFreqFixed(kSpecFMinHz) : 0UL, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, kSendPsd ? toFreqFixed(kSpecFMaxHz) : 0UL, offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, (uint16_t)kSpecTxBins,    offset, wave_message_size, offset, true);
 
   // Last field: it is the only variable-length one, so stopping short here shortens
-  // the message without moving anything the receiver has already read. kSpecNBins is
+  // the message without moving anything the receiver has already read. kSpecTxBins is
   // at most welch_bins - the capacity wave_message_size was budgeted for - and is
   // smaller whenever kPsdMaxFreq does not divide evenly into the bin grid.
-  for (size_t i = 0; i < kSpecNBins; i++) {
+  for (size_t i = 0; i < kSpecTxBins; i++) {
     msg_insert_uint(msgB, res.wave_spectrum[i], offset, wave_message_size, offset, true);
   }
   msgB[offset++] = 'E';
@@ -719,10 +737,10 @@ void WaveManager::enqueueFakeResult(void) {
   res.Tc        = 2.53f;   // s
   res.Tp        = 6.91f;   // s
   res.Tz        = 4.29f;   // s
-  res.max_value = 0.0842f; // peak elevation PSD (m^2/Hz)
+  res.max_value = 0.0842f; // peak acceleration PSD ((m/s^2)^2/Hz)
 
   // A single smooth peak, encoded exactly as finalize() does: the wire value is
-  // binEta/peakEta * 65535, so the far side reconstructs value/65535 * max_value.
+  // binAcc/peakAcc * 65535, so the far side reconstructs value/65535 * max_value.
   // Peak placed off-centre so a mirrored or off-by-one bin axis is visible.
   const float peakBin = 0.35f * (float)kSpecNBins;
   const float width   = 0.12f * (float)kSpecNBins;
@@ -754,8 +772,8 @@ void WaveManager::printPendingResult(Print &out) const {
   out.print(r.Tc, 3);       out.print(F(" s   Tp "));
   out.print(r.Tp, 3);       out.print(F(" s   Tz "));
   out.print(r.Tz, 3);       out.println(F(" s"));
-  out.print(F("    max_value "));  out.print(r.max_value, 6);
-  out.print(F(" m^2/Hz   span "));
+  out.print(F("    max_value "));  out.print(r.max_value, 9);
+  out.print(F(" (m/s^2)^2/Hz   span "));
   out.print((uint32_t)(r.timestamp_end - r.timestamp_start));  out.println(F(" s"));
 
   // sprintf, not out.print(float): an epoch near 1.77e9 does not survive a float
@@ -774,16 +792,21 @@ void WaveManager::printPendingResult(Print &out) const {
   // updateTransmitMessage puts in the message - rather than from welch_bin_min and
   // the group size, so this really is the receiver's arithmetic and not a parallel
   // derivation that could agree here and disagree over the air.
-  out.print(F("    PSD, "));      out.print((uint32_t)kSpecNBins);
+  if (!kSendPsd) {
+    out.println(F("    PSD not transmitted (kSendPsd off) - num_bins 0"));
+    return;
+  }
+
+  out.print(F("    PSD, "));      out.print((uint32_t)kSpecTxBins);
   out.print(F(" bins, f_min "));  out.print(kSpecFMinHz, 4);
   out.print(F(" Hz, f_max "));    out.print(kSpecFMaxHz, 4);
   out.print(F(" Hz, df "));       out.print(kSpecBinWidthHz, 6);
-  out.println(F(" Hz (f_hz raw psd_eta):"));
-  for (size_t j = 0; j < kSpecNBins; j++) {
+  out.println(F(" Hz (f_hz raw psd_acc):"));
+  for (size_t j = 0; j < kSpecTxBins; j++) {
     out.print(F("      "));      out.print(kSpecFMinHz + j * kSpecBinWidthHz, 4);
     out.print(' ');              out.print(r.wave_spectrum[j]);
     out.print(' ');
-    out.println(r.wave_spectrum[j] / 65535.0f * r.max_value, 6);
+    out.println(r.wave_spectrum[j] / 65535.0f * r.max_value, 9);
   }
 }
 #endif  // DEBUG_WAVE_MSG

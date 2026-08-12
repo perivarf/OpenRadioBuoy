@@ -54,6 +54,24 @@ struct analog_Reading
 */
 static constexpr uint32_t wave_freq_scale {10000000UL};
 
+/* Scaling factor for max_value, the acceleration-PSD peak the spectrum is
+   normalised against. It needs its own scale for the same reason the frequency
+   axis does - scale_factor's 1e5 cannot express it at all.
+
+   An acceleration PSD in (m/s^2)^2/Hz spans an enormous range: a buoy at rest on
+   a bench sits on the accelerometer's noise floor at ~6e-7, four decades BELOW
+   scale_factor's smallest step, so the field quantised to 0 and every receiver
+   reconstructed value/65535 * 0 = a spectrum of zeros. The shape was on the wire
+   the whole time; only its scale was lost.
+
+   1e8 puts the resolution at 1e-8, two decades under that noise floor, and the
+   uint32 ceiling at 4294967295/1e8 = 42.9 (m/s^2)^2/Hz. For scale: Hs 1 m at
+   Tp 5 s peaks near 3, Hs 10 m at Tp 12 s near 15. Beyond that the sender clamps
+   rather than wraps - a saturated peak reads as a spectrum that is too flat, not
+   as noise, and Hs/Tz/Tc/Tp are transmitted as their own fields and stay right
+   regardless. */
+static constexpr uint32_t wave_psd_scale {100000000UL};
+
 struct wave_analysis_Reading
 {
     uint16_t reading_ID;
@@ -63,7 +81,16 @@ struct wave_analysis_Reading
     uint32_t Tc;
     uint32_t Tp;
     uint32_t Tz;
-    uint32_t max_value; // Maximum value of the PSD, used for normalizing the spectrum
+    /*
+      The spectrum is the vertical ACCELERATION PSD with no taper applied. 
+      
+      The transmitted band is a SLICE, bins below kPsdMinFreq is dropped.
+      max_value is the peak over the  bins. 
+      
+      The bin mid frequencies are 
+      f_i = spec_f_min + i*(spec_f_max - spec_f_min)/(num_bins - 1).
+    */
+    uint32_t max_value; // Peak of the acceleration PSD, scaled with wave_psd_scale
     uint32_t spec_f_min; // Bin centre of the first bin, scaled with wave_freq_scale
     uint32_t spec_f_max; // Bin centre of the last bin, scaled with wave_freq_scale
     uint16_t num_bins; // Number of bins in the array, must be smaller than welch_bins

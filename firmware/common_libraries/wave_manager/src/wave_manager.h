@@ -22,8 +22,8 @@ struct WaveResult {
   float    Tc;         // crest period (s)
   float    Tp;         // peak period (s)
   float    Tz;         // zero-crossing period (s)
-  float    max_value;  // peak elevation PSD value
-  uint16_t wave_spectrum[welch_bins];  // quantised elevation PSD, bins welch_bin_min..max
+  float    max_value;  // peak acceleration PSD value ((m/s^2)^2/Hz), the spectrum's scale
+  uint16_t wave_spectrum[welch_bins];  // quantised acceleration PSD, bins welch_bin_min..max
   time_t   timestamp_start;
   time_t   timestamp_end;
 };
@@ -99,7 +99,7 @@ class WaveManager {
   StreamAnalyzer analyzer_;
 
   // CSV logging state. imu.csv is streamed row-by-row via the row sink; gps/ses are
-  // held open across the session. sessionDir_ is the "<stamp>_tmp" path so
+  // held open across the session. sessionDir_ is the "<stamp>_r<id>_tmp" path so
   // processReading can drop spec/ana into the same folder before the rename.
   File     imuFile_;
   File     gpsFile_;
@@ -109,7 +109,7 @@ class WaveManager {
   bool     imuCsvActive_ = false;  // imu.csv specifically - false in WaveLogMode::Raw
   uint16_t rowsSinceSync_ = 0;
   char     logStamp_[16]   = "00000000_000000";  // YYYYMMDD_HHMMSS
-  char     sessionDir_[40] = "";                  // waves/<stamp>_tmp
+  char     sessionDir_[40] = "";                  // waves/<stamp>_r<id>_tmp
   uint32_t gpsRowsWritten_ = 0;
   // Whether the capture started with a valid fix. Logged to ses.csv: with
   // wave_measurement_require_gps false a capture can legitimately run without one,

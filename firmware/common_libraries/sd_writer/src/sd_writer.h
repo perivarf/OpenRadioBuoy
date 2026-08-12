@@ -88,8 +88,10 @@ class SDWriter{
     void debugSerialPrintln(const char * line);
     void debugSerialPrintln(float number);
     // The one-argument float overloads print Arduino's default two decimals, which is
-    // too coarse for the wave parameters (max_value is ~1e-2 m^2/Hz). Pass digits
-    // explicitly; digits = 0 also renders an integer-valued float without ".00".
+    // too coarse for the wave parameters. An acceleration PSD needs far more: the peak
+    // runs from ~1e-2 (m/s^2)^2/Hz in a seaway down to ~6e-7 on a bench at rest, so it
+    // is printed with 9 decimals and anything less shows it as a row of zeros. Pass
+    // digits explicitly; digits = 0 also renders an integer-valued float without ".00".
     void debugSerialPrint(float number, int digits);
     void debugSerialPrintln(float number, int digits);
     int8_t debugByteArray(byte * array, int length);

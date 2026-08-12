@@ -153,9 +153,54 @@ class ImuSampler {
   volatile bool fifoFlag_ = false;
   uint32_t lastDrainMs_ = 0;   // deadline for the INT1 gate; see kFifoPollFallbackMs
 
+  // FIFO_OVR_LATCHED picked up by the re-arm read at the END of a drain, carried to the
+  // next one. That read is the only place an overrun DURING the pop loop is still
+  // visible: the loop keeps popping afterwards, so by the next drain's status read the
+  // level is back under the brim and FIFO_OVR_IA reads zero again. Since the register is
+  // reset by the very read that reports it, the bit has to be remembered here or lost.
+  bool pendingOvrLatched_ = false;
+
   // Raw auto-incrementing register burst on the shared SPI bus
   //  One CS-low transfer for len consecutive registers.
   void imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len);
+
+  // One decoded read of FIFO_STATUS1/2.
+  struct FifoStatus {
+    uint16_t level;      // 9-bit DIFF_FIFO: words waiting
+    bool     ovr;        // words already overwritten - the DATA LOST flag
+    bool     full;       // at the brim, nothing lost yet
+    bool     ovrLatched; // overran at some point since the previous read
+  };
+
+  /*
+    Level AND every status flag from ONE 2-byte burst of FIFO_STATUS1/2 (0x1B, 0x1C),
+    replacing FIFO_Get_Full_Status + FIFO_Get_Num_Samples - two transactions over
+    overlapping registers, read at two different instants.
+
+    Datasheet DS13476 table 78 and section 6.10.3 (continuous mode), verbatim:
+      FIFO_WTM_IA      bit 7  filling >= WTM
+      FIFO_OVR_IA      bit 6  "FIFO is completely filled"; 6.10.3 adds that on an
+                              overrun "at least one of the oldest samples in FIFO has
+                              been overwritten" - this is the DATA LOST flag
+      FIFO_FULL_IA     bit 5  "FIFO will be full at the next ODR" - the brim WARNING,
+                              which by definition asserts one ODR BEFORE OVR does
+      FIFO_OVR_LATCHED bit 3  latched overrun, "reset when this register is read"
+      DIFF_FIFO_8      bit 0  high bit of the 9-bit level in FIFO_STATUS1
+
+    A raw read for a reason the wrapper cannot give us: lsm6dsv16x_fifo_status_get reads
+    this register, discards FIFO_OVR_LATCHED and clears it in the same breath. Every
+    caller must go through here, or that bit is consumed and thrown away - which is why
+    this exists as one function rather than as two decodings at the two call sites.
+  */
+  inline FifoStatus readFifoStatus() {
+    uint8_t sb[2] = {0, 0};
+    imuBurstRead(kFifoStatus1Reg, sb, 2);
+    return FifoStatus{
+        (uint16_t)(((uint16_t)(sb[1] & 0x01u) << 8) | sb[0]),
+        (sb[1] & 0x40u) != 0,
+        (sb[1] & 0x20u) != 0,
+        (sb[1] & 0x08u) != 0};
+  }
 
   // Pop one FIFO word atomically: tag + 6 payload bytes in a single transfer.
   // Returns tag_sensor
@@ -198,6 +243,17 @@ class ImuSampler {
   uint32_t dbgLastPrint_ = 0;
   uint32_t nAccDbg_ = 0, nGyrDbg_ = 0;
   double   sumAccMag2_ = 0.0, sumGyrMag2_ = 0.0;
+
+  // Debugging counters for FIFO drain
+  //   nWordsDbg_    every word popped -> the true drained word rate, tag-independent
+  //   nUnknownDbg_  words popped but decoded by no branch (datasheet table 210)
+  //   maxLevelDbg_  peak DIFF_FIFO -> near 512 means the drain is losing the race,
+  //                 near the watermark means the words never reached the FIFO
+  //   nFullDbg_     drains that found FIFO_FULL_IA, the brim warning that precedes
+  //                 an actual overrun by one ODR
+  uint32_t nWordsDbg_ = 0, nUnknownDbg_ = 0, nFullDbg_ = 0;
+  uint16_t maxLevelDbg_ = 0;
+  uint8_t  lastUnknownTag_ = 0;
 
   // Windowing state: kRowPeriodMs windows off a monotonic accel counter.
   uint32_t sessionStartMs_ = 0;

@@ -161,7 +161,9 @@ void Message_Parser::print_temperature_reading(const temperature_Reading & r)
 
 void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r, float rssi)
 {
-    const float max_value = (float)r.max_value / scale_factor;
+    // wave_psd_scale, not scale_factor: the PSD peak is orders of magnitude smaller
+    // than the wave parameters above and needs the finer scale - see readings.h.
+    const float max_value = (float)r.max_value / wave_psd_scale;
 
     sd_writer.debugSerialPrint("  wave result #");
     sd_writer.debugSerialPrintln((float)r.reading_ID, 0);
@@ -175,8 +177,8 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
     sd_writer.debugSerialPrint((float)r.Tz / scale_factor, 3);
     sd_writer.debugSerialPrintln(" s");
     sd_writer.debugSerialPrint("    max_value ");
-    sd_writer.debugSerialPrint(max_value, 6);
-    sd_writer.debugSerialPrint(" m^2/Hz   span ");
+    sd_writer.debugSerialPrint(max_value, 9);
+    sd_writer.debugSerialPrint(" (m/s^2)^2/Hz   span ");
     sd_writer.debugSerialPrint((float)(r.timestamp_end - r.timestamp_start), 0);
     sd_writer.debugSerialPrint(" s   RSSI ");
     sd_writer.debugSerialPrint(rssi, 1);
@@ -192,6 +194,9 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
     /*
       Wire format is a uint16 per bin normalised to the peak; absolute PSD is
       value/65535 * max_value. Both columns are printed so the raw payload can be checked
+
+      The bins are the vertical ACCELERATION PSD, (m/s^2)^2/Hz - untapered, and not
+      divided by omega^4. Elevation is S_acc / (2*pi*f)^4 from here.
     */
     const float f_min = (float)r.spec_f_min / wave_freq_scale;
     const float f_max = (float)r.spec_f_max / wave_freq_scale;
@@ -205,7 +210,7 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
     sd_writer.debugSerialPrint(f_max, 4);
     sd_writer.debugSerialPrint(" Hz, df ");
     sd_writer.debugSerialPrint(df, 6);
-    sd_writer.debugSerialPrintln(" Hz (f_hz raw psd_eta):");
+    sd_writer.debugSerialPrintln(" Hz (f_hz raw psd_acc):");
 
     // Printing the spectrum.
     // Notice that spectrum frequencies are bin centres, not edges, 
@@ -216,7 +221,7 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
       sd_writer.debugSerialPrint(" ");
       sd_writer.debugSerialPrint((float)r.wave_spectrum[i], 0);
       sd_writer.debugSerialPrint(" ");
-      sd_writer.debugSerialPrintln(r.wave_spectrum[i] / 65535.0f * max_value, 6);
+      sd_writer.debugSerialPrintln(r.wave_spectrum[i] / 65535.0f * max_value, 9);
     }
 }
 

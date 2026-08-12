@@ -181,39 +181,49 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
   if (params.m0 > 0 && params.m2 > 0) params.tz = sqrtf((float)(params.m0 / params.m2));
   if (params.m2 > 0 && params.m4 > 0) params.tc = sqrtf((float)(params.m2 / params.m4));
   if (peakF > 0) params.tp = 1.0f / peakF;   // peak period from the spectral peak
-  params.maxValue = peakEta;
 
-  // Quantise the transmitted spectrum: elevation PSD over bins welch_bin_min..max,
-  // normalised to the peak (shape) so it fits uint16; the absolute peak rides in
-  // params.maxValue.
+  /*
+    The spectrum sent on wire is acceleration with no
+    no taper. 
+  */
+
+  // Normalisation peak: the largest unaveraged acceleration PSD bin inside the
+  // transmitted range, not across the whole analysed band. 
+  float peakAcc = 0.0f;
+  for (size_t k = welch_bin_min == 0 ? 1 : welch_bin_min; k < welch_bin_max; k++) {
+    const float p = psdAcc_[k] * invSeg;
+    if (p > peakAcc) peakAcc = p;
+  }
+  params.maxValue = peakAcc;
+
+  // Quantise: acceleration PSD over bins welch_bin_min..max, normalised to peakAcc
+  // (shape) so it fits uint16; the absolute peak rides in params.maxValue.
   //
   // Each wire bin is the BAND AVERAGE of kSpecBinGroup consecutive PSD bins, not a
   // 1:1 copy - that is what lets kSpecNBins span the whole wave band without the
   // payload growing to match (see wave_config.h). Averaging keeps the integral:
   // sum_j Shat_j * (G*df) == sum_k S_k * df. Normalising against the UNAVERAGED
-  // peakEta is deliberate and keeps the absolute scale reconstructible on the far
+  // peakAcc is deliberate and keeps the absolute scale reconstructible on the far
   // side as value/65535 * maxValue; the cost is that no wire bin quite reaches
   // 65535, since averaging the peak bin with its neighbour lowers it.
   // kSpecNBins, not welch_bins: the array is sized to the wire-format capacity, but
   // only the first kSpecNBins entries are filled and sent. The rest stay at the zero
   // set above, so a stale tail cannot leak out if the count ever grows again.
-  if (peakEta > 0.0f) {
+  if (peakAcc > 0.0f) {
     for (size_t j = 0; j < kSpecNBins; j++) {
       float acc = 0.0f;
       for (size_t g = 0; g < kSpecBinGroup; g++) {
         const int k = (int)welch_bin_min + (int)(j * kSpecBinGroup + g);
-        // k == 0 is DC: f = 0 makes omega^4 zero and the elevation PSD undefined.
-        // The moment loop above sidesteps it by starting at k = 1; this loop has to
-        // do the same now that welch_bin_min reaches down to 0. The bin is zero by
-        // construction anyway - lowFreqTaper kills everything below kTaperF1.
+        // k == 0 is DC. The segment mean is removed before the FFT, so that bin holds
+        // no wave information - only whatever offset survived detrending, which must
+        // not be allowed to sit in the spectrum or (via peakAcc) set its scale. Any
+        // kPsdMinFreq above zero already puts welch_bin_min past it; this stays as the
+        // guard for a build that sets kPsdMinFreq to 0 and asks for the whole band.
         if (k == 0) continue;
-        const float f = k * df;
-        const float taper = lowFreqTaper(f);
-        const float w = 2.0f * (float)M_PI * f;
-        const float psdEta = (psdAcc_[k] * invSeg) / (w * w * w * w) * (taper * taper);
-        if (psdEta > 0.0f) acc += psdEta;
+        const float psd = psdAcc_[k] * invSeg;
+        if (psd > 0.0f) acc += psd;
       }
-      float norm = (acc / (float)kSpecBinGroup) / peakEta;
+      float norm = (acc / (float)kSpecBinGroup) / peakAcc;
       if (norm > 1.0f) norm = 1.0f;
       spectrumOut[j] = (uint16_t)lroundf(norm * 65535.0f);
     }

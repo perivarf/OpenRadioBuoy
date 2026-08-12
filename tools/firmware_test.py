@@ -72,32 +72,38 @@ WAVE_FMAX      = 1.0            # kWaveFMax
 TAPER_F1       = 0.03           # kTaperF1
 TAPER_F2       = 0.05           # kTaperF2
 WARMUP_MS      = 30000          # wave_measurement_filter_warm_up
-PSD_MAX_FREQ   = 1.0            # kPsdMaxFreq - eneste knapp; resten utledes
-WELCH_BINS     = 51             # welch_bins (common_config.h) - wire-format KAPASITET
-SPEC_BIN_MIN   = 0              # welch_bin_min
-# kSpecBinGroup / kSpecNBins / welch_bin_max / kSpecBandMaxHz er UTLEDEDE i firmware og
-# skal aldri stå som literaler her. resolve_spec_bins() nedenfor leser dem fra opptakets
-# cfg.csv når de finnes, og faller tilbake på å speile utledningen når de ikke gjør det.
+PSD_MIN_FREQ   = 0.03           # kPsdMinFreq - nedre båndkant; resten utledes
+PSD_MAX_FREQ   = 1.0            # kPsdMaxFreq - øvre båndkant; resten utledes
+WELCH_BINS     = 102            # welch_bins (common_config.h) - wire-format KAPASITET
+# welch_bin_min / kSpecBinGroup / kSpecNBins / welch_bin_max / kSpecBandMaxHz er UTLEDEDE
+# i firmware og skal aldri stå som literaler her. resolve_spec_bins() nedenfor leser dem
+# fra opptakets cfg.csv når de finnes, og faller tilbake på å speile utledningen ellers.
+SPEC_BIN_MIN   = None           # welch_bin_min (inklusiv)
 SPEC_BIN_GROUP = None           # kSpecBinGroup
 SPEC_N_BINS    = None           # kSpecNBins - faktisk antall sendte bins, <= WELCH_BINS
 SPEC_BIN_MAX   = None           # welch_bin_max (eksklusiv)
+SPEC_BAND_MIN  = None           # kSpecBandMinHz - nedre KANT, ikke bin-senter
 SPEC_BAND_MAX  = None           # kSpecBandMaxHz
 
 
 def derive_spec_bins(seglen):
-    """Speil utledningen i wave_config.h: (group, nbins, bin_max, band_max).
+    """Speil utledningen i wave_config.h: (bin_min, group, nbins, bin_max, band_max).
 
     Speiler utledningen, ikke resultatet. WELCH_BINS er wire-formatets KAPASITET, ikke
     antallet som må sendes - num_bins ligger i meldinga og spekteret er siste felt, så
-    færre bins gir bare en kortere melding. Derfor: minste gruppe som presser
-    PSD_MAX_FREQ inn i kapasiteten, og deretter så mange hele grupper som får plass
-    UNDER PSD_MAX_FREQ (gulv, aldri over). Int-trunkeringen matcher (size_t)-casten."""
+    færre bins gir bare en kortere melding. Derfor: nedre kant rundet OPP til hel bin
+    (ingen sendt bin stikker under PSD_MIN_FREQ), så minste gruppe som presser resten av
+    båndet inn i kapasiteten, og deretter så mange hele grupper som får plass UNDER
+    PSD_MAX_FREQ (gulv, aldri over). Int-trunkeringen matcher (size_t)-casten."""
     df = VACC_FS_HZ / seglen                                  # kPsdDfHz
     psd_max_bin = int(PSD_MAX_FREQ / df)                      # kPsdMaxBin
-    group   = max(1, -(-(psd_max_bin - SPEC_BIN_MIN) // WELCH_BINS))
-    nbins   = (psd_max_bin - SPEC_BIN_MIN) // group
-    bin_max = SPEC_BIN_MIN + nbins * group
-    return group, nbins, bin_max, bin_max * df
+    bin_min = int(PSD_MIN_FREQ / df)                          # kPsdMinBin, avrundet opp
+    if bin_min * df < PSD_MIN_FREQ:
+        bin_min += 1
+    group   = max(1, -(-(psd_max_bin - bin_min) // WELCH_BINS))
+    nbins   = (psd_max_bin - bin_min) // group
+    bin_max = bin_min + nbins * group
+    return bin_min, group, nbins, bin_max, bin_max * df
 
 
 def resolve_spec_bins(cfg, seglen, quiet=False):
@@ -108,23 +114,30 @@ def resolve_spec_bins(cfg, seglen, quiet=False):
     sted som ikke vet hvilken welch_bins den builden hadde). Utledningen er fallback for
     gamle opptak uten nøklene, og samtidig kontrollen som sier fra naar firmware har
     flyttet seg siden opptaket."""
-    global SPEC_BIN_GROUP, SPEC_N_BINS, SPEC_BIN_MAX, SPEC_BAND_MAX
+    global SPEC_BIN_MIN, SPEC_BIN_GROUP, SPEC_N_BINS, SPEC_BIN_MAX
+    global SPEC_BAND_MIN, SPEC_BAND_MAX
     mine = derive_spec_bins(seglen)
     if "spec_bin_group" in cfg and "welch_bin_max" in cfg:
         group   = int(float(cfg["spec_bin_group"]))
         bin_max = int(float(cfg["welch_bin_max"]))
+        # welch_bin_min har vært logget hele veien, men var 0 fram til den nedre
+        # båndkanten kom - default 0 er derfor riktig for et opptak uten nøkkelen.
+        bin_min = int(float(cfg.get("welch_bin_min", 0)))
         # spec_n_bins kom sammen med det variable antallet; før det var welch_bin_max
         # alltid nøyaktig welch_bins grupper, så antallet kan utledes for gamle opptak.
         nbins   = int(float(cfg["spec_n_bins"])) if "spec_n_bins" in cfg \
-                  else (bin_max - SPEC_BIN_MIN) // group
-        SPEC_BIN_GROUP, SPEC_N_BINS, SPEC_BIN_MAX = group, nbins, bin_max
+                  else (bin_max - bin_min) // group
+        SPEC_BIN_MIN, SPEC_BIN_GROUP, SPEC_N_BINS, SPEC_BIN_MAX = bin_min, group, nbins, bin_max
+        SPEC_BAND_MIN = bin_min * (VACC_FS_HZ / seglen)
         SPEC_BAND_MAX = bin_max * (VACC_FS_HZ / seglen)
-        if not quiet and (group, nbins, bin_max) != mine[:3]:
-            print(f"    [!] spec-bins: device group {group}/{nbins} bins/bin_max {bin_max}, "
-                  f"dagens PSD_MAX_FREQ={PSD_MAX_FREQ} gir {mine[0]}/{mine[1]}/{mine[2]} - "
+        if not quiet and (bin_min, group, nbins, bin_max) != mine[:4]:
+            print(f"    [!] spec-bins: device bin_min {bin_min}/group {group}/{nbins} bins/"
+                  f"bin_max {bin_max}, dagens PSD_MIN_FREQ={PSD_MIN_FREQ} "
+                  f"PSD_MAX_FREQ={PSD_MAX_FREQ} gir {mine[0]}/{mine[1]}/{mine[2]}/{mine[3]} - "
                   f"bruker device sine, det er dem spekteret ble laget med")
     else:
-        SPEC_BIN_GROUP, SPEC_N_BINS, SPEC_BIN_MAX, SPEC_BAND_MAX = mine
+        SPEC_BIN_MIN, SPEC_BIN_GROUP, SPEC_N_BINS, SPEC_BIN_MAX, SPEC_BAND_MAX = mine
+        SPEC_BAND_MIN = SPEC_BIN_MIN * (VACC_FS_HZ / seglen)
 
 
 def low_freq_taper(f):
@@ -178,7 +191,11 @@ def fir_stage(x, fs_in, fs_out, ntap):
 
 def wave_params(psd, fs, seglen):
     """Momenter og bølgeparametre, linje for linje som finalize() i
-    wave_analysis.cpp: start på k=1, stopp over kWaveFMax, hopp over taper<=0."""
+    wave_analysis.cpp: start på k=1, stopp over kWaveFMax, hopp over taper<=0.
+
+    max_value er IKKE elevasjonstoppen: det er toppen i akselerasjons-PSD-en over de
+    sendte binsene, altså skalaen wire-spekteret normaliseres mot. Elevasjonstoppen
+    ligger igjen som peak_eta, siden det er den som gir Tp."""
     df = fs / seglen
     m0 = m2 = m4 = 0.0
     peak_eta = 0.0
@@ -199,29 +216,40 @@ def wave_params(psd, fs, seglen):
         m4 += psd_eta * f ** 4 * df
         if psd_eta > peak_eta:
             peak_eta, peak_f = psd_eta, f
+
+    # Normaliseringstoppen: største UMIDLEDE akselerasjonsbin innenfor det sendte
+    # båndet, ikke over hele analysebåndet. Toppen må ligge blant binsene som faktisk
+    # sendes, ellers skaleres hele wire-spekteret ned av noe mottakeren ikke ser.
+    peak_acc = 0.0
+    for k in range(max(SPEC_BIN_MIN, 1), SPEC_BIN_MAX):
+        if psd[k] > peak_acc:
+            peak_acc = float(psd[k])
+
     return {
         "Hs": 4.0 * math.sqrt(m0) if m0 > 0 else -1.0,
         "Tz": math.sqrt(m0 / m2) if m0 > 0 and m2 > 0 else -1.0,
         "Tc": math.sqrt(m2 / m4) if m2 > 0 and m4 > 0 else -1.0,
         "Tp": 1.0 / peak_f if peak_f > 0 else -1.0,
-        "max_value": peak_eta, "m0": m0, "m2": m2, "m4": m4, "eta": eta,
+        "max_value": peak_acc, "peak_eta": peak_eta,
+        "m0": m0, "m2": m2, "m4": m4, "eta": eta,
     }
 
 
-def spectrum_slice(eta, peak_eta, fs, seglen):
-    """Det sendte spekteret: båndmidler SPEC_BIN_GROUP PSD-bins per wire-bin og
-    normaliser mot den UMIDLEDE toppen, som finalize() gjør."""
+def spectrum_slice(psd, peak_acc, fs, seglen):
+    """Det sendte spekteret: AKSELERASJONS-PSD-en (ingen omega^4, ingen taper),
+    båndmidlet SPEC_BIN_GROUP PSD-bins per wire-bin og normalisert mot den UMIDLEDE
+    toppen, som finalize() gjør."""
     out = np.zeros(SPEC_N_BINS)
-    if peak_eta <= 0:
+    if peak_acc <= 0:
         return out
     for j in range(SPEC_N_BINS):
         acc = 0.0
         for g in range(SPEC_BIN_GROUP):
             k = SPEC_BIN_MIN + j * SPEC_BIN_GROUP + g
             if k == 0:
-                continue                       # DC: omega^4 = 0
-            acc += max(eta[k], 0.0)
-        out[j] = min((acc / SPEC_BIN_GROUP) / peak_eta, 1.0)
+                continue                       # DC: middelet er trukket fra, bærer ingenting
+            acc += max(float(psd[k]), 0.0)
+        out[j] = min((acc / SPEC_BIN_GROUP) / peak_acc, 1.0)
     return out
 
 
@@ -288,10 +316,11 @@ def apply_device_cfg(cfg):
     Uten dette sammenlignes eplene i denne fila (dagens firmware) med device sine
     pærer (den builden opptaket ble gjort med). De gamle Skjaerhalden-opptakene
     kjørte wave_fmax 0,5 Hz; å holde dagens 1,0 Hz mot deres Hs sier ingenting."""
-    global WAVE_FMAX, TAPER_F1, TAPER_F2, SEGLEN, PSD_MAX_FREQ
+    global WAVE_FMAX, TAPER_F1, TAPER_F2, SEGLEN, PSD_MIN_FREQ, PSD_MAX_FREQ
     got = {}
     for key, name in (("wave_fmax_hz", "WAVE_FMAX"), ("taper_f1_hz", "TAPER_F1"),
-                      ("taper_f2_hz", "TAPER_F2"), ("psd_max_freq_hz", "PSD_MAX_FREQ")):
+                      ("taper_f2_hz", "TAPER_F2"), ("psd_min_freq_hz", "PSD_MIN_FREQ"),
+                      ("psd_max_freq_hz", "PSD_MAX_FREQ")):
         if key in cfg:
             globals()[name] = float(cfg[key])
             got[key] = cfg[key]
@@ -299,7 +328,7 @@ def apply_device_cfg(cfg):
         SEGLEN = int(float(cfg["welch_seglen"]))
         got["welch_seglen"] = cfg["welch_seglen"]
     # SPEC_BIN_* trengs ikke her: resolve_spec_bins() leser dem fra cfg.csv uansett,
-    # ikke bare under --match-device. PSD_MAX_FREQ over betyr bare noe for fallbacken.
+    # ikke bare under --match-device. PSD_MIN/MAX_FREQ over betyr bare noe for fallbacken.
     return got
 
 
@@ -379,7 +408,7 @@ def run(directory, method, rates, seglen, ntap, match_device=False,
         sys.exit(f"for kort serie: {len(analysed)} samples < seglen {seglen}")
 
     p = wave_params(psd, fs, seglen)
-    spec = spectrum_slice(p["eta"], p["max_value"], fs, seglen)
+    spec = spectrum_slice(psd, p["max_value"], fs, seglen)
 
     if quiet:
         return p
@@ -412,7 +441,8 @@ def run(directory, method, rates, seglen, ntap, match_device=False,
     print(f"    Tc       = {p['Tc']:8.2f} s")
     print(f"    Tp       = {p['Tp']:8.2f} s")
     print(f"    m0/m2/m4 = {p['m0']:.6e} / {p['m2']:.6e} / {p['m4']:.6e}")
-    print(f"    maxValue = {p['max_value']:.6e}")
+    print(f"    maxValue = {p['max_value']:.6e}  (topp psd_acc i sendt bånd, (m/s^2)^2/Hz)")
+    print(f"    peak_eta = {p['peak_eta']:.6e}  (topp psd_eta, gir Tp)")
 
     # --- device sin egen ana.csv, hvis den finnes ---
     ana = pp.read_kv(os.path.join(directory, f"{stamp}_ana.csv"))
@@ -436,7 +466,7 @@ def run(directory, method, rates, seglen, ntap, match_device=False,
             print(f"    {key:<3} device {dev:8.3f}   her {mine:8.3f}   avvik {d:+7.2f} %")
 
     print(f"\n  sendt spektrum: {len(spec)} bins a {SPEC_BIN_GROUP*df:.6f} Hz, "
-          f"{SPEC_BIN_MIN*df:.4f}-{SPEC_BAND_MAX:.4f} Hz, topp i bin {int(np.argmax(spec))}")
+          f"{SPEC_BAND_MIN:.4f}-{SPEC_BAND_MAX:.4f} Hz, topp i bin {int(np.argmax(spec))}")
     return p
 
 
