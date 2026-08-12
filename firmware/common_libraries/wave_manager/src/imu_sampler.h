@@ -112,7 +112,9 @@ class ImuSampler {
   bool checkImu(Print &dbg);
 
   // Drain all pending FIFO words once (call repeatedly during a capture).
-  void update(Print &dbg);
+  // captureLeftMs is passed straight to the debug line - the sampler does not time
+  // the capture, it only reports what the caller already knows.
+  void update(Print &dbg, uint32_t captureLeftMs);
 
   // Reset windowing for a new capture. captureStartMs is the capture t=0.
   void resetWindowing(uint32_t captureStartMs);
@@ -212,8 +214,9 @@ class ImuSampler {
   void latchRowValues();
 
   // Print the effective accel/gyro rate + mean magnitudes at most every
-  // imu_debug_print_period ms (the ex-reportOncePerSecond, now interval-driven).
-  void debugPrintStatus(Print &dbg);
+  // imu_debug_print_period ms (the ex-reportOncePerSecond, now interval-driven),
+  // led by how much of the capture is left.
+  void debugPrintStatus(Print &dbg, uint32_t captureLeftMs);
 
   // Raw log helpers. rawAppend flushes whenever the block is full, so a record may
   // straddle a block boundary - the file is a byte stream, not an array of blocks.
@@ -237,22 +240,15 @@ class ImuSampler {
   uint32_t nOverflowTotal_ = 0;
   uint32_t nFirLateEval_ = 0;
 
-  // Debug-rate counters (accumulated per print interval, then reset). The magnitude
-  // sums are kept SQUARED and rooted once per print: a sqrt per sample was ~1920
-  // double sqrt/s on a soft-float core, spent entirely on a debug line.
+  // Debug counters (accumulated per print interval, then reset). Only what bears on
+  // LOST SAMPLES is kept - see debugPrintStatus for why the margin counters (peak
+  // DIFF_FIFO, FIFO_FULL_IA) and the |a|/|g| sums went away.
+  //   nAccDbg_/nGyrDbg_  samples decoded -> the rate, which is below kImuOdrHz
+  //                      exactly when something went missing
+  //   nUnknownDbg_       words popped but decoded by no branch (datasheet table 210)
   uint32_t dbgLastPrint_ = 0;
   uint32_t nAccDbg_ = 0, nGyrDbg_ = 0;
-  double   sumAccMag2_ = 0.0, sumGyrMag2_ = 0.0;
-
-  // Debugging counters for FIFO drain
-  //   nWordsDbg_    every word popped -> the true drained word rate, tag-independent
-  //   nUnknownDbg_  words popped but decoded by no branch (datasheet table 210)
-  //   maxLevelDbg_  peak DIFF_FIFO -> near 512 means the drain is losing the race,
-  //                 near the watermark means the words never reached the FIFO
-  //   nFullDbg_     drains that found FIFO_FULL_IA, the brim warning that precedes
-  //                 an actual overrun by one ODR
-  uint32_t nWordsDbg_ = 0, nUnknownDbg_ = 0, nFullDbg_ = 0;
-  uint16_t maxLevelDbg_ = 0;
+  uint32_t nUnknownDbg_ = 0;
   uint8_t  lastUnknownTag_ = 0;
 
   // Windowing state: kRowPeriodMs windows off a monotonic accel counter.

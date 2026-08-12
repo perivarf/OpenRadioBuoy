@@ -16,9 +16,14 @@
 // Only ONE orientation method is computed per capture. The selection itself
 // imu.csv can be logged raw so that post-evaluation is posstible
 
-// Per-capture SD logging: one directory created as "<stamp>_tmp" and renamed to
-// "<stamp>" on a clean stop, so an interrupted capture is easy to spot. Six files
+// Per-capture SD logging: one directory "<stamp>", never renamed. Up to six files
 // inside, all prefixed "<stamp>_": imu, gps, ses, cfg, spec, ana.
+//
+// An interrupted capture is told apart by what is MISSING, not by the folder name:
+// spec/ana are written by processReading and ses.csv gets its summary block there,
+// so a folder without ana.csv - or a ses.csv with no stop_utc_epoch - never reached
+// the end. That fact is a plain consequence of the write order and needs no separate
+// marker to be kept in sync with it.
 
 static constexpr bool     wave_log_csv                    {true};
 static constexpr uint16_t wave_csv_sync_rows              {1024}; // File.sync() cadence
@@ -235,9 +240,11 @@ static_assert(1000 % kRowOdrHz == 0,
               "kRowOdrHz must divide 1000 - the row grid is kept in whole ms");
 
 // IMU debug: how often update() prints the effective accel/gyro sample rate + mean
-// magnitudes (ms) to the serial monitor. Only emitted when debug_serial is set. 
+// magnitudes (ms) to the serial monitor. Only emitted when debug_serial is set.
 // 0 disables the printout.
-static constexpr uint32_t imu_debug_print_period = {10*s_2_ms};  // 10 s
+// The line also carries the time left of the capture, so one interval governs both
+// "is the drain healthy" and "is this thing still counting down".
+static constexpr uint32_t imu_debug_print_period = {20*s_2_ms};  // 20 s
 
 // Raw IMU log: the 6-byte payload of every FIFO word verbatim, where imu.csv is the
 // FIR-decimated record. Not decoded on the way out - the sensitivities are in the

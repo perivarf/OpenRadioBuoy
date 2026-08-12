@@ -207,9 +207,7 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   fir_.reset();
   dbgLastPrint_ = captureStartMs;
   nAccDbg_ = nGyrDbg_ = 0;
-  sumAccMag2_ = sumGyrMag2_ = 0.0;
-  nWordsDbg_ = nUnknownDbg_ = nFullDbg_ = 0;
-  maxLevelDbg_ = 0;
+  nUnknownDbg_ = 0;
   lastUnknownTag_ = 0;
 }
 
@@ -415,7 +413,7 @@ void ImuSampler::closeWindow() {
 // drives windowing, the AHRS, and all ten decimation filters, so every delay line
 // advances exactly once per accel sample and they can never drift apart. Gyro and
 // SFLP words only latch their latest value for the accel branch to pair with.
-void ImuSampler::update(Print &dbg) {
+void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // INT1 gate, with a deadline. The interrupt is a hint about WHEN to drain, never
   // the authority on WHETHER to: a single lost edge would otherwise stop the capture
   // permanently, which is exactly what was measured on 2026-08-04 (0 Hz, forever, no
@@ -423,7 +421,7 @@ void ImuSampler::update(Print &dbg) {
   // register reads if there was genuinely nothing there.
   if (kImuUseInt1 && !fifoFlag_ && (millis() - lastDrainMs_) < kFifoPollFallbackMs) {
     // Still print, so a stalled interrupt shows up as frozen counters, not silence.
-    debugPrintStatus(dbg);
+    debugPrintStatus(dbg, captureLeftMs);
     return;
   }
   fifoFlag_ = false;
@@ -447,10 +445,6 @@ void ImuSampler::update(Print &dbg) {
     nOverflowTotal_++;
     winFifoOvf_ = true; // flag the window that was open when it happened (fifo_ovf in imu.csv)
   }
-  if (st.full) nFullDbg_++;
-
-  // Peak level over the debug interval
-  if (nSamples > maxLevelDbg_) maxLevelDbg_ = nSamples;
 
   // Sync record first, so the words that follow it are the ones it describes.
   rawEmitSync(nSamples, lost ? kRawFlagFifoOvf : 0);
@@ -458,18 +452,13 @@ void ImuSampler::update(Print &dbg) {
   for (uint16_t i = 0; i < nSamples; i++) {
     uint8_t payload[6];
     const uint8_t tag = readFifoWord(payload);   // tag + data, one transfer
-    nWordsDbg_++;   // every word popped, whatever it turns out to be
     // EVERY word, including tags this code does not decode: the raw log is a record
     // of what the sensor produced, not of what the wave chain happens to consume.
     rawEmitWord(tag, payload);
     if (tag == 2) {  // accel (mg)
       float a[3];
       payloadToAxes(payload, kAccSensMgPerLsb, a);
-      // Squared magnitude only; the sqrt is taken once per debug print. Rooting per
-      // sample cost ~960 double sqrt/s here and as many again in the gyro branch,
-      // for a line of serial output.
-      sumAccMag2_ += (double)a[0] * a[0] + (double)a[1] * a[1] + (double)a[2] * a[2];
-      nAccDbg_++;
+      nAccDbg_++;   // counted, not summed: the RATE is the loss signal, |a| was not
       // Windowing: samples arrive in FIFO bursts but represent evenly spaced points
       // in time. A running, monotonic clock (sampleTms_ += samplePeriodMs_) gives a
       // steady kRowPeriodMs binning; samplePeriodMs_ self-calibrates below so the axis
@@ -575,7 +564,6 @@ void ImuSampler::update(Print &dbg) {
     } else if (tag == 1) {  // gyro (mdps)
       float g[3];
       payloadToAxes(payload, kGyrSensMdpsPerLsb, g);
-      sumGyrMag2_ += (double)g[0] * g[0] + (double)g[1] * g[1] + (double)g[2] * g[2];
       nGyrDbg_++;
       latestGx_ = g[0]; latestGy_ = g[1]; latestGz_ = g[2];
     } else if (tag == kSflpRotationTag) {  // quaternion [x,y,z,w]
@@ -621,14 +609,29 @@ void ImuSampler::update(Print &dbg) {
     samplePeriodMs_ = (double)(millis() - sessionStartMs_) / (double)accelIdx_;
   }
 
-  debugPrintStatus(dbg);
+  debugPrintStatus(dbg, captureLeftMs);
 }
 
 // Print the effective accel/gyro sample rate + mean magnitudes, at most every
 // imu_debug_print_period ms. Generalises ORB_test's reportOncePerSecond to any
-// interval (rate = count / elapsed, not assuming a 1 s window). Also surfaces any
-// FIFO overflow since the last print (draining too slowly).
-void ImuSampler::debugPrintStatus(Print &dbg) {
+// interval (rate = count / elapsed, not assuming a 1 s window).
+//
+// Restricted to LOST SAMPLES, plus the countdown that says the capture is still
+// running. Everything that only described the MARGIN is gone: peak DIFF_FIFO and
+// FIFO_FULL_IA both report how close the drain came to the brim, and FULL asserts
+// one ODR BEFORE anything is overwritten, so neither ever meant a sample was lost.
+// |a| and |g| were sensor sanity, not loss, and cost a multiply-accumulate per
+// sample in the drain to produce.
+//
+// What is left answers "did we lose anything" three ways:
+//   accHz/gyrHz  the OUTCOME - below kImuOdrHz means samples went missing, whatever
+//                the cause, including causes no counter here anticipates
+//   unk          words popped that no branch decoded: lost, and a sign the byte
+//                stream has desynchronised rather than merely fallen behind
+//   overrun      OVR/OVR_LATCHED - the sensor overwrote words never read. The same
+//                event sets fifo_ovf in imu.csv and kRawFlagFifoOvf in raw.bin, so
+//                this line is the live view of a fact the capture also records.
+void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs) {
   if (!debug_serial || imu_debug_print_period == 0) return;
   uint32_t now = millis();
   if (now - dbgLastPrint_ < imu_debug_print_period) return;
@@ -636,34 +639,22 @@ void ImuSampler::debugPrintStatus(Print &dbg) {
   double elapsedS = (now - dbgLastPrint_) / 1000.0;
   double accHz = elapsedS > 0 ? nAccDbg_ / elapsedS : 0.0;
   double gyrHz = elapsedS > 0 ? nGyrDbg_ / elapsedS : 0.0;
-  // RMS, not the mean of the magnitudes - the per-sample sqrt is what was removed.
-  // For a near-constant |a| (which is the case here: ~1 g) the two agree closely,
-  // and the number is only ever read as a sanity check.
-  double avgAcc = nAccDbg_ ? sqrt(sumAccMag2_ / nAccDbg_) : 0.0;
-  double avgGyr = nGyrDbg_ ? sqrt(sumGyrMag2_ / nGyrDbg_) : 0.0;
 
-  dbg.print("[IMU] Accel: "); dbg.print(accHz, 0);
-  dbg.print(" Hz, |a| = ");   dbg.print(avgAcc, 1);
-  dbg.print(" mg  |  Gyro: "); dbg.print(gyrHz, 0);
-  dbg.print(" Hz, |g| = ");   dbg.print(avgGyr, 1);
-  dbg.print(" mdps");
-  dbg.print("  |  words/s "); dbg.print(elapsedS > 0 ? nWordsDbg_ / elapsedS : 0.0, 0);
-  dbg.print(", peak ");       dbg.print(maxLevelDbg_);
-  dbg.print("/512");
+  dbg.print("[IMU] ");              dbg.print(captureLeftMs / 1000UL);
+  dbg.print(" s left  |  Accel: "); dbg.print(accHz, 0);
+  dbg.print(" Hz, Gyro: ");         dbg.print(gyrHz, 0);
+  dbg.print(" Hz (ODR ");           dbg.print(kImuOdrHz);
+  dbg.print(")");
   if (nUnknownDbg_ > 0) {
-    dbg.print(", unk "); dbg.print(nUnknownDbg_);
+    dbg.print("  [WARN] unk "); dbg.print(nUnknownDbg_);
     dbg.print(" (tag 0x"); dbg.print(lastUnknownTag_, HEX); dbg.print(")");
   }
-  if (nFullDbg_ > 0) { dbg.print(", full x"); dbg.print(nFullDbg_); }
   if (nOverflow_ > 0) {
     dbg.print("  [WARN] FIFO overrun x"); dbg.print(nOverflow_);
     nOverflow_ = 0;
   }
   dbg.println();
-  nWordsDbg_ = nUnknownDbg_ = nFullDbg_ = 0;
-  maxLevelDbg_ = 0;
-
+  nUnknownDbg_ = 0;
   nAccDbg_ = nGyrDbg_ = 0;
-  sumAccMag2_ = sumGyrMag2_ = 0.0;
   dbgLastPrint_ = now;
 }

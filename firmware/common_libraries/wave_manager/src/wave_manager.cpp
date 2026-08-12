@@ -110,6 +110,7 @@ WaveManager::FixE7 WaveManager::currentFixE7(void) const {
     p.lat = gps_manager.lastFix().lat_e7;
     p.lng = gps_manager.lastFix().lng_e7;
   }
+  IWatchdog.reload();
   return p;
 }
 
@@ -207,6 +208,7 @@ uint8_t WaveManager::takeReading(void) {
     if (debug_serial) {
       Serial.println("WaveManager: capture skipped - wave_measurement_require_gps");
     }
+
     return 2;
   }
 
@@ -215,14 +217,15 @@ uint8_t WaveManager::takeReading(void) {
   gpsRowsWritten_ = 0;
   captureStart_ = now();
   captureStartPos_ = currentFixE7();
+  IWatchdog.reload();
 
   analyzer_.begin();
 
   // Open the session directory (imu/gps/ses/cfg) BEFORE starting the FIFO stream: the
   // mkdir + opening 4 files + writing headers/anchor/config + syncs take tens of ms of SD
   // activity, and if the FIFO were already streaming it would overflow before the
-  // first drain. csvActive_ spans take+process: spec/ana are added and the folder
-  // renamed (_tmp -> final) in processReading -> stopSession.
+  // first drain. csvActive_ spans take+process: spec/ana are added and the session
+  // file closed in processReading -> stopSession.
   csvActive_ = false;
   imuCsvActive_ = false;   // startSession sets it; a failed open must not leave it set
   if (wave_log_csv && sd_writer.active) {
@@ -242,8 +245,12 @@ uint8_t WaveManager::takeReading(void) {
 
   uint32_t start = millis();
   while (millis() - start < wave_measurement_duration) {
-    imu_.update(Serial);            // drain the IMU FIFO (must stay tight)
-    serviceGps(millis() - start);   // non-blocking GPS poll -> one gps.csv row per fix
+    const uint32_t elapsed = millis() - start;
+    // The countdown rides along on the IMU report rather than printing on its own:
+    // the two answer one question together - whether the capture is still running,
+    // and whether the drain is keeping up while it does.
+    imu_.update(Serial, wave_measurement_duration - elapsed);  // drain the FIFO (stay tight)
+    serviceGps(elapsed);            // non-blocking GPS poll -> one gps.csv row per fix
     IWatchdog.reload();
     delay(2);  // let the FIFO refill; keeps the drain loop from spinning hot
   }
@@ -254,18 +261,28 @@ uint8_t WaveManager::takeReading(void) {
     // length. Without it every session folder would claim its full reservation and
     // the tail would read as garbage. Safe to call whether or not preAllocate
     // succeeded: with no reservation the position already is the end of the file.
-    if (imuCsvActive_) { imuFile_.truncate(); imuFile_.sync(); imuFile_.close(); }
-    gpsFile_.truncate();  gpsFile_.sync();  gpsFile_.close();
+    if (imuCsvActive_) { 
+      imuFile_.truncate();  IWatchdog.reload();
+      imuFile_.sync();      IWatchdog.reload();
+      imuFile_.close();     IWatchdog.reload();}
+    
+    gpsFile_.truncate();    IWatchdog.reload();
+    gpsFile_.sync();        IWatchdog.reload();
+    gpsFile_.close();       IWatchdog.reload();
+    
     // The raw log's partial block has to be pushed BEFORE truncate(), or the tail is
     // cut at the last full block and the final records are lost. Detaching the sink
     // first stops a late drain from appending past the truncation point.
     if (rawFile_) {
-      imu_.setRawSink(nullptr);
-      imu_.flushRaw();
-      rawFile_.truncate();  rawFile_.sync();  rawFile_.close();
+      imu_.setRawSink(nullptr); IWatchdog.reload();
+      imu_.flushRaw();          IWatchdog.reload();
+      rawFile_.truncate();      IWatchdog.reload();
+      rawFile_.sync();          IWatchdog.reload();
+      rawFile_.close();         IWatchdog.reload();
     }
-    // sessionFile_ stays open: summary + rename happen in processReading.
+    // sessionFile_ stays open: the summary is appended in processReading.
   }
+
   captureEnd_ = now();
   captureEndPos_ = currentFixE7();
   return 0;
@@ -273,7 +290,15 @@ uint8_t WaveManager::takeReading(void) {
 
 // -----------------------------------------------------------------------------
 // Session logging (ORB_test Logger style): one timestamped directory per capture,
-// created as "<stamp>_r<id>_tmp" and renamed to "<stamp>_r<id>" on a clean stop.
+// created under its final name "<stamp>" and left there.
+//
+// Whether a capture ran to completion is DERIVED, not marked: writeSessionSummary
+// and the spec/ana files are written by processReading, so a capture that died
+// mid-stream leaves a ses.csv holding nothing but the anchor keys, and no ana.csv
+// beside it. stop_utc_epoch in ses.csv is the discriminator - present means the
+// capture reached processReading, absent means it did not. Renaming the folder
+// added a second, redundant copy of that fact, and one that a reset could leave
+// disagreeing with the files inside it.
 // -----------------------------------------------------------------------------
 bool WaveManager::startSession(void) {
   SdFat &card = sd_writer.card();
@@ -284,8 +309,7 @@ bool WaveManager::startSession(void) {
           year(captureStart_), month(captureStart_), day(captureStart_),
           hour(captureStart_), minute(captureStart_), second(captureStart_));
   
-  snprintf(sessionDir_, sizeof(sessionDir_), "%s/%s_r%04u_tmp",
-           wave_log_dir, logStamp_, readingID_);
+  snprintf(sessionDir_, sizeof(sessionDir_), "%s/%s", wave_log_dir, logStamp_);
 
   // mkdir creates the missing "waves/" parent too.
   if (!card.exists(sessionDir_) && !card.mkdir(sessionDir_)) {
@@ -313,9 +337,18 @@ bool WaveManager::startSession(void) {
   // what keeps the FIFO alive. A failure is not fatal: the file simply falls back to
   // growing cluster by cluster, which is the behaviour this replaces, so the capture
   // still runs and only the overflow risk returns.
+  //
+  // Every reservation must cover the WHOLE capture. Outgrowing the extent mid-stream is
+  // not the graceful fallback a failed preAllocate is: the allocator then has to find
+  // free clusters past this file's neighbours - raw.bin's 15 MB extent sits right behind
+  // gps.csv - while the drain loop is blocked in the write, and a single call that takes
+  // longer than the watchdog kills the capture. That is what happened on 2026-08-12:
+  // gpsBytes assumed one fix per second, so the extent ran out ~7 min in and every other
+  // capture died there. serviceGps writes one row per FRESH fix, so the rate is the
+  // receiver's nav rate, not one per second.
   const uint32_t durationS = wave_measurement_duration / s_2_ms;
   const uint32_t imuBytes  = (uint32_t)kRowOdrHz * durationS * wave_imu_row_bytes_max;
-  const uint32_t gpsBytes  = durationS * wave_gps_row_bytes_max;  // <= 1 row per fix per second
+  const uint32_t gpsBytes  = durationS * GPS_nav_rate_hz * wave_gps_row_bytes_max;
   if (imuCsvActive_ && !imuFile_.preAllocate(imuBytes) && debug_serial) {
     Serial.print("WaveManager: imu preAllocate failed, "); Serial.print(imuBytes);
     Serial.println(" B - sd-card may be full or fragmented");
@@ -332,8 +365,14 @@ bool WaveManager::startSession(void) {
     snprintf(nm, sizeof(nm), "%s/%s_%s.bin", sessionDir_, logStamp_, WAVE_RAW_PREFIX);
     rawFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
     if (rawFile_) {
-      const uint32_t rawBytes = kRawHeaderBytes + durationS *
-                                (kFifoWordsPerSec * kRawWordBytes + 16u * kRawSyncBytes);
+      // +20 % on top of the nominal word rate. The nominal figure is what the FIFO
+      // batches in a second, and the measured captures land only 4 % under it - too
+      // little to absorb a run where the sync records come more often or the SFLP
+      // batching shifts. Running out mid-capture is not the graceful fallback a failed
+      // preAllocate is; see the gpsBytes comment above for what it costs.
+      const uint32_t rawNominal = kRawHeaderBytes + durationS *
+                                  (kFifoWordsPerSec * kRawWordBytes + 16u * kRawSyncBytes);
+      const uint32_t rawBytes = rawNominal + rawNominal / 5u;
       if (!rawFile_.preAllocate(rawBytes) && debug_serial) {
         Serial.print("WaveManager: raw preAllocate failed, "); Serial.print(rawBytes);
         Serial.println(" B");
@@ -530,22 +569,14 @@ void WaveManager::writeSessionSummary(bool ok, const WaveParams &params) {
   sessionFile_.sync();
 }
 
-// Close the session file and drop the "_tmp" suffix (rename to the final folder).
-// Only reached after a full capture completed, so a leftover "_tmp" directory
-// always marks an interrupted/crashed capture.
+// Close the session file. The folder already carries its final name, so there is
+// nothing to rename: what marks a capture as complete is the summary that
+// writeSessionSummary just put in ses.csv, on the card, inside the folder it
+// describes. A directory rename could not be made to agree with that under a reset
+// - it is a second write, of the same fact, that can land or not land on its own.
 void WaveManager::stopSession(void) {
   if (sessionFile_) { sessionFile_.sync(); sessionFile_.close(); }
   csvActive_ = false;
-  size_t n = strlen(sessionDir_);
-  if (n <= 4) return;  // no "_tmp" suffix to strip
-  char finalDir[40];
-  strncpy(finalDir, sessionDir_, n - 4);
-  finalDir[n - 4] = '\0';
-  SdFat &card = sd_writer.card();
-  if (card.exists(finalDir)) return;  // name clash (same-second capture): keep _tmp
-  if (!card.rename(sessionDir_, finalDir) && debug_serial) {
-    Serial.print("WaveManager: rename failed "); Serial.println(sessionDir_);
-  }
 }
 
 // GPS drift track: drive the non-blocking poll and append one gps.csv row per fresh
@@ -589,7 +620,8 @@ uint8_t WaveManager::processReading(void) {
   res.max_value = params.maxValue;
 
   // spec.csv + ana.csv into the same session directory as imu/gps/ses, then the
-  // session summary + folder rename. Only when startSession succeeded (csvActive_).
+  // session summary. Only when startSession succeeded (csvActive_). These files are
+  // what a reader checks to tell a finished capture from an interrupted one.
   if (csvActive_ && sd_writer.active) {
     char name[64];
     snprintf(name, sizeof(name), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_SPEC_PREFIX);
@@ -649,7 +681,7 @@ uint8_t WaveManager::processReading(void) {
       af.sync(); af.close();
     }
 
-    // Close out the session file (anchor + summary) and rename the folder.
+    // Close out the session file (anchor + summary).
     writeSessionSummary(ok, params);
     stopSession();
   }

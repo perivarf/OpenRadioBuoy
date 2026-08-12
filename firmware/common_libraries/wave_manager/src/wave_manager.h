@@ -109,8 +109,8 @@ class WaveManager {
   void writeRawHeader(void);        // kRawHeaderBytes: magic, rates, sensitivities
 
   // Session logging (ORB_test Logger style): one timestamped directory per capture.
-  bool startSession(void);          // build stamp, mkdir _tmp, open imu/gps/ses, headers
-  void stopSession(void);           // close ses, rename _tmp -> final (capture completed)
+  bool startSession(void);          // build stamp, mkdir, open imu/gps/ses, headers
+  void stopSession(void);           // close ses (the summary in it marks the capture done)
   void writeSessionAnchor(void);    // reading ID + start UTC (crash-safe, written up front)
   void writeSessionConfig(File &f); // cfg.csv: every constant the capture depends on
   void writeSessionSummary(bool ok, const WaveParams &params);  // stop UTC, duration, rows, params
@@ -121,8 +121,8 @@ class WaveManager {
   StreamAnalyzer analyzer_;
 
   // CSV logging state. imu.csv is streamed row-by-row via the row sink; gps/ses are
-  // held open across the session. sessionDir_ is the "<stamp>_r<id>_tmp" path so
-  // processReading can drop spec/ana into the same folder before the rename.
+  // held open across the session. sessionDir_ is the "<stamp>" path so
+  // processReading can drop spec/ana into the same folder.
   File     imuFile_;
   File     gpsFile_;
   File     sessionFile_;
@@ -131,7 +131,7 @@ class WaveManager {
   bool     imuCsvActive_ = false;  // imu.csv specifically - false in WaveLogMode::Raw
   uint16_t rowsSinceSync_ = 0;
   char     logStamp_[16]   = "00000000_000000";  // YYYYMMDD_HHMMSS
-  char     sessionDir_[40] = "";                  // waves/<stamp>_r<id>_tmp
+  char     sessionDir_[40] = "";                  // waves/<stamp>
   uint32_t gpsRowsWritten_ = 0;
   // Whether the capture started with a valid fix. Logged to ses.csv: with
   // wave_measurement_require_gps false a capture can legitimately run without one,
