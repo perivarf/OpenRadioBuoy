@@ -204,8 +204,19 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
   // payload growing to match (see wave_config.h). Averaging keeps the integral:
   // sum_j Shat_j * (G*df) == sum_k S_k * df. Normalising against the UNAVERAGED
   // peakAcc is deliberate and keeps the absolute scale reconstructible on the far
-  // side as value/65535 * maxValue; the cost is that no wire bin quite reaches
+  // side as (value/65535)^2 * maxValue; the cost is that no wire bin quite reaches
   // 65535, since averaging the peak bin with its neighbour lowers it.
+  //
+  // SQRT COMPANDING, and why it is not optional. peakAcc is the largest bin in the
+  // band - but the vertical acceleration PSD of a buoy keeps climbing past 0.5 Hz on
+  // chop, so with kPsdMaxFreq at 1.0 Hz the peak is set by something that is not a
+  // wave, three to four decades above the wave band. Storing norm linearly spends the
+  // uint16 on that peak: replaying seven Skjaerhalden captures through the wire format
+  // (tools/firmware_test.py --psd-quant) put the weakest wave-band bin at 3-202 counts
+  // and the worst bin error at 0.2-14 %. sqrt puts the resolution on the RELATIVE
+  // value instead - the same captures give 457-3642 counts and 0.02-0.20 %, 10-72x
+  // better - for one sqrtf here and one multiply on the receiver. The peak bin still
+  // lands on 65535 either way, so only the flanks move.
   // kSpecNBins, not welch_bins: the array is sized to the wire-format capacity, but
   // only the first kSpecNBins entries are filled and sent. The rest stay at the zero
   // set above, so a stale tail cannot leak out if the count ever grows again.
@@ -225,7 +236,7 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
       }
       float norm = (acc / (float)kSpecBinGroup) / peakAcc;
       if (norm > 1.0f) norm = 1.0f;
-      spectrumOut[j] = (uint16_t)lroundf(norm * 65535.0f);
+      spectrumOut[j] = (uint16_t)lroundf(sqrtf(norm) * 65535.0f);
     }
   }
   return true;

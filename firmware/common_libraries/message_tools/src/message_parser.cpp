@@ -64,6 +64,11 @@ analog_Reading Message_Parser::parse_analog_message(byte* msg)
     return analog_reading_packet;
 }
 
+/*
+  The parameter half of a wave measurement, 'W'. The spectrum arrives separately as
+  'P' and is paired to this one by timestamp_start - see readings.h for why that is
+  the key and reading_ID is not.
+*/
 wave_analysis_Reading Message_Parser::parse_wave_analysis_message(byte *msg)
 {
     wave_analysis_Reading wa_reading_packet;
@@ -76,17 +81,38 @@ wave_analysis_Reading Message_Parser::parse_wave_analysis_message(byte *msg)
     wa_reading_packet.Tc         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tp         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
     wa_reading_packet.Tz         = msg_extract_uint<uint32_t>(msg, offset, true, offset);
-    wa_reading_packet.max_value  = msg_extract_uint<uint32_t>(msg, offset, true, offset);
-    wa_reading_packet.spec_f_min = msg_extract_uint<uint32_t>(msg, offset, true, offset);
-    wa_reading_packet.spec_f_max = msg_extract_uint<uint32_t>(msg, offset, true, offset);
-    wa_reading_packet.num_bins   = msg_extract_uint<uint16_t>(msg, offset, true, offset);
-
-    // Limiting the number of bins to the maximum allowed, to avoid buffer overflow
-    if (wa_reading_packet.num_bins > welch_bins) wa_reading_packet.num_bins = welch_bins;
-    for (uint16_t i = 0; i < wa_reading_packet.num_bins; i++)
-        wa_reading_packet.wave_spectrum[i] = msg_extract_uint<uint16_t>(msg, offset, true, offset);
+    // Sign-and-magnitude, as the 'G' message writes coordinates: a sign character
+    // then the magnitude. 1e-7 deg (gps_coord_scale); 0,0 means no fix was held.
+    wa_reading_packet.lat_start  = msg_extract_int<int32_t>(msg, offset, true, offset);
+    wa_reading_packet.lng_start  = msg_extract_int<int32_t>(msg, offset, true, offset);
+    wa_reading_packet.lat_end    = msg_extract_int<int32_t>(msg, offset, true, offset);
+    wa_reading_packet.lng_end    = msg_extract_int<int32_t>(msg, offset, true, offset);
 
     return wa_reading_packet;
+}
+
+/*
+  The spectrum half, 'P'. Carries the same timestamp_start as its 'W', which is what
+  lets a receiver pair them without depending on arrival order.
+*/
+wave_spectrum_Reading Message_Parser::parse_wave_spectrum_message(byte *msg)
+{
+    wave_spectrum_Reading ws_reading_packet;
+    uint8_t offset = 1;
+
+    ws_reading_packet.reading_ID      = msg_extract_uint<uint16_t>(msg, offset, true, offset);
+    ws_reading_packet.timestamp_start = msg_extract_uint<time_t>(msg, offset, true, offset);
+    ws_reading_packet.max_value  = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    ws_reading_packet.spec_f_min = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    ws_reading_packet.spec_f_max = msg_extract_uint<uint32_t>(msg, offset, true, offset);
+    ws_reading_packet.num_bins   = msg_extract_uint<uint16_t>(msg, offset, true, offset);
+
+    // Limiting the number of bins to the maximum allowed, to avoid buffer overflow
+    if (ws_reading_packet.num_bins > welch_bins) ws_reading_packet.num_bins = welch_bins;
+    for (uint16_t i = 0; i < ws_reading_packet.num_bins; i++)
+        ws_reading_packet.wave_spectrum[i] = msg_extract_uint<uint16_t>(msg, offset, true, offset);
+
+    return ws_reading_packet;
 }
 
 // Buoy infor structure is EMxytttteE
@@ -161,10 +187,6 @@ void Message_Parser::print_temperature_reading(const temperature_Reading & r)
 
 void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r, float rssi)
 {
-    // wave_psd_scale, not scale_factor: the PSD peak is orders of magnitude smaller
-    // than the wave parameters above and needs the finer scale - see readings.h.
-    const float max_value = (float)r.max_value / wave_psd_scale;
-
     sd_writer.debugSerialPrint("  wave result #");
     sd_writer.debugSerialPrintln((float)r.reading_ID, 0);
     sd_writer.debugSerialPrint("    Hs ");
@@ -175,25 +197,68 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
     sd_writer.debugSerialPrint((float)r.Tp / scale_factor, 3);
     sd_writer.debugSerialPrint(" s   Tz ");
     sd_writer.debugSerialPrint((float)r.Tz / scale_factor, 3);
-    sd_writer.debugSerialPrintln(" s");
-    sd_writer.debugSerialPrint("    max_value ");
-    sd_writer.debugSerialPrint(max_value, 9);
-    sd_writer.debugSerialPrint(" (m/s^2)^2/Hz   span ");
+    sd_writer.debugSerialPrint(" s   span ");
     sd_writer.debugSerialPrint((float)(r.timestamp_end - r.timestamp_start), 0);
     sd_writer.debugSerialPrint(" s   RSSI ");
     sd_writer.debugSerialPrint(rssi, 1);
     sd_writer.debugSerialPrintln(" dBm");
 
-    // NB. Timestamp sent as 4B will only be valid until 2106. 
-    // Either increase to 8B or use a different start data for the epoch (i.e. 2020)
     char ts[64];  // "    window " + two 10-digit values + " .. " is 39; leave margin
     sprintf(ts, "    window %lu .. %lu",
             (unsigned long)r.timestamp_start, (unsigned long)r.timestamp_end);
     sd_writer.debugSerialPrintln(ts);
 
     /*
-      Wire format is a uint16 per bin normalised to the peak; absolute PSD is
-      value/65535 * max_value. Both columns are printed so the raw payload can be checked
+      Position at each end of the analysis window, 1e-7 deg on the wire. Two of them
+      because a free-drifting buoy moves during a 30-minute capture, and the pair is
+      the drift vector rather than a repeated field.
+
+      0,0 is not a coordinate here, it is "no fix was held" - see readings.h. Printed
+      as such, so it is not mistaken for a position in the Gulf of Guinea.
+    */
+    if (r.lat_start == 0 && r.lng_start == 0 && r.lat_end == 0 && r.lng_end == 0) {
+      sd_writer.debugSerialPrintln("    position: no fix (0,0)");
+    } else {
+      char pos[96];
+      sprintf(pos, "    position %.6f, %.6f -> %.6f, %.6f",
+              (double)r.lat_start / gps_coord_scale, (double)r.lng_start / gps_coord_scale,
+              (double)r.lat_end   / gps_coord_scale, (double)r.lng_end   / gps_coord_scale);
+      sd_writer.debugSerialPrintln(pos);
+    }
+}
+
+void Message_Parser::print_wave_spectrum_reading(const wave_spectrum_Reading & r, float rssi)
+{
+    // wave_psd_scale, not scale_factor: the PSD peak is orders of magnitude smaller
+    // than the wave parameters and needs the finer scale - see readings.h.
+    const float max_value = (float)r.max_value / wave_psd_scale;
+
+    sd_writer.debugSerialPrint("  wave spectrum #");
+    sd_writer.debugSerialPrint((float)r.reading_ID, 0);
+    sd_writer.debugSerialPrint("   RSSI ");
+    sd_writer.debugSerialPrint(rssi, 1);
+    sd_writer.debugSerialPrintln(" dBm");
+    sd_writer.debugSerialPrint("    max_value ");
+    sd_writer.debugSerialPrint(max_value, 9);
+    sd_writer.debugSerialPrintln(" (m/s^2)^2/Hz");
+
+    // The join key back to the 'W' message. Printed because a spectrum whose
+    // parameters never arrived is otherwise indistinguishable from one whose did.
+    char ts[64];
+    sprintf(ts, "    window start %lu (pairs with the 'W' of the same value)",
+            (unsigned long)r.timestamp_start);
+    sd_writer.debugSerialPrintln(ts);
+
+    /*
+      Wire format is a uint16 per bin normalised to the peak and SQRT-COMPANDED, so the
+      absolute PSD is (value/65535)^2 * max_value. Squaring, not a plain multiply: the
+      sender stores sqrt(bin/peak) because peak is set by chop near 1 Hz while the wave
+      band sits decades below it, and a linear uint16 leaves the wave bins on a handful
+      of counts (see wave_analysis.cpp). Reading this linearly does not fail loudly - it
+      returns a spectrum that is too flat and too high in the wave band - so a receiver
+      and a sender from different builds must not be mixed.
+
+      Both columns are printed so the raw payload can be checked.
 
       The bins are the vertical ACCELERATION PSD, (m/s^2)^2/Hz - untapered, and not
       divided by omega^4. Elevation is S_acc / (2*pi*f)^4 from here.
@@ -210,10 +275,17 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
     sd_writer.debugSerialPrint(f_max, 4);
     sd_writer.debugSerialPrint(" Hz, df ");
     sd_writer.debugSerialPrint(df, 6);
+    if (!debug_print_psd_bins){
+      // Said explicitly, so a short print is not read as a short spectrum. The bins
+      // are in the message and on their way to the cloud either way - only the
+      // console dump is suppressed. See debug_print_psd_bins in common_config.h.
+      sd_writer.debugSerialPrintln(" Hz (bins not printed)");
+      return;
+    }
     sd_writer.debugSerialPrintln(" Hz (f_hz raw psd_acc):");
 
     // Printing the spectrum.
-    // Notice that spectrum frequencies are bin centres, not edges, 
+    // Notice that spectrum frequencies are bin centres, not edges,
     // and the step is df = (f_max - f_min)/(num_bins - 1)
     for (uint16_t i = 0; i < r.num_bins; i++){
       sd_writer.debugSerialPrint("      ");
@@ -221,7 +293,8 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
       sd_writer.debugSerialPrint(" ");
       sd_writer.debugSerialPrint((float)r.wave_spectrum[i], 0);
       sd_writer.debugSerialPrint(" ");
-      sd_writer.debugSerialPrintln(r.wave_spectrum[i] / 65535.0f * max_value, 9);
+      const float n = r.wave_spectrum[i] / 65535.0f;
+      sd_writer.debugSerialPrintln(n * n * max_value, 9);
     }
 }
 

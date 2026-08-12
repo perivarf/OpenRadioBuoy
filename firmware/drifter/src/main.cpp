@@ -483,7 +483,6 @@ void task_transmit() {
       }
       break;
     }
-    wave_manager.popTransmittedResult();
 
     // Logged only on success, so a result that is retried next window does not end
     // up on the SD card twice.
@@ -491,6 +490,39 @@ void task_transmit() {
     sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
     LORA.packet_count++;
     delay(200);
+
+    /*
+      The spectrum follows as its own message, paired to the one above by ts_start.
+      It is sent SECOND and BEST-EFFORT, and the result is popped either way.
+
+      That ordering is the point of the split. The parameters are what the
+      measurement is for and they are already delivered; the spectrum is four times
+      the airtime and the first thing a marginal link drops. Retrying the pair to
+      recover it would re-send Hs on a link that is already failing and keep the
+      queue from draining, so a lost 'P' costs the spectrum and nothing else - which
+      is exactly the failure mode the single combined message did not have.
+    */
+    size_t psd_len = wave_manager.updatePsdTransmitMessage();
+    if (psd_len > 0){
+      if (debug_serial){
+        mySerial.print("Sending P: "); mySerial.print(psd_len);
+        mySerial.print(" bytes on "); mySerial.print(LORA.current_frequency, 3);
+        mySerial.println(" MHz");
+      }
+      message_data = LORA.sendData(wave_manager.psdB, (uint8_t)psd_len, 10000);
+      IWatchdog.reload();
+      delay(500);
+      if (message_data.sent){
+        sd_writer.logByteArray(wave_manager.psdB, psd_len);
+        sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
+        LORA.packet_count++;
+        delay(200);
+      } else if (debug_serial){
+        mySerial.println(F("PSD send got no TxDone - parameters are already through, dropping the spectrum"));
+      }
+    }
+
+    wave_manager.popTransmittedResult();
   }
 
   // Wrap up transmission, wait for base station instructions

@@ -26,6 +26,16 @@ struct WaveResult {
   uint16_t wave_spectrum[welch_bins];  // quantised acceleration PSD, bins welch_bin_min..max
   time_t   timestamp_start;
   time_t   timestamp_end;
+  /*
+    Position at the two ends of the capture window, 1e-7 deg, straight off
+    UBX_PVT so nothing is rescaled before the message needs it. 0 means no valid
+    fix was held at that moment, which the 'W' message forwards as 0,0 - see
+    readings.h for why that is the agreed way to say "unknown".
+  */
+  int32_t  lat_start_e7;
+  int32_t  lng_start_e7;
+  int32_t  lat_end_e7;
+  int32_t  lng_end_e7;
 };
 
 /*
@@ -56,11 +66,22 @@ class WaveManager {
   // Returns 0 on success, non-zero if no usable spectrum was produced.
   uint8_t processReading(void);
 
-  // Serialise the front result into msgB ('W' ... 'E') and return the length, or 0
-  // if the queue is empty. Does NOT pop - see popTransmittedResult.
+  // Serialise the front result's PARAMETERS into msgB ('W' ... 'E') and return the
+  // length, or 0 if the queue is empty. Does NOT pop - see popTransmittedResult.
   size_t updateTransmitMessage(void);
 
-  // Drop the result updateTransmitMessage just serialised
+  /*
+    Serialise the front result's SPECTRUM into psdB ('P' ... 'E') and return the
+    length. Returns 0 when the queue is empty or kSendPsd is off, which the caller
+    reads as "nothing to send" - a build that does not transmit spectra simply
+    stops sending the second message, rather than sending an empty one.
+
+    Both messages carry the same ts_start, which is what pairs them up; see the
+    join-key note in readings.h.
+  */
+  size_t updatePsdTransmitMessage(void);
+
+  // Drop the result the two updateTransmitMessage calls just serialised
   void popTransmittedResult(void);
 
 #if DEBUG_WAVE_MSG
@@ -75,6 +96,7 @@ class WaveManager {
 #endif
 
   byte msgB[wave_message_size];
+  byte psdB[wave_spectrum_message_size];
 
  private:
   static WaveManager *s_self;
@@ -121,6 +143,20 @@ class WaveManager {
   uint32_t rowCount_ = 0;
   time_t   captureStart_ = 0;
   time_t   captureEnd_ = 0;
+
+  /*
+    Where the buoy was at each end of the window. Sampled at the same two lines
+    that set captureStart_/captureEnd_, so the position and the timestamp always
+    describe the same instant - reading the fix later would give whatever the
+    receiver had by then, which after a 30-minute drift is a different place.
+  */
+  struct FixE7 { int32_t lat = 0; int32_t lng = 0; };
+  FixE7 captureStartPos_;
+  FixE7 captureEndPos_;
+
+  // The current solution as 1e-7 deg, or 0,0 when there is no valid fix to give.
+  // Zero is the agreed "unknown" here; see readings.h.
+  FixE7 currentFixE7(void) const;
   bool     imuOk_ = false;
 };
 

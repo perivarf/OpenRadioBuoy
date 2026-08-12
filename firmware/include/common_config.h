@@ -79,4 +79,24 @@ static constexpr uint32_t watchdog_wait_time {32000};
 static constexpr int  serial_baud  {115200};
 static constexpr bool debug_serial {true};
 
+/*
+  Whether a received 'P' message is dumped ONE LINE PER BIN.
+
+  Off by default, because that dump is not free the way the other debug prints are.
+  Every debugSerialPrint does a debugFile.sync(), and the bin loop makes five calls
+  per bin - about 510 syncs for a 102-bin spectrum, which blocks the receive loop for
+  seconds.
+
+  That matters now that a wave measurement arrives as TWO packets. listenByteArray
+  clears operationDone on entry, so an RxDone that fires while the console is busy is
+  discarded and the packet is never read out of the radio. With the drifter moving
+  straight on to the next queued result after its 'P', a spectrum dump is long enough
+  to swallow the 'W' that follows it.
+
+  The summary line above the loop - bin count, f_min, f_max, df, max_value - is
+  printed either way, so a spectrum that arrived and parsed still says so. Turn this
+  on for bench work on the codec, not for a station that is actually collecting.
+*/
+static constexpr bool debug_print_psd_bins {false};
+
 #endif

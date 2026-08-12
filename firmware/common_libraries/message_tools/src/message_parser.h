@@ -10,6 +10,7 @@ class Message_Parser{
         GPS_Reading parse_gps_message(byte* msg);
         analog_Reading parse_analog_message(byte* msg);
         wave_analysis_Reading parse_wave_analysis_message(byte* msg);
+        wave_spectrum_Reading parse_wave_spectrum_message(byte* msg);
         buoyInfoReading parse_buoy_info_message(byte* msg);
         buoyInitMessage parse_buoy_init_message(byte* msg);
         beacon_Reading parse_beacon_message(byte *msg);
@@ -26,6 +27,7 @@ class Message_Parser{
         void print_gps_reading(const GPS_Reading & r);
         void print_temperature_reading(const temperature_Reading & r);
         void print_wave_analysis_reading(const wave_analysis_Reading & r, float rssi);
+        void print_wave_spectrum_reading(const wave_spectrum_Reading & r, float rssi);
         void print_beacon_reading(const beacon_Reading & r);
         void print_buoy_info_reading(const buoyInfoReading & r);
 };

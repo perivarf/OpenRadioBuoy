@@ -75,6 +75,17 @@ WARMUP_MS      = 30000          # wave_measurement_filter_warm_up
 PSD_MIN_FREQ   = 0.03           # kPsdMinFreq - nedre båndkant; resten utledes
 PSD_MAX_FREQ   = 1.0            # kPsdMaxFreq - øvre båndkant; resten utledes
 WELCH_BINS     = 102            # welch_bins (common_config.h) - wire-format KAPASITET
+# En bølgemåling går ut som TO meldinger, paret på ts_start (se readings.h):
+#   'W'  parametrene + posisjon ved hver ende av vinduet   -> 56 B, fast
+#   'P'  spekteret                                         -> 26 B + 2*num_bins
+# Speilet regner ikke på rammene, men tallene står her fordi det er dem som avgjør
+# hvor mange bins som får plass: 255 er et hardt tak (SX126x sitt payload-lengdefelt
+# er én byte), som gir 114 bins - mot 98 den gang alt lå i én melding.
+WAVE_MSG_BYTES = 56             # wave_message_size (readings.h)
+PSD_HDR_BYTES  = 26             # wave_spectrum_message_size uten bins
+PSD_SCALE      = 100_000_000    # wave_psd_scale (readings.h) - fastpunktskala for max_value
+PSD_QUANT      = "sqrt"         # kvantiseringsregel for wire-binsene; se wire_encode()
+PSD_QUANT_CLI  = None           # satt av --psd-quant; overstyrer opptakets egen cfg
 # welch_bin_min / kSpecBinGroup / kSpecNBins / welch_bin_max / kSpecBandMaxHz er UTLEDEDE
 # i firmware og skal aldri stå som literaler her. resolve_spec_bins() nedenfor leser dem
 # fra opptakets cfg.csv når de finnes, og faller tilbake på å speile utledningen ellers.
@@ -115,7 +126,17 @@ def resolve_spec_bins(cfg, seglen, quiet=False):
     gamle opptak uten nøklene, og samtidig kontrollen som sier fra naar firmware har
     flyttet seg siden opptaket."""
     global SPEC_BIN_MIN, SPEC_BIN_GROUP, SPEC_N_BINS, SPEC_BIN_MAX
-    global SPEC_BAND_MIN, SPEC_BAND_MAX
+    global SPEC_BAND_MIN, SPEC_BAND_MAX, PSD_QUANT
+
+    # Companderinga hører til samme sett: meldinga har ingen versjonsbyte, så cfg-nøkkelen
+    # er det eneste som skiller et opptak fra før flippen fra ett etter. Mangler den, var
+    # builden lineær. --psd-quant vinner, for den brukes nettopp til å se hva den ANDRE
+    # regelen ville gitt på det samme opptaket.
+    if PSD_QUANT_CLI is not None:
+        PSD_QUANT = PSD_QUANT_CLI
+    else:
+        PSD_QUANT = cfg.get("psd_wire_encoding", "linear") if cfg else "sqrt"
+
     mine = derive_spec_bins(seglen)
     if "spec_bin_group" in cfg and "welch_bin_max" in cfg:
         group   = int(float(cfg["spec_bin_group"]))
@@ -235,13 +256,55 @@ def wave_params(psd, fs, seglen):
     }
 
 
-def spectrum_slice(psd, peak_acc, fs, seglen):
+def psd_fixed(peak_acc):
+    """max_value-feltet slik toPsdFixed() i wave_manager.cpp lager det: peak_acc i
+    fastpunkt med wave_psd_scale, klamret til uint32. Klampen er en del av formatet -
+    en mettet topp leses som et for flatt spektrum, ikke som støy - så den hører hjemme
+    i speilet og ikke bare i firmware."""
+    if not peak_acc > 0.0:
+        return 0                               # udefinert (-1) eller negativ -> 0
+    scaled = round(peak_acc * PSD_SCALE)
+    return min(scaled, 0xFFFFFFFF)
+
+
+def wire_encode(norm, mode=None):
+    """Normalisert bin (0..1) -> uint16 på lufta, som kvantiseringa i finalize().
+
+    'sqrt' er dagens firmware: oppløsninga følger da den RELATIVE verdien i stedet for
+    den absolutte, som er det som betyr noe når normaliseringstoppen settes av chop over
+    0.5 Hz og bølgebåndet ligger tre-fire dekader under den. 'linear' er regelen fra før
+    flippen, og trengs for å lese opptak tatt med en eldre build."""
+    mode = mode or PSD_QUANT
+    n = min(max(float(norm), 0.0), 1.0)
+    if mode == "sqrt":
+        n = math.sqrt(n)
+    return int(round(n * 65535.0))
+
+
+def wire_decode(q, max_value_field, mode=None):
+    """Mottakerens aritmetikk: uint16 + max_value-feltet -> absolutt PSD i (m/s^2)^2/Hz.
+    Speiler print_wave_analysis_reading() i message_parser.cpp."""
+    mode = mode or PSD_QUANT
+    n = q / 65535.0
+    if mode == "sqrt":
+        n = n * n
+    return n * (max_value_field / PSD_SCALE)
+
+
+def spectrum_slice(psd, peak_acc, fs, seglen, mode=None):
     """Det sendte spekteret: AKSELERASJONS-PSD-en (ingen omega^4, ingen taper),
     båndmidlet SPEC_BIN_GROUP PSD-bins per wire-bin og normalisert mot den UMIDLEDE
-    toppen, som finalize() gjør."""
-    out = np.zeros(SPEC_N_BINS)
+    toppen, som finalize() gjør.
+
+    Returnerer (norm, counts, recon, max_value_field): de normaliserte floatene som før,
+    pluss det som faktisk går på lufta og det mottakeren sitter igjen med. Uten de tre
+    siste stopper speilet rett før det eneste steget som koster presisjon."""
+    out   = np.zeros(SPEC_N_BINS)
+    cnts  = np.zeros(SPEC_N_BINS, dtype=np.int64)
+    recon = np.zeros(SPEC_N_BINS)
+    mvf   = psd_fixed(peak_acc)
     if peak_acc <= 0:
-        return out
+        return out, cnts, recon, mvf
     for j in range(SPEC_N_BINS):
         acc = 0.0
         for g in range(SPEC_BIN_GROUP):
@@ -249,8 +312,42 @@ def spectrum_slice(psd, peak_acc, fs, seglen):
             if k == 0:
                 continue                       # DC: middelet er trukket fra, bærer ingenting
             acc += max(float(psd[k]), 0.0)
-        out[j] = min((acc / SPEC_BIN_GROUP) / peak_acc, 1.0)
-    return out
+        out[j]   = min((acc / SPEC_BIN_GROUP) / peak_acc, 1.0)
+        cnts[j]  = wire_encode(out[j], mode)
+        recon[j] = wire_decode(cnts[j], mvf, mode)
+    return out, cnts, recon, mvf
+
+
+def wire_error(psd, cnts, recon, df):
+    """Hva kvantiseringa koster, målt mot de båndmidlede PSD-verdiene selv.
+
+    Verste relative feil rapporteres to ganger: over hele det sendte båndet, og
+    begrenset til under 0.3 Hz. Det andre tallet er det som betyr noe - der ligger
+    bølgeenergien, mens toppen som setter skalaen ligger i chopen over 0.5 Hz.
+
+    Frekvensaksen bygges som kSpecFMinHz + j*kSpecBinWidthHz, altså bin-SENTRE og de to
+    verdiene meldinga faktisk bærer - ikke SPEC_BAND_MIN, som er nedre kant."""
+    f_min = (SPEC_BIN_MIN + 0.5 * (SPEC_BIN_GROUP - 1)) * df
+    width = SPEC_BIN_GROUP * df
+    worst_all = worst_wave = 0.0
+    zeros = 0
+    for j in range(SPEC_N_BINS):
+        true = 0.0
+        for g in range(SPEC_BIN_GROUP):
+            k = SPEC_BIN_MIN + j * SPEC_BIN_GROUP + g
+            if k == 0:
+                continue
+            true += max(float(psd[k]), 0.0)
+        true /= SPEC_BIN_GROUP
+        if true <= 0.0:
+            continue
+        if cnts[j] == 0:
+            zeros += 1
+        e = abs(recon[j] - true) / true * 100.0
+        worst_all = max(worst_all, e)
+        if f_min + j * width < 0.3:
+            worst_wave = max(worst_wave, e)
+    return worst_all, worst_wave, zeros
 
 
 def attach_device_vacc(imu_path, rows):
@@ -408,7 +505,8 @@ def run(directory, method, rates, seglen, ntap, match_device=False,
         sys.exit(f"for kort serie: {len(analysed)} samples < seglen {seglen}")
 
     p = wave_params(psd, fs, seglen)
-    spec = spectrum_slice(psd, p["max_value"], fs, seglen)
+    spec, cnts, recon, mvf = spectrum_slice(psd, p["max_value"], fs, seglen)
+    p["counts"], p["recon"], p["max_value_field"] = cnts, recon, mvf
 
     if quiet:
         return p
@@ -467,10 +565,22 @@ def run(directory, method, rates, seglen, ntap, match_device=False,
 
     print(f"\n  sendt spektrum: {len(spec)} bins a {SPEC_BIN_GROUP*df:.6f} Hz, "
           f"{SPEC_BAND_MIN:.4f}-{SPEC_BAND_MAX:.4f} Hz, topp i bin {int(np.argmax(spec))}")
+
+    # Wire-kvantiseringa. Alt over dette punktet er flyttall; det er her presisjonen
+    # faktisk tapes, og laveste count er tallet som sier hvor mye som er igjen: en bin
+    # paa 6 counts baerer +-8 % uansett hvor pent PSD-en ble regnet.
+    worst_all, worst_wave, zeros = wire_error(psd, cnts, recon, df)
+    nz = [int(c) for c in cnts if c > 0]
+    print(f"  WIRE ({PSD_QUANT})")
+    print(f"    max_value  {mvf:>12d}  (uint32-felt; {mvf/PSD_SCALE:.9f} (m/s^2)^2/Hz"
+          + ("  KLAMRET" if mvf == 0xFFFFFFFF else "") + ")")
+    print(f"    counts     laveste {min(nz) if nz else 0}, {zeros} bins kvantisert til 0")
+    print(f"    verste feil {worst_all:6.3f} % over baandet, {worst_wave:6.3f} % under 0.3 Hz")
     return p
 
 
 def main():
+    global PSD_QUANT_CLI
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("directory", help="opptaksmappe med <stamp>_imu.csv")
@@ -488,6 +598,11 @@ def main():
     ap.add_argument("--decimate", default="fir", choices=["fir", "mean"],
                     help="'fir' = dagens firmware. 'mean' = boxcar-boettemiddel, som "
                          "build 1/64 - bruk den for aa reprodusere et gammelt opptak")
+    ap.add_argument("--psd-quant", default=None, choices=["linear", "sqrt"],
+                    help="kvantiseringsregel for wire-binsene. Utelatt: opptakets egen "
+                         "psd_wire_encoding fra cfg.csv, ellers 'linear'. 'sqrt' = dagens "
+                         "firmware, companderer saa opploesninga foelger den relative og "
+                         "ikke den absolutte verdien")
     ap.add_argument("--match-device", action="store_true",
                     help="adopter opptakets egne wave_fmax/taper/seglen/bucket fra "
                          "cfg.csv, saa tallene kan holdes mot device sin ana.csv")
@@ -495,6 +610,8 @@ def main():
 
     if args.rates is not None and len(args.rates) < 2:
         sys.exit("--rates trenger minst inn- og utrate, f.eks. '100 10'")
+
+    PSD_QUANT_CLI = args.psd_quant
     run(args.directory, args.ahrs, args.rates, args.seglen, args.ntap,
         match_device=args.match_device, detrend=args.detrend,
         decimate=args.decimate)

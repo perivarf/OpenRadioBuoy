@@ -300,6 +300,27 @@ void loop()
             MESSAGE_PARSER.print_wave_analysis_reading(
                 MESSAGE_PARSER.parse_wave_analysis_message(LORA.byte_msg.byteMsg), rssi);
           }
+          else if (LORA.byte_msg.byteMsg[0] == 'P')
+          {
+            /*
+              The spectrum half of a wave measurement. Queued exactly like 'W' - the
+              base station forwards bytes and does not pair the two; that happens
+              downstream, keyed on the timestamp both messages carry. See readings.h.
+
+              Kept as its own branch rather than folded into the 'W' one because the
+              two have different layouts and different printers, and because a build
+              with kSendPsd off simply never sends this message.
+            */
+            BuoyMessage *qMsg = new BuoyMessage;
+            qMsg->byteMsg = new ByteMessage;
+            qMsg->rssi = rssi;
+            qMsg->byteMsg->numBytes = LORA.byte_msg.numBytes;
+            memcpy(qMsg->byteMsg->byteMsg, LORA.byte_msg.byteMsg, LORA.byte_msg.numBytes);
+            messageQueue.push(qMsg);
+
+            MESSAGE_PARSER.print_wave_spectrum_reading(
+                MESSAGE_PARSER.parse_wave_spectrum_message(LORA.byte_msg.byteMsg), rssi);
+          }
           else if (LORA.byte_msg.byteMsg[0] == 'E' && LORA.byte_msg.byteMsg[1] == 'M')
           {
             sd_writer.debugSerialPrintln("end message");
