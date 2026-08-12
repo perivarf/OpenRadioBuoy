@@ -329,16 +329,22 @@ static bool test_sends_remaining(void){
 
 #if DEBUG_WAVE_MSG
 /*
-  Bench test of the wave-analysis ('W') message. There is no wave_manager on this
-  PCB yet, so the whole producer side lives here: a synthetic result, the
-  serialiser, and a console dump. The point is to exercise the wire format and
-  the base station's parser end to end without an IMU or a wave capture.
+  Bench test of the wave messages. There is no wave_manager on this PCB yet, so the
+  whole producer side lives here: a synthetic result, the serialisers, and a console
+  dump. The point is to exercise the wire format and the base station's parser end to
+  end without an IMU or a wave capture.
 
-  The byte layout below is the contract with
-  Message_Parser::parse_wave_analysis_message. Note the on-air field order is
-  Hs, Tc, Tp, Tz - NOT the Hs/Tz/Tc/Tp order the base station happens to print
-  them in. Getting that wrong is the easiest mistake to make here, which is why
-  the test values are deliberately distinct and not round.
+  ONE MEASUREMENT, TWO MESSAGES - 'W' with the parameters and the position, 'P' with
+  the spectrum - sent back to back and sharing a timestamp_start, which is the key the
+  cloud joins them on. See readings.h. Sending both from one fixture is deliberate:
+  the pair is what a receiver has to cope with, and a fixture that only ever sent one
+  of them would leave the join untested.
+
+  The byte layouts below are the contract with
+  Message_Parser::parse_wave_analysis_message and parse_wave_spectrum_message. Note
+  the on-air field order is Hs, Tc, Tp, Tz - NOT the Hs/Tz/Tc/Tp order the base
+  station happens to print them in. Getting that wrong is the easiest mistake to make
+  here, which is why the test values are deliberately distinct and not round.
 */
 /*
   Frequency axis this fake spectrum claims to cover, as BIN CENTRES. The real drifter
@@ -354,16 +360,31 @@ static bool test_sends_remaining(void){
 static constexpr float test_spec_f_min = 0.0048828125f;
 static constexpr float test_spec_f_max = test_spec_f_min + (welch_bins - 1) * 0.01953125f;
 
+/*
+  Position the fake measurement claims. It walks a few metres per send, so a receiver
+  plotting the pairs gets a drift vector rather than a repeated dot, and a stuck or
+  duplicated reading is visible as a flat one. Start and end differ within a single
+  measurement for the same reason the real message carries both.
+*/
+static constexpr float test_wave_lat  {59.90130f};  // Oslofjorden, roughly
+static constexpr float test_wave_lng  {10.73410f};
+static constexpr float test_wave_step {0.00021f};   // ~23 m per send
+static constexpr float test_wave_drift{0.00035f};   // ~39 m over the 30 min window
+
 struct TestWaveResult {
   uint16_t reading_ID;
   float    Hs;         // significant wave height (m)
   float    Tc;         // crest period (s)
   float    Tp;         // peak period (s)
   float    Tz;         // zero-crossing period (s)
-  float    max_value;  // peak elevation PSD (m^2/Hz)
-  uint16_t wave_spectrum[welch_bins];  // normalised to the peak, 0-65535
+  float    max_value;  // peak acceleration PSD ((m/s^2)^2/Hz)
+  uint16_t wave_spectrum[welch_bins];  // sqrt-companded against the peak, 0-65535
   time_t   timestamp_start;
   time_t   timestamp_end;
+  float    lat_start;  // degrees, signed
+  float    lng_start;
+  float    lat_end;
+  float    lng_end;
 };
 
 static TestWaveResult make_test_wave_result(void){
@@ -380,95 +401,171 @@ static TestWaveResult make_test_wave_result(void){
   res.Tc        = 2.53f;
   res.Tp        = 6.91f;
   res.Tz        = 4.29f;
-  res.max_value = 0.0842f;
+  // An acceleration peak, not an elevation one - the 'P' message carries S_acc, and
+  // this is roughly the largest value the field captures have produced. It also needs
+  // wave_psd_scale rather than scale_factor to survive the trip; see readings.h.
+  res.max_value = 1.8437f;
 
-  // A single smooth peak. The wire value is bin/peak * 65535, so the far side
-  // reconstructs the absolute PSD as value/65535 * max_value. The peak sits off
-  // centre so a mirrored or off-by-one bin axis is visible at a glance.
+  /*
+    A single smooth peak, SQRT-COMPANDED exactly as the real sender does it: the wire
+    value is sqrt(bin/peak) * 65535 and the far side reconstructs
+    (value/65535)^2 * max_value.
+
+    Encoding it linearly here would still round-trip through our own printer and look
+    fine, while every real receiver read it too flat - which is precisely the failure
+    this fixture exists to catch, so the square has to be on both sides.
+
+    The peak sits off centre so a mirrored or off-by-one bin axis is visible at a
+    glance.
+  */
   const float peakBin = 0.35f * (float)welch_bins;
   const float width   = 0.12f * (float)welch_bins;
   for (size_t j = 0; j < welch_bins; j++){
     const float d    = ((float)j - peakBin) / width;
     const float norm = expf(-0.5f * d * d);
-    res.wave_spectrum[j] = (uint16_t)lroundf(norm * 65535.0f);
+    res.wave_spectrum[j] = (uint16_t)lroundf(sqrtf(norm) * 65535.0f);
   }
 
   res.timestamp_start = test_epoch + now();
   res.timestamp_end   = res.timestamp_start + 30*min_2_s;
 
+  res.lat_start = test_wave_lat + res.reading_ID * test_wave_step;
+  res.lng_start = test_wave_lng + res.reading_ID * test_wave_step * 1.7f;
+  res.lat_end   = res.lat_start + test_wave_drift;
+  res.lng_end   = res.lng_start - test_wave_drift * 0.6f;
+
   return res;
 }
 
 /*
-  Serialise into msgB as 'W' ... 'E', matching parse_wave_analysis_message.
-  Floats go out as fixed-point scaled by scale_factor.
+  Fixed-point helpers shared by both serialisers. Three different scales, all from
+  readings.h, and picking the wrong one is silent: scale_factor cannot express a PSD
+  peak at all, and wave_freq_scale is the only one fine enough for the axis.
+*/
+static uint32_t test_wave_to_fixed(float v, uint32_t scale){
+  if (!(v > 0.0f)) return 0;                       // undefined or negative -> 0
+  double scaled = (double)v * (double)scale;
+  if (scaled > 4294967295.0) return 0xFFFFFFFFUL;  // clamp to uint32 range
+  return (uint32_t)llround(scaled);
+}
+
+// Degrees -> the 1e-7 deg integer the wire carries, signed. Rounded rather than
+// truncated so a negative coordinate does not creep towards zero.
+static int32_t test_wave_to_coord(float deg){
+  return (int32_t)llround((double)deg * (double)gps_coord_scale);
+}
+
+/*
+  Serialise the parameters into msgB as 'W' ... 'E', matching
+  parse_wave_analysis_message. Floats go out as fixed-point scaled by scale_factor,
+  coordinates by gps_coord_scale and sign-and-magnitude via msg_insert_int.
 */
 static void build_test_wave_message(byte (&msgB)[wave_message_size], const TestWaveResult &res){
-  auto toFixed = [](float v) -> uint32_t {
-    if (!(v > 0.0f)) return 0;                       // undefined or negative -> 0
-    double scaled = (double)v * (double)scale_factor;
-    if (scaled > 4294967295.0) return 0xFFFFFFFFUL;  // clamp to uint32 range
-    return (uint32_t)llround(scaled);
-  };
-
   uint8_t offset = 0;
   msgB[offset++] = 'W';
   msg_insert_uint(msgB, res.reading_ID, offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, res.timestamp_start, offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, res.timestamp_end,   offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, toFixed(res.Hs),        offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, toFixed(res.Tc),        offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, toFixed(res.Tp),        offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, toFixed(res.Tz),        offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, toFixed(res.max_value), offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, test_wave_to_fixed(res.Hs, scale_factor), offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, test_wave_to_fixed(res.Tc, scale_factor), offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, test_wave_to_fixed(res.Tp, scale_factor), offset, wave_message_size, offset, true);
+  msg_insert_uint(msgB, test_wave_to_fixed(res.Tz, scale_factor), offset, wave_message_size, offset, true);
 
-  // Frequency axis, so the receiver can label the bins it is about to read. Bin
-  // centres, and the count immediately before the bins themselves.
-  // wave_freq_scale, not toFixed's scale_factor - see readings.h for why the axis
-  // needs the finer scale.
-  auto toFreqFixed = [](float f) -> uint32_t {
-    return (uint32_t)llround((double)f * (double)wave_freq_scale);
-  };
-  msg_insert_uint(msgB, toFreqFixed(test_spec_f_min), offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, toFreqFixed(test_spec_f_max), offset, wave_message_size, offset, true);
-  msg_insert_uint(msgB, (uint16_t)welch_bins,         offset, wave_message_size, offset, true);
+  // Five bytes each, not four: msg_insert_int writes a 'P'/'N' sign character and
+  // then the magnitude, the same encoding the 'G' message uses.
+  msg_insert_int(msgB, test_wave_to_coord(res.lat_start), offset, wave_message_size, offset, true);
+  msg_insert_int(msgB, test_wave_to_coord(res.lng_start), offset, wave_message_size, offset, true);
+  msg_insert_int(msgB, test_wave_to_coord(res.lat_end),   offset, wave_message_size, offset, true);
+  msg_insert_int(msgB, test_wave_to_coord(res.lng_end),   offset, wave_message_size, offset, true);
 
-  // Last field: it is the only variable-length one, so stopping short here shortens
-  // the message without moving anything the receiver has already read.
-  for (size_t i = 0; i < welch_bins; i++){
-    msg_insert_uint(msgB, res.wave_spectrum[i], offset, wave_message_size, offset, true);
-  }
   msgB[offset++] = 'E';
 }
 
 /*
-  Decode the bytes we just serialised and print them with print_wave_analysis_message
-  - the very same function the base station calls on reception - so the two
-  consoles can be diffed line for line. If they agree, the codec is right and any
-  difference is on the air; if they disagree here, the fault is in the serialiser.
-
-  parse_wave_analysis_message is the base station's own parser too, so this is a
-  real round trip through the wire format, not a re-print of the source values.
+  msg_insert_uint silently writes nothing and returns an error code when a field would
+  run past msgSize, so a buffer that is too small loses fields rather than failing
+  loudly. Assert the exact byte count instead - this fixture is the only 'W' producer
+  on this PCB, so nothing else would catch a layout that drifted from readings.h.
 */
-static void print_test_wave_message(byte (&msgB)[wave_message_size]){
-  wave_analysis_Reading w = MESSAGE_PARSER.parse_wave_analysis_message(msgB);
-  print_wave_analysis_message(w);
+static_assert(1 + sizeof(uint16_t) + 2 * sizeof(time_t) + 4 * sizeof(uint32_t) \
+              + 4 * gps_coord_field_size + 1 == wave_message_size,
+    "the test 'W' message no longer matches wave_message_size");
 
-  Serial.print(F("raw ")); Serial.print((uint32_t)wave_message_size);
+/*
+  Serialise the spectrum into psdB as 'P' ... 'E', matching
+  parse_wave_spectrum_message. timestamp_start is repeated from the 'W' on purpose -
+  it is the join key, see readings.h.
+*/
+static void build_test_psd_message(byte (&psdB)[wave_spectrum_message_size], const TestWaveResult &res){
+  uint8_t offset = 0;
+  psdB[offset++] = 'P';
+  msg_insert_uint(psdB, res.reading_ID,      offset, wave_spectrum_message_size, offset, true);
+  msg_insert_uint(psdB, res.timestamp_start, offset, wave_spectrum_message_size, offset, true);
+  msg_insert_uint(psdB, test_wave_to_fixed(res.max_value, wave_psd_scale),
+                  offset, wave_spectrum_message_size, offset, true);
+
+  // Frequency axis, so the receiver can label the bins it is about to read. Bin
+  // centres, and the count immediately before the bins themselves. wave_freq_scale,
+  // not scale_factor - see readings.h for why the axis needs the finer scale.
+  msg_insert_uint(psdB, test_wave_to_fixed(test_spec_f_min, wave_freq_scale),
+                  offset, wave_spectrum_message_size, offset, true);
+  msg_insert_uint(psdB, test_wave_to_fixed(test_spec_f_max, wave_freq_scale),
+                  offset, wave_spectrum_message_size, offset, true);
+  msg_insert_uint(psdB, (uint16_t)welch_bins, offset, wave_spectrum_message_size, offset, true);
+
+  // Last field: it is the only variable-length one, so stopping short here shortens
+  // the message without moving anything the receiver has already read.
+  for (size_t i = 0; i < welch_bins; i++){
+    msg_insert_uint(psdB, res.wave_spectrum[i], offset, wave_spectrum_message_size, offset, true);
+  }
+  psdB[offset++] = 'E';
+}
+
+static_assert(1 + sizeof(uint16_t) + sizeof(time_t) + 3 * sizeof(uint32_t) \
+              + sizeof(uint16_t) + welch_bins * sizeof(uint16_t) + 1 == wave_spectrum_message_size,
+    "the test 'P' message no longer matches wave_spectrum_message_size");
+
+/*
+  Decode the bytes we just serialised and print them with the very same functions the
+  base station calls on reception, so the two consoles can be diffed line for line. If
+  they agree, the codec is right and any difference is on the air; if they disagree
+  here, the fault is in the serialiser.
+
+  The parsers are the base station's own, so this is a real round trip through the
+  wire format, not a re-print of the source values.
+*/
+static void hexdump(const byte *msg, size_t len){
+  Serial.print(F("raw ")); Serial.print((uint32_t)len);
   Serial.println(F(" bytes:"));
-  for (size_t j = 0; j < wave_message_size; j++){
-    if (msgB[j] < 0x10) Serial.print('0');
-    Serial.print(msgB[j], HEX); Serial.print(' ');
+  for (size_t j = 0; j < len; j++){
+    if (msg[j] < 0x10) Serial.print('0');
+    Serial.print(msg[j], HEX); Serial.print(' ');
   }
   Serial.println();
 }
 
+static void print_test_wave_message(byte (&msgB)[wave_message_size]){
+  print_wave_analysis_message(MESSAGE_PARSER.parse_wave_analysis_message(msgB));
+  hexdump(msgB, wave_message_size);
+}
+
+static void print_test_psd_message(byte (&psdB)[wave_spectrum_message_size]){
+  print_wave_spectrum_message(MESSAGE_PARSER.parse_wave_spectrum_message(psdB));
+  hexdump(psdB, wave_spectrum_message_size);
+}
+
 /*
-  Send one synthetic wave message down the production path: same sendData / SD
+  Send one synthetic wave measurement down the production path: same sendData / SD
   logging pattern as the G and T messages in task_transmit.
+
+  Two packets, 'W' then 'P', from a single TestWaveResult so they carry the same
+  timestamp_start and can be joined downstream. 'W' goes first because it is the
+  measurement - if only one of the two survives the link, the parameters are the half
+  worth having, and a 'P' without its 'W' is still placeable in time.
 */
 void task_test_wave(void){
   TestWaveResult res = make_test_wave_result();
+
   byte waveMsgB[wave_message_size];
   build_test_wave_message(waveMsgB, res);
 
@@ -482,6 +579,24 @@ void task_test_wave(void){
   IWatchdog.reload();
   delay(500);
   sd_writer.logByteArray(waveMsgB, wave_message_size);
+  sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
+  LORA.packet_count++;
+  delay(200);
+  IWatchdog.reload();
+
+  byte psdMsgB[wave_spectrum_message_size];
+  build_test_psd_message(psdMsgB, res);
+
+  if (debug_serial){
+    Serial.print(F("Sending P: ")); Serial.print(wave_spectrum_message_size);
+    Serial.println(F(" bytes"));
+    print_test_psd_message(psdMsgB);
+  }
+
+  message_data = LORA.sendData(psdMsgB, wave_spectrum_message_size, 10000);
+  IWatchdog.reload();
+  delay(500);
+  sd_writer.logByteArray(psdMsgB, wave_spectrum_message_size);
   sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
   LORA.packet_count++;
   delay(200);

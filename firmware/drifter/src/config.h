@@ -61,14 +61,19 @@ static constexpr int32_t  gps_coord_scale                    {10000000};
 static constexpr uint32_t thermometre_pause_between_readings {300};
 
 /*
-  Number of spectrum bins in a wave-analysis ('W') message. This is part of the
-  wire contract, not a local tuning knob: readings.h sizes
-  wave_analysis_Reading::wave_spectrum and wave_message_size from it, so drifter
-  and basestation MUST carry the same value. A mismatch does not fail to
-  compile - it silently shifts every field after the spectrum.
-  Keep in sync with basestation/src/config.h.
+  Capacity of wave_spectrum_Reading::wave_spectrum, and the number of bins the
+  DEBUG_WAVE_MSG bench fixture in main.cpp puts in a 'P' message.
+
+  No longer a wire contract: the spectrum sits last in the message and the sender
+  states its own num_bins, so a receiver sized differently drops surplus bins rather
+  than misparsing the ones before them. It still wants to match
+  basestation/src/config.h, since anything above the station's value is printed
+  truncated over there.
+
+  The format ceiling is 114 - a 'P' is 26 + 2*num_bins bytes against a 255-byte
+  payload-length field - and readings.h asserts it.
 */
-static constexpr size_t welch_bins {51};
+static constexpr size_t welch_bins {102};
 
 
 // Enable or disable parameters
@@ -78,6 +83,14 @@ static constexpr bool enable_GPS                            {true};
 static constexpr bool enable_watchdog                       {true};
 static constexpr bool debug_SD                              {false};
 static constexpr int  serial_baud                           {115200};
+
+/*
+  Whether a 'P' message is dumped ONE LINE PER BIN. ON here, unlike on the base
+  station: the only 'P' this target ever prints is the one its own DEBUG_WAVE_MSG
+  fixture just built, where the dump IS the test and nothing is racing it. See
+  basestation/src/config.h for why the receiving end leaves it off.
+*/
+static constexpr bool debug_print_psd_bins                  {true};
 static           bool enable_motion_detection               {false};
 static constexpr bool transmitDeploymentMessage             {false};
 static constexpr bool debug_LED_enabled                     {false};

@@ -316,8 +316,8 @@ void loop()
           }
           else if (LORA.byte_msg.byteMsg[0] == 'W')
           {
-            // Wave analysis message: queue it for uplink (same path as G/T/A) and
-            // print the derived parameters. Fixed-point fields are /scale_factor.
+            // Wave parameters: queue for uplink (same path as G/T/A) and print.
+            // Fixed-point fields are /scale_factor, coordinates /gps_coord_scale.
             BuoyMessage *qMsg = new BuoyMessage;
             qMsg->byteMsg = new ByteMessage;
             qMsg->rssi = rssi;
@@ -329,6 +329,31 @@ void loop()
             // consoles can be diffed line for line. See message_parser.h.
             wave_analysis_Reading w = MESSAGE_PARSER.parse_wave_analysis_message(LORA.byte_msg.byteMsg);
             print_wave_analysis_message(w);
+          }
+          else if (LORA.byte_msg.byteMsg[0] == 'P')
+          {
+            /*
+              The spectrum half of a wave measurement. Queued exactly like 'W' - this
+              station forwards bytes and does not pair the two; that happens
+              downstream, keyed on the timestamp both messages carry. See readings.h.
+
+              Kept as its own branch rather than folded into the 'W' one because the
+              two have different layouts and different printers, and because a drifter
+              that ships no spectrum simply never sends this message.
+
+              The forwarded copy is numBytes long, i.e. what actually arrived, so a
+              spectrum with more bins than this station can decode still reaches the
+              cloud whole - the clamp in the parser only shortens the console print.
+            */
+            BuoyMessage *qMsg = new BuoyMessage;
+            qMsg->byteMsg = new ByteMessage;
+            qMsg->rssi = rssi;
+            qMsg->byteMsg->numBytes = LORA.byte_msg.numBytes;
+            memcpy(qMsg->byteMsg->byteMsg, LORA.byte_msg.byteMsg, LORA.byte_msg.numBytes);
+            messageQueue.push(qMsg);
+
+            wave_spectrum_Reading p = MESSAGE_PARSER.parse_wave_spectrum_message(LORA.byte_msg.byteMsg);
+            print_wave_spectrum_message(p);
           }
           else if (LORA.byte_msg.byteMsg[0] == 'E' && LORA.byte_msg.byteMsg[1] == 'M')
           {

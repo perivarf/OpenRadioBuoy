@@ -64,6 +64,28 @@ static constexpr int debug_serial                   {1};
 static constexpr int debug_SD                       {1};
 static constexpr bool enable_handshake              {true};
 
+/*
+  Whether a received 'P' message is dumped ONE LINE PER BIN.
+
+  Off here, because that dump is not free the way the other debug prints are. Every
+  debugSerialPrint does a debugFile.sync(), and the bin loop makes five calls per bin
+  - about 510 syncs for a 102-bin spectrum, which blocks the receive loop for seconds.
+
+  That matters now that a wave measurement arrives as TWO packets. listenByteArray
+  clears operationDone on entry, so an RxDone that fires while the console is busy is
+  discarded and the packet is never read out of the radio. With a drifter moving
+  straight on to the next queued result after its 'P', a spectrum dump is long enough
+  to swallow the 'W' that follows it.
+
+  The summary line above the loop - bin count, f_min, f_max, df, max_value - is
+  printed either way, so a spectrum that arrived and parsed still says so. The bins
+  reach the cloud regardless; the uplink forwards raw bytes and never prints.
+
+  The drifter's bench fixture keeps this ON (see drifter/src/config.h): there the dump
+  IS the test, and nothing is racing it.
+*/
+static constexpr bool debug_print_psd_bins          {false};
+
 // Debugging parameters
 static constexpr int serial_baud                    {115200};
 
@@ -98,6 +120,20 @@ static           uint32_t motion_treshold                   {2000}; // m/s, divi
 static constexpr bool enable_rescue_from_notehub            {true}; 
 static constexpr float LoRa_freq_beacon                     {868.00};
 
-static constexpr size_t welch_bins {51};
+/*
+  Capacity of wave_spectrum_Reading::wave_spectrum, i.e. the most bins this station
+  can DECODE out of a 'P' message. It is not a wire contract - the sender states its
+  own num_bins and the parser clamps to this - but a spectrum longer than this is
+  printed truncated, so it must be at least what the drifters actually send.
+
+  102 is the fork drifter's welch_bins. The format ceiling is 114: a 'P' message is
+  26 + 2*num_bins bytes and the SX126x payload-length field is one byte, so 255 is
+  hard. Raising this beyond 114 trips the static_assert in message_parser.h.
+
+  Forwarding is unaffected either way - the uplink copies numBytes raw and never
+  looks at the spectrum - so a station running short here still delivers a full
+  spectrum to the cloud and only shortchanges its own console.
+*/
+static constexpr size_t welch_bins {102};
 
 #endif
