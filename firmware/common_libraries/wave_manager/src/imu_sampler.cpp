@@ -612,25 +612,7 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   debugPrintStatus(dbg, captureLeftMs);
 }
 
-// Print the effective accel/gyro sample rate + mean magnitudes, at most every
-// imu_debug_print_period ms. Generalises ORB_test's reportOncePerSecond to any
-// interval (rate = count / elapsed, not assuming a 1 s window).
-//
-// Restricted to LOST SAMPLES, plus the countdown that says the capture is still
-// running. Everything that only described the MARGIN is gone: peak DIFF_FIFO and
-// FIFO_FULL_IA both report how close the drain came to the brim, and FULL asserts
-// one ODR BEFORE anything is overwritten, so neither ever meant a sample was lost.
-// |a| and |g| were sensor sanity, not loss, and cost a multiply-accumulate per
-// sample in the drain to produce.
-//
-// What is left answers "did we lose anything" three ways:
-//   accHz/gyrHz  the OUTCOME - below kImuOdrHz means samples went missing, whatever
-//                the cause, including causes no counter here anticipates
-//   unk          words popped that no branch decoded: lost, and a sign the byte
-//                stream has desynchronised rather than merely fallen behind
-//   overrun      OVR/OVR_LATCHED - the sensor overwrote words never read. The same
-//                event sets fifo_ovf in imu.csv and kRawFlagFifoOvf in raw.bin, so
-//                this line is the live view of a fact the capture also records.
+// Print the effective accel/gyro sample rate + mean magnitudes
 void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs) {
   if (!debug_serial || imu_debug_print_period == 0) return;
   uint32_t now = millis();
@@ -643,16 +625,17 @@ void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs) {
   dbg.print("[IMU] ");              dbg.print(captureLeftMs / 1000UL);
   dbg.print(" s left  |  Accel: "); dbg.print(accHz, 0);
   dbg.print(" Hz, Gyro: ");         dbg.print(gyrHz, 0);
-  dbg.print(" Hz (ODR ");           dbg.print(kImuOdrHz);
-  dbg.print(")");
+
   if (nUnknownDbg_ > 0) {
     dbg.print("  [WARN] unk "); dbg.print(nUnknownDbg_);
     dbg.print(" (tag 0x"); dbg.print(lastUnknownTag_, HEX); dbg.print(")");
   }
+  
   if (nOverflow_ > 0) {
     dbg.print("  [WARN] FIFO overrun x"); dbg.print(nOverflow_);
     nOverflow_ = 0;
   }
+  
   dbg.println();
   nUnknownDbg_ = 0;
   nAccDbg_ = nGyrDbg_ = 0;
