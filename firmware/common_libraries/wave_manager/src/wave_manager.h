@@ -117,6 +117,10 @@ class WaveManager {
   void serviceGps(uint32_t relMs);  // drive gps_manager.update(); log a gps.csv row per fix
   bool waitForGpsFix(void);         // block up to wave_gps_fix_timeout for a valid PVT
 
+  // Reading ID continuity across resets. See seedReadingId in the .cpp.
+  uint16_t countSessionDirs(void);  // session folders already under waves/
+  void     seedReadingId(void);     // one-shot: readingID_ = countSessionDirs()
+
   ImuSampler imu_;
   StreamAnalyzer analyzer_;
 
@@ -140,6 +144,7 @@ class WaveManager {
   bool     gpsFixAtStart_ = false;
 
   uint16_t readingID_ = 0;
+  bool     readingIdSeeded_ = false;  // waves/ counted once; see seedReadingId
   uint32_t rowCount_ = 0;
   time_t   captureStart_ = 0;
   time_t   captureEnd_ = 0;

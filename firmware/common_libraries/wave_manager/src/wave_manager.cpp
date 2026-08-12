@@ -24,6 +24,7 @@ static const char *kImuCsvHeader =
 
 void WaveManager::begin(void) {
   s_self = this;
+  seedReadingId();
   imu_.setRowSink(&WaveManager::rowSinkTrampoline);
   imuOk_ = imu_.begin(Serial);
   if (imuOk_) {
@@ -192,6 +193,55 @@ void WaveManager::onRow(const ImuRow &r) {
 }
 
 // -----------------------------------------------------------------------------
+// Reading ID continuity.
+//
+// readingID_ lives in RAM only, so before this it restarted at 0 on every reboot -
+// and a watchdog reset is a reboot. Two captures then went out with the same
+// reading_ID, which is why readings.h says the join key is (buoy, ts_start).
+//
+// The fix is the one sd_writer already plays with logCount and readings/: count what
+// is on the card at boot and continue from there. The card is the state that survives
+// the reset. Each capture owns exactly one folder under waves/, so the folder count IS
+// the number of captures taken - subject to the same caveat as logCount, that emptying
+// the card restarts the numbering.
+// -----------------------------------------------------------------------------
+uint16_t WaveManager::countSessionDirs(void) {
+  SdFat &card = sd_writer.card();
+  if (!card.exists(wave_log_dir)) return 0;   // first capture on a fresh card
+
+  File dir;
+  if (!dir.open(wave_log_dir, O_RDONLY)) return 0;
+
+  uint16_t n = 0;
+  File entry;
+  // Directories only: results.csv sits in this same folder, and counting it would
+  // shift every ID by one from the first capture that wrote it onwards.
+  while (entry.openNext(&dir, O_RDONLY)) {
+    if (entry.isDir() && !entry.isHidden()) n++;
+    entry.close();
+    IWatchdog.reload();  // a card with hundreds of sessions must not trip the watchdog
+  }
+  dir.close();
+  return n;
+}
+
+// One-shot. Called from begin(), and retried at the next capture: begin() runs after
+// sd_writer.begin(), but if the card did not come up there the count would silently
+// read 0 and restart the numbering - exactly the failure this replaces. Leaving the
+// flag clear means the next capture with a working card still picks up where the
+// card left off.
+void WaveManager::seedReadingId(void) {
+  if (readingIdSeeded_ || !sd_writer.active) return;
+
+  readingID_ = countSessionDirs();
+  readingIdSeeded_ = true;
+  if (debug_serial) {
+    Serial.print("WaveManager: "); Serial.print(readingID_);
+    Serial.println(" sessions on card - next reading_ID is one past that");
+  }
+}
+
+// -----------------------------------------------------------------------------
 // Capture: stream the IMU FIFO for wave_measurement_duration.
 // -----------------------------------------------------------------------------
 uint8_t WaveManager::takeReading(void) {
@@ -212,6 +262,7 @@ uint8_t WaveManager::takeReading(void) {
     return 2;
   }
 
+  seedReadingId();  // no-op once done; covers a card that was not up at begin()
   readingID_++;
   rowCount_ = 0;
   gpsRowsWritten_ = 0;

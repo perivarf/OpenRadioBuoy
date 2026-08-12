@@ -1,18 +1,35 @@
 #include "sd_writer.h"
+#include "TimeLib.h"
 
 
 SDWriter sd_writer;
 
 /*
-  Initialising SDWriter, and file opening functions. 
+  Initialising SDWriter, and file opening functions.
 
   File functions return the following error codes
   Error codes:
     0 - Everything works as intended
     1 - SD card reader failed to open
-    2 - User tries to either open an already opened file, or 
+    2 - User tries to either open an already opened file, or
         write to nonexisting file
 */
+
+/*
+  SdFat calls this when a file is CREATED (all three stamps - create, access, write -
+  are set from it) and again on every sync() */
+static void sdDateTimeCallback(uint16_t *date, uint16_t *time){
+  time_t t = now();
+
+  if (year(t) < 1980){
+    *date = FS_DATE(1980, 1, 1);
+    *time = FS_TIME(0, 0, 0);
+    return;
+  }
+
+  *date = FS_DATE(year(t), month(t), day(t));
+  *time = FS_TIME(hour(t), minute(t), second(t));
+}
 
 uint32_t SDWriter::countFilesInDirectory(const char * dirName){
   // Reads all files in given directory
@@ -51,6 +68,9 @@ bool SDWriter::begin(void){
   SPI.setMISO(SPI_MISO_PIN);
   SPI.setSCLK(SPI_SCK_PIN);
   SPI.begin();
+
+  // To enable timestamped files
+  FsDateTime::setCallback(sdDateTimeCallback);
 
   SD_fail = !SD.begin(SdSpiConfig(SPI_CS_SD_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPI_MHZ), &SPI));
 
