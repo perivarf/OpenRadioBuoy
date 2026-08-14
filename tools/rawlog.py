@@ -65,6 +65,9 @@ class RawCapture:
         # potensielt feiltolket, så den er kuttepunktet, ikke bare en teller.
         self.first_write_fail_n = None
         self.unknown_tags = {}
+        # Der parsingen stoppet fordi resten av fila ikke er fangstens egen. Se
+        # lesesløyfa: (byte-offset, grunn), eller None når fila ble lest helt ut.
+        self.tail_at = None
 
     def trustworthy_upto(self):
         """Antall accel-samples som kan brukes. len(acc) når ingenting gikk tapt."""
@@ -110,12 +113,27 @@ def read(path):
     with open(path, "rb") as f:
         buf = f.read()
     cap = RawCapture(read_header(buf))
+    cap.file_bytes = len(buf)
     wb, sb = cap.word_bytes, cap.sync_bytes
 
     acc_raw, gyr_raw, quat_raw = [], [], []
     acc_idx_at, acc_t_at = [], []      # sync-punkter for accel-tidsaksen
     acc_n = gyr_n = 0
     gyr_after_acc, quat_after_acc = [], []   # accel-teller ved hvert gyro/quat-ord
+
+    # HALEN. En avbrutt fangst rekker aldri truncate(), så fila står igjen på hele
+    # den preallokerte lengden, og det som ligger etter siste skrevne blokk er det
+    # som lå i de klyngene FØR - som regel en tidligere økts raw.bin. Den halen har
+    # gyldige tagger og dekoder til pene sampler; uten en vakt her ville en avbrutt
+    # 18-minutters fangst blitt lest som 30 minutter, der de siste tolv er en annen
+    # måling. Nullstilt hale er det ufarlige tilfellet - den blir ukjente tagger.
+    #
+    # To ting avslører den, og begge er ting fangstens egen strøm aldri gjør:
+    # en sync-post der tiden eller accel-telleren går BAKOVER, og en lang rekke
+    # ukjente tagger på rad (i fangsten er hvert ord et av tre kjente).
+    MAX_UKJENT_PAA_RAD = 64
+    ukjent_paa_rad = 0
+    siste_ms = siste_an = None
 
     o = HEADER_BYTES
     n = len(buf)
@@ -125,6 +143,12 @@ def read(path):
             if o + sb > n:
                 break                  # avkortet hale
             t_us, a_n, ms, nw, flags = struct.unpack_from("<IIIHH", buf, o + 1)
+            if siste_ms is not None and (ms < siste_ms or a_n < siste_an):
+                cap.tail_at = (o, f"sync gikk bakover: {ms} ms / accel {a_n} "
+                                  f"etter {siste_ms} ms / accel {siste_an}")
+                break
+            siste_ms, siste_an = ms, a_n
+            ukjent_paa_rad = 0
             cap.sync.append(dict(t_us=t_us, accel_n=a_n, millis=ms,
                                  n_words=nw, flags=flags,
                                  fifo_ovf=bool(flags & FLAG_FIFO_OVF),
@@ -144,15 +168,23 @@ def read(path):
         p = buf[o + 1:o + wb]
         if tag == TAG_ACC:
             acc_raw.append(struct.unpack("<hhh", p)); acc_n += 1
+            ukjent_paa_rad = 0
         elif tag == TAG_GYR:
             gyr_raw.append(struct.unpack("<hhh", p)); gyr_n += 1
             gyr_after_acc.append(acc_n)
+            ukjent_paa_rad = 0
         elif tag == TAG_SFLP:
             x, y, z = struct.unpack("<HHH", p)
             quat_raw.append((x, y, z))
             quat_after_acc.append(acc_n)
+            ukjent_paa_rad = 0
         else:
             cap.unknown_tags[tag] = cap.unknown_tags.get(tag, 0) + 1
+            ukjent_paa_rad += 1
+            if ukjent_paa_rad >= MAX_UKJENT_PAA_RAD:
+                cap.tail_at = (o - (ukjent_paa_rad - 1) * wb,
+                               f"{ukjent_paa_rad} ukjente tagger på rad")
+                break
         o += wb
 
     # Accel-tidsaksen: lineær mellom sync-punktene, som er (accel_n, t_us)-par.
@@ -214,11 +246,18 @@ def summary(cap):
     if len(cap.sync) > 1:
         d = np.diff([s["millis"] for s in cap.sync])
         # Hodrommet MÅ regnes fra fangstens egen ordrate, ikke stå som en konstant:
-        # 512 ord er 427 ms ved 480 Hz men bare 237 ms ved 960, og en fast tekst ville
-        # sagt at en 300 ms stall var ufarlig nettopp i den konfigurasjonen der den
+        # 256 ord er 213 ms ved 480 Hz men bare 118 ms ved 960, og en fast tekst ville
+        # sagt at en 150 ms stall var ufarlig nettopp i den konfigurasjonen der den
         # ikke er det. Ordraten er accel + gyro + SFLP, hver på sin ODR.
+        #
+        # DYBDEN ER 256, ikke 512. Sto som 512 fram til 2026-08-14, utledet av at
+        # nivåfeltet i FIFO_STATUS er 9 bits - men bufferet er 1.5 kB data med 6
+        # databyte per nivå (DS13476 rev 5, avsnitt 6.10), altså 1536/6 = 256. Nivået
+        # metter på nøyaktig 256 i alle fangstene her. Med 512 var hvert hodroms-tall
+        # dobbelt så raust som virkeligheten, og stall som FAKTISK mistet data ble
+        # rapportert som innenfor.
         words = 2.0 * cap.imu_odr_hz + cap.sflp_odr_hz
-        hodrom = 512.0 / words * 1000.0 if words > 0 else float("nan")
+        hodrom = 256.0 / words * 1000.0 if words > 0 else float("nan")
         over = int((d > hodrom).sum())
         lines.append(f"drenering: median {np.median(d):.0f} ms, maks {d.max():.0f} ms "
                      f"(FIFO-hodrom {hodrom:.0f} ms ved {words:.0f} ord/s)")
@@ -227,6 +266,12 @@ def summary(cap):
                          f"over hodrommet - der kan samples ha gaatt tapt")
     if cap.unknown_tags:
         lines.append(f"ukjente tagger: {cap.unknown_tags}")
+    if cap.tail_at:
+        o, grunn = cap.tail_at
+        lines.append(f"avbrutt fangst: lest {o} B av {cap.file_bytes} - resten er "
+                     f"ikke denne fangstens ({grunn}).")
+        lines.append(f"                Tallene over gjelder de {len(cap.acc)} "
+                     f"samplene som ble skrevet, ikke den preallokerte lengden.")
     # Til slutt, og ikke som en fotnote: dette er den ene feilen som gjør at tallene
     # over kan være oppdiktet. Ukjente tagger like over er som regel bekreftelsen.
     if cap.n_write_fail:

@@ -265,22 +265,19 @@ uint8_t ImuSampler::readFifoWord(uint8_t payload[6]) {
 }
 
 // Raw log. Little-endian, layout documented at wave_raw_log in wave_config.h.
+//
+// APPEND ONLY - ingen skriving herfra. Bufferet rommer en hel drenering
+// (kRawBufBytes), og flushRaw() kalles av update() ETTER at pop-løkka har tømt
+// FIFO-en. Det er hele poenget: et sd-kort som stanser 800 ms skal treffe en tom
+// FIFO med 256 ledige nivåer, ikke en halvtømt med ~128. Se kRawBufBytes.
 void ImuSampler::rawAppend(const uint8_t *p, uint8_t n) {
   if (!rawSink_) return;
-  for (uint8_t i = 0; i < n; i++) {
-    rawBuf_[rawLen_++] = p[i];
-
-    // Check if rawBuf_ is full
-    if (rawLen_ >= kRawBlockBytes) {
-      
-
-      if (!rawSink_(rawBuf_, rawLen_)) {
-        nRawWriteFail_++;
-        rawWriteFailPending_ = true;
-      }
-      rawLen_ = 0;
-    }
-  }
+  // Nødventil, ikke normal vei: bufferet er dimensjonert for verste drenering, så
+  // dette kan bare skje om FIFO-en leverer mer enn kFifoDepthWords - altså om den
+  // konstanten er feil igjen. Da er en skriving midt i løkka bedre enn å skrive
+  // utenfor bufferet, og static_assert-en over er det som skal fange det først.
+  if (rawLen_ + n > kRawBufBytes) flushRaw();
+  for (uint8_t i = 0; i < n; i++) rawBuf_[rawLen_++] = p[i];
 }
 
 // The FIFO word exactly as it came off the bus. The
@@ -582,6 +579,16 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
       lastUnknownTag_ = tag;
     }
   }
+
+  // HER, og bare her, skrives dreneringen til kortet. FIFO-en er nettopp tømt, så
+  // dette er det ene punktet i runden der et sd-stall møter fullt overskrivnings-
+  // budsjett. Lå skrivingen inne i løkka over - som den gjorde til 2026-08-14 - startet
+  // stallen med FIFO-en halvfull og halve budsjettet allerede brukt.
+  //
+  // Rekkefølgen mot readFifoStatus() under er ikke tilfeldig: den lesingen skal skje
+  // ETTER skrivingen, for det er under skrivingen en overflow nå oppstår, og
+  // FIFO_OVR_LATCHED er det eneste sporet den etterlater seg.
+  flushRaw();
 
   lastDrainMs_ = millis();
 

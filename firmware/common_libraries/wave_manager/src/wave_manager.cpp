@@ -126,10 +126,13 @@ bool WaveManager::rawSinkTrampoline(const uint8_t *data, uint16_t len) {
   return s_self ? s_self->onRawBlock(data, len) : false;
 }
 
-// One filled block from the raw log. No sync() here on purpose: this runs inside the
-// FIFO drain, and a per-block flush to the sd-card is exactly the stall the FIFO cannot
-// absorb. SdFat's own buffering plus the sync in stopSession is enough - a capture cut
-// by a reset loses the tail of the raw file, which is the same bargain imu.csv makes.
+// One drain's worth of the raw log. No sync() here on purpose: SdFat's own buffering
+// plus the sync in stopSession is enough - a capture cut by a reset loses the tail of
+// the raw file, which is the same bargain imu.csv makes.
+//
+// Since 2026-08-14 this no longer runs inside the FIFO pop loop; the sampler buffers a
+// whole drain and calls the sink once the FIFO is empty (kRawBufBytes in wave_config.h).
+// The write can still stall the card - it just no longer does so with words waiting.
 //
 // The return value is not decoration. write() reports a SHORT write (sd-card full, I/O
 // error) by returning fewer bytes, and discarding that was the difference between a
@@ -186,10 +189,27 @@ void WaveManager::onRow(const ImuRow &r) {
   imuFile_.print(r.fifoOvf); imuFile_.print(',');
   imuFile_.print(r.vaccFir, 5); imuFile_.print(','); imuFile_.println(r.vaccSflpFir, 5);
 
+  // Only a flag here. This function is called from closeWindow(), which runs inside
+  // the FIFO pop loop - see imu_sampler.cpp - so the sync itself is deferred to
+  // syncImuCsvIfPending() below. The prints above stay: they land in SdFat's 512-byte
+  // cache and cost an ordinary single-block write, which is not the stall worth moving.
   if (++rowsSinceSync_ >= wave_csv_sync_rows) {
-    imuFile_.sync();  // periodic flush; NOT per row (that would stall the FIFO)
+    imuSyncPending_ = true;
     rowsSinceSync_ = 0;
   }
+}
+
+// The deferred half of the cadence above. Called from the capture loop right after
+// imu_.update() returns, i.e. with the FIFO just drained - the same reasoning that
+// moved the raw-log write out of the pop loop (kRawBufBytes in wave_config.h).
+//
+// A stall here can still overrun the FIFO; what it cannot do any more is start with
+// half the budget already spent. FIFO_OVR is latched, so the loss is picked up by the
+// next drain's status read either way and nothing goes unreported.
+void WaveManager::syncImuCsvIfPending(void) {
+  if (!imuSyncPending_) return;
+  imuSyncPending_ = false;
+  if (imuCsvActive_) imuFile_.sync();
 }
 
 // -----------------------------------------------------------------------------
@@ -301,6 +321,7 @@ uint8_t WaveManager::takeReading(void) {
     // the two answer one question together - whether the capture is still running,
     // and whether the drain is keeping up while it does.
     imu_.update(Serial, wave_measurement_duration - elapsed);  // drain the FIFO (stay tight)
+    syncImuCsvIfPending();          // deferred from onRow: never with the FIFO half full
     serviceGps(elapsed);            // non-blocking GPS poll -> one gps.csv row per fix
     IWatchdog.reload();
     delay(2);  // let the FIFO refill; keeps the drain loop from spinning hot
@@ -325,8 +346,13 @@ uint8_t WaveManager::takeReading(void) {
     // cut at the last full block and the final records are lost. Detaching the sink
     // first stops a late drain from appending past the truncation point.
     if (rawFile_) {
-      imu_.setRawSink(nullptr); IWatchdog.reload();
+      // Flush FØR sinken kobles fra, ikke etter: flushRaw() skriver gjennom rawSink_
+      // og gjør ingenting uten den, så den gamle rekkefølgen kastet stille det siste
+      // delvise bufferet - opptil kRawBufBytes, altså en drenerings verdi av data og
+      // sync-posten som beskriver den. Ingen drenering kan smyge seg inn mellom de to
+      // linjene: INT1-rutinen setter bare et flagg, den tømmer ingenting.
       imu_.flushRaw();          IWatchdog.reload();
+      imu_.setRawSink(nullptr); IWatchdog.reload();
       rawFile_.truncate();      IWatchdog.reload();
       rawFile_.sync();          IWatchdog.reload();
       rawFile_.close();         IWatchdog.reload();
@@ -436,7 +462,15 @@ bool WaveManager::startSession(void) {
   }
 
   if (imuCsvActive_) { imuFile_.println(kImuCsvHeader); imuFile_.sync(); }
-  gpsFile_.println("rel_ms,utc_epoch,lat_e7,lng_e7,gspeed_mms,head_e5,hacc_mm,fix,sats");
+  // Decoded SI units, one column per NAV-PVT channel the analysis uses. This is
+  // the format postprocess.py and mapplot.py read as they stand - vUp is what
+  // the GPS elevation spectrum is built from, and hAccuracy/sats are what the
+  // report quotes for fix quality. See serviceGps for the cost this carries.
+  // Kolonnene er de gamle minus alt_msl/vN/vE: ingen leser dem. Høyden er GPS-
+  // høyde og sier ikke noe om bølgene, og horisontalhastigheten ligger allerede
+  // i gspeed. vUp er den ene hastighetskanalen analysen faktisk bygger på.
+  gpsFile_.println("rel_ms,utc,lat,lon,gspeed,vUp,head,"
+                   "sAccuracy,hAccuracy,vAccuracy,pdop,fix,sats");
   sessionFile_.println("key,value");
   gpsFile_.sync();
   writeSessionAnchor();  // anchor keys (sessionFile_ kept open)
@@ -452,7 +486,8 @@ bool WaveManager::startSession(void) {
   }
 
   rowsSinceSync_ = 0;
-  if (debug_serial) { Serial.print("WaveManager: logging session to "); Serial.println(sessionDir_); }
+  imuSyncPending_ = false;   // a request left over from the previous session is stale
+  if (debug_serial) { Serial.print("WaveManager: logging session to ");Serial.println(sessionDir_); }
   return true;
 }
 
@@ -636,14 +671,38 @@ void WaveManager::serviceGps(uint32_t relMs) {
   gps_manager.update();
   if (!csvActive_ || !gpsFile_ || !gps_manager.freshFix()) return;
   const UBX_PVT &f = gps_manager.lastFix();
-  gpsFile_.print(relMs);            gpsFile_.print(',');
-  gpsFile_.print((uint32_t)now());  gpsFile_.print(',');  // RTC UTC epoch
-  gpsFile_.print(f.lat_e7);         gpsFile_.print(',');
-  gpsFile_.print(f.lng_e7);         gpsFile_.print(',');
-  gpsFile_.print(f.gSpeed_mms);     gpsFile_.print(',');
-  gpsFile_.print(f.headMot_e5);     gpsFile_.print(',');
-  gpsFile_.print(f.hAcc_mm);        gpsFile_.print(',');
-  gpsFile_.print(f.fixType);        gpsFile_.print(',');
+  // Scaled to SI here, in the writer, and not kept scaled in UBX_PVT: the module's
+  // integers stay exact for everything else that reads lastFix() (the radio message
+  // carries lat/lng_e7 as they are), and only the CSV pays for the conversion.
+  //
+  // The decimals are not cosmetic. 6 on lat/lon is ~0.1 m, one digit finer than the
+  // receiver resolves; 4 on the velocities keeps mm/s, which is the quantum vUp
+  // arrives in and the floor of the elevation spectrum built from it. Trimming
+  // either would throw away resolution the module actually delivered.
+  //
+  // COST: 12 float conversions per fix, ~7 fixes/s. That is real work in the drain
+  // loop, but it happens between FIFO reads and not inside one, and it is the price
+  // of a gps.csv the analysis chain reads without a conversion step in between.
+  gpsFile_.print(relMs);                    gpsFile_.print(',');
+  // UTC as HHMMSSCC, the receiver's own time-of-day - the date belongs to the
+  // session (ses.csv start_utc_iso) and is not repeated on every row.
+  gpsFile_.print((uint32_t)f.hour * 1000000UL +
+                 (uint32_t)f.minute * 10000UL +
+                 (uint32_t)f.second * 100UL);
+  gpsFile_.print(',');
+  gpsFile_.print(f.lat_e7 * 1e-7, 6);       gpsFile_.print(',');
+  gpsFile_.print(f.lng_e7 * 1e-7, 6);       gpsFile_.print(',');
+  gpsFile_.print(f.gSpeed_mms / 1000.0, 4); gpsFile_.print(',');
+  // vUp, not velD: the analysis works in an up-positive elevation, and the sign
+  // flip belongs here - at the one place the column is named - rather than in
+  // every reader that has to remember which way NED points.
+  gpsFile_.print(-f.velD_mms / 1000.0, 4);  gpsFile_.print(',');
+  gpsFile_.print(f.headMot_e5 * 1e-5, 2);   gpsFile_.print(',');
+  gpsFile_.print(f.sAcc_mms / 1000.0, 2);   gpsFile_.print(',');
+  gpsFile_.print(f.hAcc_mm / 1000.0, 2);    gpsFile_.print(',');
+  gpsFile_.print(f.vAcc_mm / 1000.0, 2);    gpsFile_.print(',');
+  gpsFile_.print(f.pDOP_e2 * 0.01, 2);      gpsFile_.print(',');
+  gpsFile_.print(f.fixType);                gpsFile_.print(',');
   gpsFile_.println(f.numSV);
   gpsRowsWritten_++;
 }

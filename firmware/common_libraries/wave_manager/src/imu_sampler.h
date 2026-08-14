@@ -227,7 +227,7 @@ class ImuSampler {
   LSM6DSV16XSensor imu_;
   ImuRowSink rowSink_ = nullptr;
   RawBlockSink rawSink_ = nullptr;
-  uint8_t  rawBuf_[kRawBlockBytes];
+  uint8_t  rawBuf_[kRawBufBytes];
   uint16_t rawLen_ = 0;
   uint32_t nRawWriteFail_ = 0;
   

@@ -35,7 +35,13 @@ static constexpr uint16_t wave_csv_sync_rows              {1024}; // File.sync()
 // The widths are worst case, as it is performed before the hot path, and truncated after
 
 static constexpr uint16_t wave_imu_row_bytes_max          {256};
-static constexpr uint16_t wave_gps_row_bytes_max          {96};
+// 96 held the compact integer gps.csv (~60 B/row). The decoded 16-column format is
+// ~95 B on a real fix and 139 in the worst case every field can print (signed
+// lat/lon at 6 decimals, four velocities at 4, three accuracies that are uint32
+// millimetres), so the old budget would be outgrown MID-CAPTURE - and that is the
+// one failure preAllocate cannot absorb: see the extent comment in wave_manager.cpp
+// startSession, and the 2026-08-12 captures that died ~7 min in.
+static constexpr uint16_t wave_gps_row_bytes_max          {160};
 
 static constexpr char     wave_log_dir[]     = "waves";  // parent dir for session folders
 #define WAVE_IMU_PREFIX      "imu"
@@ -162,19 +168,53 @@ static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 //
 // The budget every value here is spent against: accel + gyro + SFLP are batched at
 // their own ODRs, so the FIFO takes 2*kImuOdrHz + kSflpOdrHz words a second - 2160 at
-// 960 Hz. The buffer is 512 words deep (FIFO_STATUS' level field is 9 bits), so the
-// drain has 512/2160 = 237 ms before the oldest word is overwritten. At 128 words the
-// watermark burst arrives every ~59 ms, a quarter of that.
+// 960 Hz, 1200 at 480. Divided into kFifoDepthWords that gives the time the drain has
+// before the oldest word is overwritten: 118 ms at 960 Hz, 213 ms at 480. At 64 words
+// the watermark burst arrives every ~30 ms (960 Hz) / ~53 ms (480), well inside either.
+//
+// NB: INT1 er ikke her for responstidens skyld - løkka i wave_manager kaller update()
+// hver ~2 ms uansett (delay(2)), så ren polling ville drenert like raskt. Det INT1
+// gjør, er å HOLDE IGJEN dreneringen til kFifoWatermark ord har samlet seg. Det er en
+// batching-mekanisme, og vaktmerket er batchstørrelsen. Se kFifoWatermark.
 //
 // false falls back to pure polling
 // -----------------------------------------------------------------------------
 
 static constexpr bool kImuUseInt1 = true;
 
-// Watermark in FIFO words. Scales with ODR to keep the drain cadence ~constant.
-// FIFO_Set_Watermark_Level takes a uint8_t (FIFO_CTRL1.WTM is 8 bits), so this must
-// stay under 256 even though the buffer itself is 512 words deep.
-static constexpr uint16_t kFifoWatermark = (kImuOdrHz >= 480) ? 128 : 64;
+// FIFO-dybden i ord. IKKE 512, som denne fila hevdet fram til 2026-08-14:
+//
+//   "The LSM6DSV embeds 1.5 KB of data in FIFO (up to 4.5 KB with the compression
+//    feature enabled)"                          - DS13476 rev 5, section 6.10, p.42
+//
+// Hvert nivå bærer 6 databyte (tag-byten leses ut i tillegg, derav 7 byte per ord
+// over bussen), så 1536 / 6 = 256 nivåer. De 9 bitene i FIFO_STATUS' nivåfelt er der
+// for de KOMPRIMERTE modusene (4.5 kB = 3x så mange sampler); de sier ingenting om
+// dybden i denne konfigurasjonen, og å utlede 512 av feltbredden var nettopp feilen.
+//
+// Målt, ikke bare lest: nivået metter på nøyaktig 256 i tre uavhengige fangster
+// (20260813_182728 og begge 20260814-øktene), truffet 12-18 ganger hver, aldri over.
+// Det halverer hvert timing-budsjett under denne overskriften.
+static constexpr uint16_t kFifoDepthWords = 256;
+
+// Watermark in FIFO words. FIFO_Set_Watermark_Level takes a uint8_t (FIFO_CTRL1.WTM
+// is 8 bits), so this must stay under 256 - which is the whole buffer, not half of it.
+//
+// Dette tallet er ikke bare en dreneringstakt: det er det STÅENDE nivået i FIFO-en, og
+// dermed hvor lite ledig plass som er igjen når noe som helst blokkerer. Ved 480 Hz og
+// 1200 ord/s:
+//
+//   WTM 128 -> 128 ledige nivåer = 107 ms budsjett; tapt INT1-flanke (80 ms) legger
+//              96 ord til de 128, altsaa 224 av 256, og 27 ms igjen til sd-skrivingen.
+//   WTM  64 -> 192 ledige nivåer = 160 ms budsjett; tapt flanke gir 160 av 256.
+//
+// Ved 960 Hz var 128 direkte ugyldig: 128 + 80 ms * 2160 ord/s = 301 ord i en FIFO som
+// rommer 256. Én tapt flanke garanterte tap. Assert-en under er skrevet om for å fange
+// nettopp det - den gamle så bort fra det stående nivået og slapp det gjennom.
+//
+// Prisen er halvert dreneringsintervall (53 ms ved 480 Hz) og dobbelt så mange
+// sync-poster i råloggen: 17 byte per drenering, 1.9 % -> 3.8 % av filstørrelsen.
+static constexpr uint16_t kFifoWatermark = 64;
 static_assert(kFifoWatermark > 0 && kFifoWatermark < 256,
               "FIFO_CTRL1.WTM is 8 bits - a larger watermark would be truncated");
 
@@ -184,19 +224,12 @@ static constexpr uint8_t kInt1CtrlReg = 0x0D;
 static constexpr uint8_t kInt1FifoTh  = 0x08;  // bit 3: FIFO watermark reached
 
 // Deadline after which update() drains whether or not INT1 fired: the interrupt is a
-// hint about when to drain and, never whether. A single lost edge would otherwise
-// stop the capture permanently.
+// hint about when to drain and never whether. A single lost edge would otherwise stop
+// the capture permanently - measured 2026-08-04, 0 Hz for the rest of the session.
 //
-// Sized against the 237 ms overwrite budget above, not against the watermark cadence:
-// this is what a lost edge costs, and whatever is left has to absorb the sd-card write
-// that follows. At the old 150 ms a single missed edge spent 63 % of the buffer before
-// the drain even started, leaving 87 ms - about one card stall - and the capture then
-// overflowed. 80 ms keeps two thirds of the budget in reserve, and still sits well
-// above the ~59 ms watermark burst, so it stays a fallback and does not become the
-// normal trigger.
-// (The word rate it is checked against needs kSflpOdrHz, which is declared with the
-// rest of the fusion settings further down - the static_assert lives there.)
-static constexpr uint32_t kFifoPollFallbackMs = 80;
+// kFifoPollFallbackMs utledes av ordraten, og ordraten trenger kSflpOdrHz, som
+// deklareres med fusjonsinnstillingene lenger ned. Konstanten, utledningen og begge
+// grensene står derfor samlet der. Søk opp kFifoPollFallbackMs.
 
 // FIFO_STATUS1/FIFO_STATUS2. Read as a 2-byte burst rather than through the wrapper:
 // lsm6dsv16x_fifo_status_get drops FIFO_OVR_LATCHED, and that bit is reset by the very
@@ -280,10 +313,27 @@ static constexpr uint8_t  kRawWordBytes      = 7;
 static constexpr uint8_t  kRawSyncBytes      = 17;
 static constexpr uint8_t  kRawHeaderBytes    = 32;
 static constexpr uint16_t kRawBlockBytes     = 512;   // SD block; buffered, not per word
+
+// Råbufferet må romme en HEL drenering, ikke bare en SD-blokk.
+//
+// Skrivingen lå før inne i pop-løkka: bufferet fyltes opp midt i tømmingen av FIFO-en
+// og ble skrevet der og da. Stanset kortet i det øyeblikket - og det gjør det, 700-900
+// ms om gangen, se 2026-08-14-analysen - så sto det fortsatt uhentede ord igjen i
+// FIFO-en, og halve overskrivningsbudsjettet var allerede brukt før klokka begynte å
+// telle. Nå hentes alle ordene først og skrives etterpå, så stallen treffer en TOM
+// FIFO: 256 ledige nivåer i stedet for ~128, altså 213 ms i stedet for 107 ved 480 Hz.
+//
+// Det fjerner ikke stallen (800 ms > 213 ms), det halverer tapet per hendelse.
+static constexpr uint16_t kRawBufBytes =
+    (uint16_t)kFifoDepthWords * kRawWordBytes + kRawSyncBytes;   // 256*7 + 17 = 1809
+
 static_assert(kRawSyncTag > 0x1F,
               "the sync tag must not collide with a FIFO tag_sensor (top 5 bits)");
 static_assert(kRawBlockBytes >= kRawSyncBytes + kRawWordBytes,
               "raw block must hold at least a sync record plus one word");
+static_assert(kRawBufBytes >= (uint32_t)kFifoDepthWords * kRawWordBytes + kRawSyncBytes,
+              "rawBuf_ must hold one full drain - a flush inside the pop loop is the "
+              "very thing this buffer exists to avoid");
 
 // Sync-record flag bits; FifoOvf means the sensor
 // overwrote words - the file is intact, a stretch of time is missing. WriteFail means
@@ -538,12 +588,47 @@ static constexpr uint8_t kSflpRotationTag = 0x13;          // FIFO tag: SFLP rot
 static constexpr uint32_t kFifoWordsPerSec =
     2u * (uint32_t)kImuOdrHz + (kEnableSflp ? (uint32_t)kSflpOdrHz : 0u);
 
-// Deferred from the INT1 section: a lost edge costs kFifoPollFallbackMs of undrained
-// FIFO, and that alone must not fill the 512-word buffer - what is left over is the
+// Deferred from the INT1 section: it is kFifoWordsPerSec above that it needs.
+//
+// Fristen er «tiden det tar å samle to vaktmerker til». En fast verdi klarer ikke to
+// ODR-er: 80 ms lot 480 Hz stå igjen med 96 ord etter en tapt flanke, men 960 Hz med
+// 19 - og senket man den til 50 for å redde 960, kom den under vaktmerkets egen takt
+// ved 480 og ble den normale utløseren i stedet for reserven. Utledet av ordraten
+// forsvinner begge problemene: etterfyllingen lander på
+//
+//     kFifoWatermark + 2*kFifoWatermark = 192 av 256 nivåer
+//
+// UANSETT ODR - 106 ms ved 480 Hz, 59 ms ved 960 - så det som er igjen til sd-kortet er
+// alltid en fjerdedel av bufferet. Begge static_assert-ene under er dermed oppfylt per
+// konstruksjon, og står igjen som dokumentasjon av grensene framfor som feller.
+//
+// Merk at formen også setter et tak på vaktmerket: 3*kFifoWatermark må under
+// kFifoDepthWords, altså WTM <= 85. Den øvre assert-en er det som håndhever det.
+static constexpr uint32_t kFifoPollFallbackMs =
+    2u * (uint32_t)kFifoWatermark * 1000u / kFifoWordsPerSec;
+
+// A lost edge costs kFifoPollFallbackMs of undrained FIFO on top of whatever was
+// already there, and that alone must not fill the buffer - what is left over is the
 // margin the sd-card writes have to fit inside.
-static_assert(kFifoPollFallbackMs * kFifoWordsPerSec < 512u * 1000u,
-              "a lost INT1 edge would by itself overrun the 512-word FIFO - lower "
-              "kFifoPollFallbackMs, or batch fewer words per second");
+//
+// De to leddene er begge nødvendige, og det er den lærdommen denne assert-en bærer:
+//   * grensa er kFifoDepthWords (256), ikke 512 - forrige utgave godtok dobbelt så mye
+//     som bufferet rommer, og ville sluppet gjennom nettopp det den skulle fange.
+//   * kFifoWatermark må være med. Uten det leddet var 960 Hz med WTM 128 lovlig, mens
+//     regnestykket er 128 + 173 = 301 ord i en FIFO som rommer 256: én tapt flanke
+//     garanterte tap. Vaktmerket ER det stående nivået, ikke bare en dreneringstakt.
+static_assert(kFifoWatermark + kFifoPollFallbackMs * kFifoWordsPerSec / 1000u
+                  < (uint32_t)kFifoDepthWords,
+              "watermark + a lost INT1 edge would by itself overrun the FIFO - lower "
+              "kFifoWatermark or kFifoPollFallbackMs, or batch fewer words per second");
+
+// kFifoPollFallbackMs har også en NEDRE grense, som ikke er åpenbar: faller den under
+// vaktmerkets egen takt, slutter den å være en reserve og blir den normale utløseren.
+// Da dreneres det på tid i stedet for på fyllingsgrad, og hver drenering koster en
+// sync-post i råloggen uansett hvor få ord den hentet.
+static_assert(kFifoPollFallbackMs * kFifoWordsPerSec / 1000u > kFifoWatermark,
+              "kFifoPollFallbackMs fires before the watermark does - it would become "
+              "the normal drain trigger instead of the fallback it is meant to be");
 
 // Just a test that if we are to use SFLP as basis for PSD, then we need to have SFLP enabled.
 static_assert(kEnableSflp || !wave_use_sflp,

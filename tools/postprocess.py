@@ -86,7 +86,10 @@ Krever: numpy. (scipy kun for --cutoff auto, matplotlib kun for --plot.)
 import argparse
 import math
 import os
+import subprocess
 import sys
+import time
+from collections import namedtuple
 from glob import glob
 
 import numpy as np
@@ -255,6 +258,35 @@ DETREND = "linear"
 #   "mean" = firmware-tro gjennomsnitt av segment (default, uendret oppførsel)
 #   "fir"    = FIR-lavpass på 100 Hz-radene, deretter behold hver D-te
 DECIMATE_MODE = "fir"
+
+# --- Hvor vertikal-accelen kommer fra ----------------------------------------
+# To veier fram til den samme serien, og forskjellen er hvilken RATE AHRS-en så:
+#
+#   "csv"  Filteret replayes her, på radraten (100 Hz) - alt en imu.csv gir hvis
+#          man bare ser på ax/gy-kolonnene. Dette var den eneste veien før.
+#   "raw"  Kolonnen vacc_fir, der AHRS-en alt HAR kjørt på råstrømmen: om bord
+#          ved kAhrsRateHz, eller offline av raw_to_csv fra raw.bin. Serien er
+#          FIR-desimert til radrutenettet, samme trinn 1 som ax_mg.
+#   "auto" raw når kolonnen finnes, ellers csv.
+#
+# Valget er ikke kosmetisk. Målt på 20260813_182728 med firmware-innstillinger:
+# Hs 0.440 m fra vacc_fir (som treffer firmwarens egen ana.csv på 0.02 %) mot
+# 0.473 m fra replayet - +7.5 %. Under taperen 0.15-0.3 Hz er forskjellen ~1 %,
+# for avviket sitter i lavbåndet der attitydefeil dominerer. Derfor "auto" som
+# default: finnes fasiten i fila, er det den som skal brukes.
+#
+# Bare den ene metoden bytter kilde - den AHRS-en fangsten faktisk kjørte
+# (cfg.csv orientation_name). De andre radene i tabellen er fortsatt replay, og
+# er der nettopp for å kunne sammenlignes med den.
+VACC_SOURCE = "auto"
+
+# Metodene, i den rekkefølgen de står i tabellen, og nøkkelen hver av dem har
+# internt (psd_m, wp_m, tapers["m"], ...). Sto inline i write_ana; den listen er
+# nå én, for src_/rate_-nøklene under MÅ dekke nøyaktig de samme metodene.
+METHODS = (("madgwick", "m"), ("sflp", "s"), ("kalman", "k"),
+           ("nxp", "n"), ("mekf", "e"))
+# SFLP er ikke et AHRS vi kan kjøre: den kommer ferdig fra brikken (az_ned_sflp).
+AHRS_METHODS = tuple((n, k) for n, k in METHODS if n != "sflp")
 
 FIR_NTAP = fir.NTAP  # 129               # antall tap - som fir.rs' NTAP. MÅ være oddetall, se under
 
@@ -602,6 +634,21 @@ def wave_params(psd, seglen, fmax, taper):
     return dict(hs=hs, tz=tz, tc=tc, m0=m0, m2=m2, m4=m4)
 
 
+def ahrs_fra_cfg(orientation_name):
+    """cfg.csv orientation_name -> vår metodenøkkel.
+
+    Firmware skriver bare det WaveAhrs::kName gir: "Madgwick", "Kalman" eller
+    "SFLP". nxp og mekf kan derfor aldri komme herfra - de er alternativer man
+    ber om. "Kalman" er kalman.py og IKKE mekf.py: de to er samme algoritme, og
+    forskjellen mellom dem er tuningen i wave_config.h, som er nettopp det
+    MEKF-kolonnen finnes for å vise.
+
+    Delt med raw_to_csv.Params.ahrs_navn - regelen skal stå ett sted, ellers kan
+    rekonstruksjonen og analysen ende opp med å mene ulike ting om samme fangst."""
+    n = (orientation_name or "").strip().lower()
+    return "kalman" if n.startswith("kalman") else "madgwick"
+
+
 # --- Innlesing (med samme "_tmp"-hale-vern som postProcess) -------------------
 def resolve_paths(path):
     """Finn imu.csv + stamp + øktkatalog fra en katalog- eller filsti."""
@@ -635,53 +682,289 @@ def imu_col_names(idx):
     )
 
 
-def read_imu_rows(imu_path):
-    """Les imu.csv -> liste av dict per rad. Stopp ved ufullstendig rad eller
-    ikke-økende tid (hale etter en avbrutt/utruncert _tmp-fil)."""
-    with open(imu_path, "r") as f:
-        header = f.readline().rstrip("\n").split(",")
-        idx = {name: i for i, name in enumerate(header)}
-        cols = imu_col_names(idx)
-        need = ["win_start_ms", "ax_mg", "ay_mg", "az_mg", cols["azn"],
-                "gx_mdps", "gy_mdps", "gz_mdps", "braking"]
-        for nm in need:
-            if nm not in idx:
-                sys.exit(f"Mangler kolonne '{nm}' i {imu_path}")
-        has_q = all(c in idx for c in cols["q_sflp"])
-        rows = []
-        prev_t = None
-        for line in f:
-            fields = line.rstrip("\n").split(",")
-            if len(fields) < len(header):
-                break  # ufullstendig rad -> hale
-            try:
-                t = int(fields[idx["win_start_ms"]])
-            except ValueError:
-                break
-            if prev_t is not None and t <= prev_t:
-                break  # ikke-økende tid -> hale
-            prev_t = t
-            rows.append(dict(
-                t=t,
-                ax=float(fields[idx["ax_mg"]]),
-                ay=float(fields[idx["ay_mg"]]),
-                az=float(fields[idx["az_mg"]]),
-                azn=float(fields[idx[cols["azn"]]]),
-                gx=float(fields[idx["gx_mdps"]]),
-                gy=float(fields[idx["gy_mdps"]]),
-                gz=float(fields[idx["gz_mdps"]]),
-                braking=1 if fields[idx["braking"]].strip() == "1" else 0,
-                # fifo_ovf kom i build 55. Eldre økter mangler kolonnen -> 0,
-                # så gamle filer fortsatt leses uendret.
-                ovf=(1 if "fifo_ovf" in idx
-                     and fields[idx["fifo_ovf"]].strip() == "1" else 0),
-                # SFLP-quaternionen (on-chip). Brukes KUN til tilt-diagnostikken -
-                # vertikal-accelen tas fortsatt fra az_ned_sflp, som før. None hvis
-                # kolonnene mangler (eldre økter).
-                q=(tuple(float(fields[idx[c]]) for c in cols["q_sflp"])
-                   if has_q else None),
-            ))
+# Hvor mye av en strømmefil som var fangstens egen. grunn er None når fila ble
+# lest helt ut - da er de tre tallene bare bokføring.
+CsvKutt = namedtuple("CsvKutt", "rader lest total grunn")
+
+
+def _kutt_melding(path, k):
+    return (f"  {os.path.basename(path)}: {k.rader} hele rader, "
+            f"{k.total - k.lest} B hale forkastet ({k.grunn})")
+
+
+def read_csv_stream(path, time_col):
+    """Les en strømmet CSV (imu.csv / gps.csv) -> (idx, rader, CsvKutt).
+
+    DEN ENE PLASSEN hale-regelen står. Alle leserne under - og rawplot.py -
+    bruker denne, for regelen må ikke kunne gli fra hverandre mellom dem: to
+    verktøy som er uenige om hvor dataene slutter, gir to ulike Hs av samme økt.
+
+    En avbrutt fangst rekker aldri truncate(), så fila står igjen på hele den
+    preallokerte lengden, og alt etter siste skrevne rad er GAMMELT KORTINNHOLD -
+    binærsøppel fra filene som lå i de klyngene før. Derfor leses fila binært:
+    i tekstmodus dør lesingen på UnicodeDecodeError i den halen, altså FØR
+    hale-regelen under i det hele tatt får se en rad.
+
+    Tre ting avslutter dataene, og rekkefølgen er som den er fordi den billigste
+    sjekken tar de fleste tilfellene:
+      - feil antall felt   (raden ble kuttet midt i, eller det er ikke CSV)
+      - tid som ikke øker  (halen er en ELDRE kopi av samme fil - se rad 7483 i
+                            20260814_053720_gps.csv, der siste SD-blokk lå igjen
+                            i en utdatert utgave og hoppet 800 ms bakover)
+      - felt som ikke er tall
+
+    Radene kommer som lister av strenger; kallerne konverterer selv de
+    kolonnene de trenger."""
+    with open(path, "rb") as f:
+        data = f.read()
+    linjer = data.split(b"\n")
+    header = [c.decode("ascii", "replace") for c in linjer[0].rstrip(b"\r").split(b",")]
+    idx = {nm: i for i, nm in enumerate(header)}
+    if time_col not in idx:
+        return idx, [], CsvKutt(0, len(linjer[0]) + 1, len(data),
+                                f"mangler kolonnen '{time_col}'")
+
+    rader, brukt, forrige, grunn = [], len(linjer[0]) + 1, None, None
+    for ln in linjer[1:]:
+        if not ln.strip():
+            continue                       # tom linje (siste \n) - ikke en hale
+        fld = ln.rstrip(b"\r").split(b",")
+        if len(fld) != len(header):
+            grunn = "ufullstendig rad"
+            break
+        try:
+            t = float(fld[idx[time_col]])
+            rad = [v.decode("ascii") for v in fld]
+        except (ValueError, UnicodeDecodeError):
+            grunn = "ikke-numerisk felt"
+            break
+        if forrige is not None and t <= forrige:
+            grunn = f"tid gikk ikke fram ({t:.0f} etter {forrige:.0f})"
+            break
+        forrige = t
+        rader.append(rad)
+        brukt += len(ln) + 1
+    return idx, rader, CsvKutt(len(rader), brukt, len(data), grunn)
+
+
+def read_imu_rows(imu_path, meta=None):
+    """Les imu.csv -> liste av dict per rad. Hale-regelen ligger i
+    read_csv_stream; her er bare kolonnene.
+
+    meta: valgfri dict som fylles med opplysninger om FILA, ikke om radene -
+    foreløpig hvilken kolonne vacc_raw ble tatt fra. Den må ut, for navnet
+    varierer med filversjonen, og en melding om «vacc_fir» ville vært direkte
+    feil på en økt der fallbacken ble brukt."""
+    idx, rader, kutt = read_csv_stream(imu_path, "win_start_ms")
+    cols = imu_col_names(idx)
+    need = ["win_start_ms", "ax_mg", "ay_mg", "az_mg", cols["azn"],
+            "gx_mdps", "gy_mdps", "gz_mdps", "braking"]
+    for nm in need:
+        if nm not in idx:
+            sys.exit(f"Mangler kolonne '{nm}' i {imu_path}")
+    has_q = all(c in idx for c in cols["q_sflp"])
+    # vacc_fir er den FIR-desimerte serien og førstevalget; den beholdt navnet
+    # sitt gjennom omdøpingen ved build_seq 3. Fallbacken er den ufiltrerte
+    # senter-tapp-kolonnen, som heter ulikt før/etter - derav oppslaget.
+    raw_col = idx.get("vacc_fir", idx.get(cols["vacc"]))
+    if meta is not None:
+        meta["vacc_col"] = ("vacc_fir" if "vacc_fir" in idx
+                            else cols["vacc"] if raw_col is not None else None)
+    rows = []
+    if kutt.grunn:
+        print(_kutt_melding(imu_path, kutt))
+    for fields in rader:
+        rows.append(dict(
+            t=int(fields[idx["win_start_ms"]]),
+            ax=float(fields[idx["ax_mg"]]),
+            ay=float(fields[idx["ay_mg"]]),
+            az=float(fields[idx["az_mg"]]),
+            azn=float(fields[idx[cols["azn"]]]),
+            gx=float(fields[idx["gx_mdps"]]),
+            gy=float(fields[idx["gy_mdps"]]),
+            gz=float(fields[idx["gz_mdps"]]),
+            braking=1 if fields[idx["braking"]].strip() == "1" else 0,
+            # fifo_ovf kom i build 55. Eldre økter mangler kolonnen -> 0,
+            # så gamle filer fortsatt leses uendret.
+            ovf=(1 if "fifo_ovf" in idx
+                 and fields[idx["fifo_ovf"]].strip() == "1" else 0),
+            # SFLP-quaternionen (on-chip). Brukes KUN til tilt-diagnostikken -
+            # vertikal-accelen tas fortsatt fra az_ned_sflp, som før. None hvis
+            # kolonnene mangler (eldre økter).
+            q=(tuple(float(fields[idx[c]]) for c in cols["q_sflp"])
+               if has_q else None),
+            # Vertikal-accelen som ALT er regnet ut, av AHRS-en på råstrømmen -
+            # om bord ved kAhrsRateHz, eller av raw_to_csv fra raw.bin. Kolonnen
+            # er FIR-desimert til radrutenettet, altså samme trinn 1 som ax_mg og
+            # resten av radene, og er dermed direkte sammenlignbar med det
+            # replayet under regner ut. --vacc-source velger hvilken som brukes;
+            # None her betyr at valget ikke er mulig for denne fila.
+            vacc_raw=(float(fields[raw_col]) if raw_col is not None else None),
+            # Antall RÅSAMPLES bak raden. Den eneste kilden i imu.csv til hva
+            # sensoren faktisk leverte - resten av kolonnene er desimert, og
+            # sier derfor bare radraten. Se faktisk_odr().
+            n=(int(fields[idx["n"]]) if "n" in idx else None),
+        ))
     return rows
+
+
+RAW_TO_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "raw_to_csv.py")
+
+
+def finn_raalogg(directory, stamp, override=None):
+    """<stamp>_raw.bin, eller None. "off" slår av oppslaget.
+
+    Ett nivå opp er med fordi rawplot legger imu.csv i <økt>/<stamp>_raw/ mens
+    raw.bin blir liggende i øktkatalogen - kopiere den ville vært 19 MB for å
+    slippe et katalogoppslag."""
+    if override == "off":
+        return None
+    if override:
+        if not os.path.isfile(override):
+            sys.exit(f"--raw {override}: fant ikke fila")
+        return override
+    for kandidat in (os.path.join(directory, f"{stamp}_raw.bin"),
+                     os.path.join(os.path.dirname(directory), f"{stamp}_raw.bin")):
+        if os.path.isfile(kandidat):
+            return kandidat
+    return None
+
+
+def lag_raw_csv(raw_bin, ut_fil, metode):
+    """Kjør raw_to_csv for ett filter på råstrømmen -> <stamp>_imu_raw_<f>.csv.
+
+    Delprosess og ikke import: raw_to_csv importerer denne modulen, så veien går
+    bare én vei. Filene er dessuten mellomlagre - de skal kunne lages, leses og
+    slettes uavhengig av hvem som kjører."""
+    print(f"  raw:   kjører {metode} på råstrømmen -> "
+          f"{os.path.basename(ut_fil)} ...", flush=True)
+    t0 = time.time()
+    res = subprocess.run([sys.executable, RAW_TO_CSV, raw_bin, "--mode", "imu",
+                          "--ahrs", metode, "-o", ut_fil],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        hale = "\n".join((res.stdout + res.stderr).strip().splitlines()[-15:])
+        sys.exit(f"raw_to_csv.py feilet for --ahrs {metode} "
+                 f"(exit {res.returncode}):\n{hale}")
+    print(f"         ferdig på {time.time() - t0:.0f} s")
+
+
+def les_raw_vacc(path, rows):
+    """vacc_fir fra en søskenfil, stilt opp mot radene -> (array, n_mangler).
+
+    Oppstillingen går på win_start_ms og ikke på posisjon: filene er laget av
+    samme rålogg med samme rutenett, men kantene kan avvike med en rad, og en
+    forskyvning her ville vært usynlig i tallene og likevel gale. Rader uten
+    treff blir NaN, og kalleren lar replayet stå der."""
+    idx, rader, kutt = read_csv_stream(path, "win_start_ms")
+    if "vacc_fir" not in idx:
+        sys.exit(f"{os.path.basename(path)} mangler vacc_fir - er den laget av "
+                 f"en eldre raw_to_csv?")
+    if kutt.grunn:
+        print(_kutt_melding(path, kutt))
+    tabell = {int(r[idx["win_start_ms"]]): float(r[idx["vacc_fir"]]) for r in rader}
+    ut = np.array([tabell.get(r["t"], np.nan) for r in rows], dtype=np.float64)
+    return ut, int(np.isnan(ut).sum())
+
+
+def bygg_raa_serier(directory, stamp, rows, cfg_ahrs, raw_bin, vacc_source,
+                    regen=False, har_kolonne=False):
+    """Vertikal-accel fra råstrømmen for hver AHRS-metode -> (serier, kilder).
+
+    serier: {intern nøkkel: array på radaksen} for de metodene som fikk en.
+    kilder: {metodenavn: "csv" | "raw:<fil>"} for ALLE metodene - også de som
+    endte på replay, for det er den opplysningen som gjør tabellen lesbar.
+
+    Metoden fangsten selv kjørte står ikke her: den ligger allerede som vacc_fir
+    i imu.csv, og run() tar den derfra. Å lage en søskenfil for den ville vært en
+    kopi av den største fila i mappa."""
+    # SFLP står oppført selv om den aldri kjøres her: den kommer ferdig fra
+    # brikken, og "on-chip" er et tredje svar - ikke et replay vi valgte bort.
+    serier, kilder = {}, {"sflp": "onchip"}
+    for navn, key in AHRS_METHODS:
+        if navn == cfg_ahrs and har_kolonne and vacc_source != "csv":
+            kilder[navn] = "raw:imu.csv"          # run() henter den fra radene
+            continue
+        sti = os.path.join(directory, f"{stamp}_imu_raw_{navn}.csv")
+        if vacc_source == "csv":
+            kilder[navn] = "csv"
+            continue
+        if regen or not os.path.isfile(sti):
+            if raw_bin is None:
+                if vacc_source == "raw":
+                    sys.exit(f"--vacc-source raw: fant ingen {stamp}_raw.bin, og "
+                             f"{os.path.basename(sti)} finnes ikke. Uten råloggen "
+                             f"kan {navn} bare replayes - bruk auto eller csv.")
+                kilder[navn] = "csv"
+                continue
+            lag_raw_csv(raw_bin, sti, navn)
+        arr, mangler = les_raw_vacc(sti, rows)
+        if mangler:
+            print(f"  raw:   {mangler} av {len(rows)} rader uten treff i "
+                  f"{os.path.basename(sti)} - de beholder replay-verdien")
+        serier[key] = arr
+        kilder[navn] = f"raw:{os.path.basename(sti)}"
+    return serier, kilder
+
+
+def faktisk_odr(rows):
+    """Sensorens FAKTISKE samplerate -> Hz, eller None.
+
+    Summen av n-kolonnen er antall råsamples fangsten virkelig fikk; delt på
+    tida de dekker gir det raten sensoren leverte, ikke den som ble bedt om.
+    De to er ikke like: 20260813 ble satt til 480 Hz og målte 464, fordi
+    FIFO-dreneringen ikke alltid rekker rundt. Det avviket er usynlig i alle de
+    andre kolonnene i imu.csv - de er desimert til radrutenettet uansett hva
+    sensoren gjorde.
+
+    Tidsspennet er (siste - første) PLUSS én radperiode: n-ene teller samples i
+    hele den siste raden også, og uten det siste leddet ville en kort fangst
+    fått en for høy rate."""
+    n = [r["n"] for r in rows if r.get("n") is not None]
+    if len(n) < 2 or len(n) != len(rows):
+        return None
+    t = np.array([r["t"] for r in rows], dtype=np.float64)
+    dt = np.diff(t)
+    dt = dt[dt > 0]
+    if not len(dt):
+        return None
+    span_ms = (t[-1] - t[0]) + float(np.median(dt))
+    return float(sum(n)) / (span_ms / 1000.0) if span_ms > 0 else None
+
+
+def metode_rater(cfg, rows, kilder):
+    """Raten hver metode FAKTISK kjørte på -> {navn: Hz}.
+
+    Dette er ikke pynt til figuren: en Hs fra et filter på 480 Hz og en fra det
+    samme filteret replayet på 100 Hz er to ulike tall, og uten raten ved siden
+    av ser tabellen ut som en sammenligning av filtre når den delvis er en
+    sammenligning av rater."""
+    def tall(nokkel):
+        try:
+            v = float(cfg.get(nokkel, ""))
+            return v if v > 0 else None
+        except ValueError:
+            return None
+
+    imu_odr = tall("imu_odr_hz")
+    sflp_odr = tall("sflp_odr_hz")
+    # Radraten: cfg først, ellers det radene selv sier (eldre økter uten window_ms).
+    rad_hz = tall("output_rate_hz")
+    if rad_hz is None and len(rows) > 1:
+        d = np.diff(np.array([r["t"] for r in rows], dtype=np.float64))
+        d = d[d > 0]
+        rad_hz = 1000.0 / float(np.median(d)) if len(d) else None
+
+    rater = {}
+    for navn, _ in METHODS:
+        if navn == "sflp":
+            rater[navn] = sflp_odr        # on-chip-fusjonen, ikke råraten
+        elif str(kilder.get(navn, "csv")).startswith("raw"):
+            rater[navn] = imu_odr         # filteret kjørte per råsample
+        else:
+            rater[navn] = rad_hz
+    return rater
 
 
 def read_gps_vup(gps_path):
@@ -690,30 +973,16 @@ def read_gps_vup(gps_path):
     Returnerer None hvis fila eller kolonnene mangler."""
     if not os.path.isfile(gps_path):
         return None
-    with open(gps_path) as f:
-        header = f.readline().rstrip("\n").split(",")
-        idx = {nm: i for i, nm in enumerate(header)}
-        if "rel_ms" not in idx or "vUp" not in idx:
-            return None
-        ts, vs = [], []
-        prev = None
-        for line in f:
-            fld = line.rstrip("\n").split(",")
-            if len(fld) < len(header):
-                break                      # ufullstendig rad -> hale
-            try:
-                t = float(fld[idx["rel_ms"]]) / 1000.0
-                v = float(fld[idx["vUp"]])
-            except ValueError:
-                break
-            if prev is not None and t <= prev:
-                break                      # ikke-økende tid -> hale
-            prev = t
-            ts.append(t)
-            vs.append(v)
+    idx, rader, kutt = read_csv_stream(gps_path, "rel_ms")
+    if "vUp" not in idx:
+        return None
+    if kutt.grunn:
+        print(_kutt_melding(gps_path, kutt))
+    ts = np.array([float(r[idx["rel_ms"]]) / 1000.0 for r in rader])
+    vs = np.array([float(r[idx["vUp"]]) for r in rader])
     if len(ts) < 2:
         return None
-    return np.array(ts), np.array(vs)
+    return ts, vs
 
 
 def read_kv(path):
@@ -740,7 +1009,9 @@ def run(rows, seglen, overlap_div, window_kind, fmax, f1, f2, beta, brake_reject
         detrend=DETREND, gap_reject=GAP_REJECT,
         noise_band=NOISE_BAND,
         decimate_mode=DECIMATE_MODE, fir_ntap=FIR_NTAP, fir_cutoff=FIR_CUTOFF,
-        fir_compensate=FIR_COMPENSATE_DELAY, skip_start_s=0.0):
+        fir_compensate=FIR_COMPENSATE_DELAY, skip_start_s=0.0,
+        vacc_source=VACC_SOURCE, raw_ahrs="madgwick", raw_col="vacc_fir",
+        raw_series=None):
     # AHRS-ene har identisk grensesnitt (init_from_accel/update/.q), så løkka
     # under behandler dem likt - forskjellen ligger kun inne i modulene.
     madg = Madgwick(beta=beta)
@@ -771,6 +1042,26 @@ def run(rows, seglen, overlap_div, window_kind, fmax, f1, f2, beta, brake_reject
               f"radene ligger {obs_dt_ms:g} ms fra hverandre - NXP-filteret har "
               f"fast tidssteg og blir feil hvis cfg.csv ikke stemmer")
     nxp = KalmanNxp(fs=1000.0 / nxp_dt_ms)
+
+    # Kildevalget for vertikal-accelen (se VACC_SOURCE). Det avgjøres HER, én
+    # gang, og resultatet følger med ut i res: en Hs kan ikke leses uten å vite
+    # hvilken av de to kjedene den kom fra.
+    har_raw = bool(rows) and rows[0].get("vacc_raw") is not None
+    if vacc_source == "raw" and not har_raw:
+        sys.exit("--vacc-source raw: imu.csv har verken vacc_fir eller vacc. "
+                 "Den kolonnen finnes bare i økter logget med rålogg eller "
+                 "WaveLogMode::Both - bruk --vacc-source csv (eller auto).")
+    bruk_raw = har_raw and vacc_source in ("auto", "raw")
+    # Hvilken metode kolonnen ER. Den ble laget av filteret fangsten kjørte, så
+    # den hører hjemme i den radens plass - ikke i Madgwick-raden uansett.
+    raw_slot = {"madgwick": "m", "kalman": "k"}.get(str(raw_ahrs).lower())
+    if bruk_raw and raw_slot is None:
+        print(f"  ADVARSEL: cfg.csv oppgir AHRS '{raw_ahrs}', som ikke har en "
+              f"egen rad her - vacc_fir legges i Madgwick-raden.")
+        raw_slot = "m"
+    if not bruk_raw:
+        raw_slot = None
+
     have_q = False
     prev_t = 0
 
@@ -856,6 +1147,33 @@ def run(rows, seglen, overlap_div, window_kind, fmax, f1, f2, beta, brake_reject
         # konvensjon (verifisert, se kalman_nxp.py), så ingen konjugering. Dette
         # er nøyaktig det buf.rs gjør med q.rotate(axl) og fratrekk av g.
         vn = vertical_accel(nxp.q, axm, aym, azm)
+        # Kildebyttet står her, etter at replayet er regnet ut: AHRS-ene skal
+        # kjøre uansett - konvergensen deres er den samme uansett hvilken serie
+        # som går videre - det er kun hvilken verdi som brukes som endres.
+        #
+        # To kilder, i denne rekkefølgen: fangstens EGET filter ligger som
+        # vacc_fir i imu.csv (raw_slot), mens de øvrige filtrene kommer fra hver
+        # sin søskenfil (raw_series). De overlapper ikke, men søskenfila vinner
+        # om de skulle gjøre det: den er eksplisitt bedt om.
+        if raw_slot == "m":
+            vm = r["vacc_raw"]
+        elif raw_slot == "k":
+            vk = r["vacc_raw"]
+        if raw_series:
+            # NaN = ingen rad med denne tida i søskenfila; da står replayet.
+            v = raw_series.get("m")
+            if v is not None and math.isfinite(v[i]):
+                vm = v[i]
+            v = raw_series.get("k")
+            if v is not None and math.isfinite(v[i]):
+                vk = v[i]
+            v = raw_series.get("n")
+            if v is not None and math.isfinite(v[i]):
+                vn = v[i]
+            v = raw_series.get("e")
+            if v is not None and math.isfinite(v[i]):
+                ve = v[i]
+
         if not math.isfinite(vm):
             vm = 0.0
         if not math.isfinite(vs):
@@ -1060,6 +1378,12 @@ def run(rows, seglen, overlap_div, window_kind, fmax, f1, f2, beta, brake_reject
                 rejects=rejects, bidx=np.asarray(full_idx),
                 gapstats=gapstats, gap_reject=gap_reject, noise_band=noise_band,
                 detrend=detrend, beta=beta,
+                # Hvilken kjede tallene faktisk kom fra: "raw" = vacc_fir fra
+                # fila (AHRS på råstrømmen), "csv" = replay på radraten. Og
+                # hvilken rad som byttet kilde - resten er replay som før.
+                vacc_source=("raw" if bruk_raw else "csv"),
+                vacc_source_method={"m": "madgwick", "k": "kalman"}.get(raw_slot),
+                vacc_source_col=(raw_col if bruk_raw else None),
                 decimate_mode=decimate_mode, firstats=firstats)
 
 
@@ -1382,6 +1706,25 @@ def write_ana(path, res, seglen, args):
 
         out.write(f"cutoff_mode,{res['cutoff_mode']}\n")
         out.write(f"decimate_mode,{res['decimate_mode']}\n")
+        # Uten disse to kan en Hs i denne fila ikke leses: samme nøkkel
+        # (Hs_madgwick) betyr AHRS på råstrømmen i den ene kjøringen og replay på
+        # radraten i den neste, og på 20260813 skiller de +7.5 %.
+        out.write(f"vacc_source,{res['vacc_source']}\n")
+        if res["vacc_source_method"]:
+            out.write(f"vacc_source_method,{res['vacc_source_method']}\n")
+            out.write(f"vacc_source_col,{res['vacc_source_col']}\n")
+        # Per metode: hvor serien kom fra, og hvilken rate filteret kjørte på.
+        # Uten disse er tabellen uleselig - Hs_kalman fra 480 Hz og Hs_kalman fra
+        # et 100 Hz-replay står under samme nøkkel og er ikke samme størrelse.
+        for navn, _ in METHODS:
+            if navn in res.get("srcs", {}):
+                out.write(f"src_{navn},{res['srcs'][navn]}\n")
+            hz = res.get("rates", {}).get(navn)
+            if hz:
+                out.write(f"rate_{navn}_hz,{hz:g}\n")
+        # Hva sensoren FAKTISK leverte, mot det cfg.csv ba om. Se faktisk_odr().
+        if res.get("imu_odr_actual"):
+            out.write(f"imu_odr_actual_hz,{res['imu_odr_actual']:.1f}\n")
         if res["firstats"] is not None:
             out.write(f"fir_ntap,{res['firstats']['ntap']}\n")
             out.write(f"fir_cutoff_hz,{res['firstats']['cutoff']:.3f}\n")
@@ -1493,6 +1836,23 @@ def main():
                          "(0 = enhver forekomst forkaster)")
     ap.add_argument("--no-ovf-reject", dest="ovf_reject", action="store_const",
                     const=None, help="Ikke forkast på fifo_ovf")
+    ap.add_argument("--vacc-source", choices=["auto", "raw", "csv"],
+                    default=VACC_SOURCE,
+                    help="hvor vertikal-accelen hentes fra: raw = kolonnen "
+                         "vacc_fir, der AHRS-en alt har kjørt på råstrømmen "
+                         "(om bord, eller offline fra raw.bin). csv = replay av "
+                         "filteret på radraten, som før. auto (default) = raw "
+                         "når kolonnen finnes, og HVERT alternativfilter kjøres "
+                         "da på råstrømmen via raw_to_csv (mellomlagres som "
+                         "<stamp>_imu_raw_<filter>.csv ved siden av imu.csv). "
+                         "csv gjør ingen av delene")
+    ap.add_argument("--raw", default=None, metavar="STI",
+                    help="<stamp>_raw.bin å kjøre alternativfiltrene på. Uten "
+                         "den letes det ved siden av imu.csv og ett nivå opp. "
+                         "'off' slår av oppslaget")
+    ap.add_argument("--regen-raw", action="store_true",
+                    help="lag <stamp>_imu_raw_<filter>.csv på nytt selv om de "
+                         "finnes (etter en endring i raw_to_csv/filtrene)")
     ap.add_argument("--detrend", choices=["none", "mean", "linear"], default=DETREND,
                     help="Detrending per Welch-segment. 'none' = firmware-tro; "
                          f"default '{DETREND}'")
@@ -1606,8 +1966,24 @@ def main():
                      f"{1000.0 / RAW_DT_MS:g} Hz ({RAW_DT_MS:g} ms) - "
                      "det finnes ingen data å desimere fra")
 
-    rows = read_imu_rows(imu)
+    imu_meta = {}
+    rows = read_imu_rows(imu, imu_meta)
     print(f"  leste {len(rows)} imu-rader")
+
+    # Alternativfiltrene kjøres på RÅSTRØMMEN når råloggen finnes. Uten den er
+    # radene alt vi har, og da replayes de - som før. Dette skjer før run(), så
+    # analysen selv slipper å vite noe om filer og delprosesser.
+    cfg_ahrs = ahrs_fra_cfg(cfg.get("orientation_name"))
+    raw_bin = finn_raalogg(directory, stamp, args.raw)
+    if raw_bin and args.vacc_source != "csv":
+        print(f"  raw:   {os.path.basename(raw_bin)} "
+              f"({os.path.getsize(raw_bin) / 1e6:.1f} MB), fangstens filter er "
+              f"{cfg_ahrs}")
+    raw_series, kilder = bygg_raa_serier(
+        directory, stamp, rows, cfg_ahrs, raw_bin, args.vacc_source,
+        regen=args.regen_raw,
+        har_kolonne=bool(rows) and rows[0].get("vacc_raw") is not None)
+    rater = metode_rater(cfg, rows, kilder)
 
     # GPS leses alltid når den finnes - vUp gir en uavhengig Hs-kontroll selv
     # når cut-offen ikke utledes fra den.
@@ -1631,9 +2007,30 @@ def main():
                    (args.noise_band_lo, args.noise_band_hi),
                    decimate_mode=args.decimate, fir_ntap=args.fir_ntap,
                    fir_cutoff=args.fir_cutoff, fir_compensate=args.fir_compensate,
-                   skip_start_s=args.skip_start)
+                   skip_start_s=args.skip_start,
+                   vacc_source=args.vacc_source,
+                   # Hvilket filter kolonnen er laget av. Står i cfg.csv, for det
+                   # er en egenskap ved OPPTAKET - ikke ved denne kjøringen.
+                   raw_ahrs=cfg.get("orientation_name", "madgwick"),
+                   raw_col=imu_meta.get("vacc_col"),
+                   raw_series=raw_series)
 
     res = go()
+    # Kilder og rater hører til RESULTATET og ikke til kjøringen: de forteller
+    # hvordan hvert tall i tabellen ble til, og skal derfor følge det ut i
+    # ana-fila og videre til figuren.
+    res["srcs"], res["rates"] = kilder, rater
+    res["imu_odr_actual"] = faktisk_odr(rows)
+    if res["imu_odr_actual"]:
+        satt = cfg.get("imu_odr_hz", "?")
+        print(f"  odr:   satt {satt} Hz, faktisk "
+              f"{res['imu_odr_actual']:.1f} Hz (av n-kolonnen)")
+    ord_ = {"onchip": "on-chip", "csv": "replay"}
+    print("  vacc:  " + "  ".join(
+        f"{navn}="
+        f"{ord_.get(kilder.get(navn, 'csv'), 'råstrøm')}"
+        + (f"@{rater[navn]:g}Hz" if rater.get(navn) else "")
+        for navn, _ in METHODS))
 
     bins = spectrum_bins(res["psd_m"], res["psd_s"], res["psd_k"], res["psd_n"],
                          res["psd_e"], args.seglen, args.fmax, res["tapers"],

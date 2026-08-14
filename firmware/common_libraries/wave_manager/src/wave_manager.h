@@ -102,6 +102,7 @@ class WaveManager {
   static WaveManager *s_self;
   static void rowSinkTrampoline(const ImuRow &r);
   void onRow(const ImuRow &r);
+  void syncImuCsvIfPending(void);   // the imu.csv sync, deferred out of the pop loop
   // bool: false means the block did not reach the sd-card in full, which the sampler
   // turns into kRawFlagWriteFail on the next sync record. See onRawBlock.
   static bool rawSinkTrampoline(const uint8_t *data, uint16_t len);
@@ -134,6 +135,13 @@ class WaveManager {
   bool     csvActive_ = false;     // session opened (gps/ses/spec/ana), all log modes
   bool     imuCsvActive_ = false;  // imu.csv specifically - false in WaveLogMode::Raw
   uint16_t rowsSinceSync_ = 0;
+  // Set by onRow when the sync cadence is due, acted on between drains. onRow runs
+  // from inside the FIFO pop loop, and sync() is the one call in the csv path that
+  // is not a plain block write: it seeks off to the FAT and the directory entry and
+  // back, which is exactly the kind of card operation that goes busy for hundreds of
+  // ms. Doing that with words still sitting in the FIFO spent the overwrite budget
+  // it needs. See syncImuCsvIfPending.
+  bool     imuSyncPending_ = false;
   char     logStamp_[16]   = "00000000_000000";  // YYYYMMDD_HHMMSS
   char     sessionDir_[40] = "";                  // waves/<stamp>
   uint32_t gpsRowsWritten_ = 0;

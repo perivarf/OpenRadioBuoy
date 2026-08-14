@@ -71,7 +71,8 @@ from glob import glob
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from postprocess import read_kv  # noqa: E402  (key,value-leser for cfg/ses/ana)
+from postprocess import read_kv, read_csv_stream  # noqa: E402  (cfg/ses/ana, og
+# hale-regelen for strømmefilene - den skal stå ETT sted, se read_csv_stream)
 
 # --- Standard-økt (test/default hvis ingen sti oppgis) -----------------------
 DEFAULT_SESSION = "/home/pif/master/Målinger/m-linger/Skjærhalden/20260731_131527"
@@ -155,33 +156,17 @@ def resolve_session(path):
 
 def read_gps_track(gps_path):
     """Les gps.csv -> dict med numpy-arrays. rel_ms ligger på samme millis-akse
-    som win_start_ms i imu.csv. Stopper ved ufullstendig rad eller ikke-økende
-    tid (hale etter avbrutt/utruncert _tmp-fil), som read_gps_vup() gjør."""
+    som win_start_ms i imu.csv. Hale-regelen ligger i postprocess.read_csv_stream
+    - den samme som read_imu_rows og read_gps_vup bruker - og hva den kuttet blir
+    med ut i cols["kutt"], så load_session kan si det i øktblokka si."""
     cols = {}
-    with open(gps_path) as f:
-        header = f.readline().rstrip("\n").split(",")
-        idx = {nm: i for i, nm in enumerate(header)}
-        for nm in ("rel_ms", "lat", "lon"):
-            if nm not in idx:
-                sys.exit(f"Mangler kolonne '{nm}' i {gps_path}")
-        want = [c for c in ("rel_ms", "lat", "lon", "gspeed", "hAccuracy",
-                            "fix", "sats", "alt_msl") if c in idx]
-        acc = {c: [] for c in want}
-        prev = None
-        for line in f:
-            fld = line.rstrip("\n").split(",")
-            if len(fld) < len(header):
-                break                          # ufullstendig rad -> hale
-            try:
-                vals = {c: float(fld[idx[c]]) for c in want}
-            except ValueError:
-                break
-            t = vals["rel_ms"]
-            if prev is not None and t <= prev:
-                break                          # ikke-økende tid -> hale
-            prev = t
-            for c in want:
-                acc[c].append(vals[c])
+    idx, rader, kutt = read_csv_stream(gps_path, "rel_ms")
+    for nm in ("rel_ms", "lat", "lon"):
+        if nm not in idx:
+            sys.exit(f"Mangler kolonne '{nm}' i {gps_path}")
+    want = [c for c in ("rel_ms", "lat", "lon", "gspeed", "hAccuracy",
+                        "fix", "sats", "alt_msl") if c in idx]
+    acc = {c: [float(r[idx[c]]) for r in rader] for c in want}
     n_raw = len(acc["rel_ms"])
     if n_raw < 2:
         sys.exit(f"For få GPS-rader i {gps_path}")
@@ -201,7 +186,23 @@ def read_gps_track(gps_path):
         cols[c] = cols[c][ok]
     cols["n_raw"] = n_raw
     cols["n_dropped"] = n_drop
+    cols["kutt"] = kutt
     return cols
+
+
+def method_rate(ana, key):
+    """" (480 Hz)" til metodenavnet, eller "" når raten ikke er kjent.
+
+    Raten er ikke pynt. Madgwick kjørt på råstrømmen og Madgwick replayet på
+    radraten er to ulike tall under samme navn, og SFLP er en tredje rate igjen
+    (brikkas egen fusjon). Uten dette leses tabellen som en sammenligning av
+    filtre der den delvis er en sammenligning av rater. Tom streng på eldre
+    ana-filer, som ikke har nøkkelen - da står navnet som før."""
+    try:
+        hz = float(ana.get(f"rate_{key}_hz", ""))
+    except (TypeError, ValueError):
+        return ""
+    return f" ({hz:g} Hz)" if hz > 0 else ""
 
 
 def read_note(directory, stamp, ses):
@@ -259,7 +260,9 @@ def run_postprocess(directory, stamp, args, quiet=True):
     env = dict(os.environ, MPLBACKEND="Agg")
     res = subprocess.run([sys.executable, POSTPROCESS, directory,
                           "--taper-f1", str(args.taper_f1),
-                          "--taper-f2", str(args.taper_f2)],
+                          "--taper-f2", str(args.taper_f2),
+                          "--vacc-source", args.vacc_source]
+                         + (["--raw", args.raw] if args.raw else []),
                          env=env, capture_output=True, text=True)
     if res.returncode != 0:
         tail = "\n".join((res.stdout + res.stderr).strip().splitlines()[-15:])
@@ -621,9 +624,15 @@ def build_blocks(cfg, ses, ana, stats):
     if build != DASH and cfg.get("build_date"):
         build += f"  ({cfg['build_date']})"
     logg = [
-        ("ODR acc / gyro",
-         joined([fmt_val(cfg, "accel_odr_hz"), fmt_val(cfg, "imu_odr_hz")],
-                "{} / {} Hz")),
+        # Satt mot faktisk ODR, ikke acc mot gyro: de to sensorene kjører på
+        # samme ODR, så den kolonnen sa det samme to ganger. Den FAKTISKE raten
+        # er derimot ikke utledbar av noe annet i tabellen - den regnes av antall
+        # råsamples per rad (n) i postprocess, og på 20260813 er den 464 Hz mot
+        # 480 satt. Avviket er FIFO-en som ikke rekker rundt, og det er en av de
+        # tingene man vil se på en figur uten å måtte kjøre rawlog.
+        ("ODR set / actual",
+         joined([fmt_val(cfg, "imu_odr_hz"),
+                 fmt_val(ana, "imu_odr_actual_hz", dec=1)], "{} / {} Hz")),
         ("Output rate / window",
          joined([fmt_val(cfg, "output_rate_hz"), fmt_val(cfg, "window_ms")],
                 "{} Hz / {} ms")),
@@ -641,7 +650,7 @@ def build_blocks(cfg, ses, ana, stats):
 
     bolge = []
     for key, name in METHOD_ROWS:
-        row = [name]
+        row = [name + method_rate(ana, key)]
         for p in ("Hs", "Tz", "Tc"):
             row.append(fmt_val(ana, f"{p}_{key}", dec=(3 if p == "Hs" else 2)))
         bolge.append(row)
@@ -902,6 +911,17 @@ def draw_wave_table(ax, bolge, ana_src, ana, cfg, args):
     seg = fmt_segment(ana, cfg)
     if seg:
         foot.append(seg)
+    # Raten står nå i parentes per rad, så fotnoten trenger bare å si hva den
+    # raten BETYR - at filteret kjørte på råstrømmen, ikke på radene. Leses fra
+    # ana-fila og ikke fra args: med --skip-postprocess kan de to være ulike, og
+    # da er fila fasiten.
+    fra_raa = sorted(navn for key, navn in METHOD_ROWS
+                     if str(ana.get(f"src_{key}", "")).startswith("raw"))
+    if fra_raa:
+        foot.append(f"{', '.join(fra_raa)} ran on the raw stream; "
+                    f"SFLP is the on-chip fusion. Rates in parentheses.")
+    elif ana.get("vacc_source") == "csv":
+        foot.append("All filters replayed at row rate (--vacc-source csv)")
     foot.append(f"Source: {ana_src}" if ana_src else "No _ana_python.csv found")
     if args.skip_postprocess:
         foot.append("(--skip-postprocess: taper not verified against file)")
@@ -910,7 +930,7 @@ def draw_wave_table(ax, bolge, ana_src, ana, cfg, args):
                 color=C_MUTED, va="top", style="italic")
 
 
-def draw_psd(ax, spec, args):
+def draw_psd(ax, spec, args, ana=None):
     """Elevasjonsspekteret S_eta(f) i log-log, én kurve per metode.
 
     Log-log er ikke pynt: bølgebåndet spenner en dekade, og et f⁻⁴-gulv fra
@@ -937,7 +957,10 @@ def draw_psd(ax, spec, args):
         if col not in spec:
             continue
         y = np.where(spec[col] > 0.0, spec[col], np.nan)   # 0 => utenfor taper
-        ax.plot(f[band], y[band], style, lw=1.3, label=name,
+        # Samme rate-merking som i tabellen: kurvene skal kunne leses uten å
+        # først slå opp hvilken av dem som kjørte på hvilken rate.
+        merket = name + (method_rate(ana, key) if ana else "")
+        ax.plot(f[band], y[band], style, lw=1.3, label=merket,
                 **({"color": color} if color else {}))
         any_line = True
     ax.axvspan(args.taper_f1, args.taper_f2, color="orange", alpha=0.16, lw=0)
@@ -1104,7 +1127,8 @@ def make_figure(sess, args):
              fontsize=6.0, color=C_MUTED, ha="right", va="bottom")
 
     draw_psd(fig.add_axes(rect(m_l + 0.34, m_b + wave_h + 0.42,
-                               psd_w - 0.34, psd_h)), sess["spec"], args)
+                               psd_w - 0.34, psd_h)), sess["spec"], args,
+             sess["ana"])
 
     okt, logg, bolge = build_blocks(sess["cfg"], sess["ses"], sess["ana"], stats)
     draw_wave_table(fig.add_axes(rect(m_l, m_b, psd_w, wave_h)),
@@ -1353,6 +1377,16 @@ def main():
                          "Sendes til postprocess.py og skrives i figuren.")
     ap.add_argument("--taper-f2", type=float, default=0.2,
                     help="lavfrekvens-taper: T=1 over denne [Hz] (default 0.2)")
+    ap.add_argument("--raw", default=None, metavar="STI",
+                    help="sendes til postprocess.py: hvilken <stamp>_raw.bin "
+                         "alternativfiltrene skal kjøres på. 'off' holder "
+                         "analysen til det imu.csv selv inneholder")
+    ap.add_argument("--vacc-source", choices=("auto", "raw", "csv"), default="auto",
+                    help="sendes til postprocess.py: raw = vertikal-accelen fra "
+                         "vacc_fir (AHRS på råstrømmen), csv = replay på "
+                         "radraten, auto = raw når kolonnen finnes. Står i "
+                         "bølgetabellen, for tallene er ikke sammenlignbare "
+                         "på tvers av valget")
     ap.add_argument("--psd-fmin", type=float, default=None,
                     help="nedre frekvens i spekterplottet [Hz] "
                          "(default: taperens f1 - under den er alt nullet bort)")
@@ -1439,6 +1473,14 @@ def main():
         if sess["gps"]["n_dropped"]:
             print(f"  {sess['gps']['n_dropped']} GPS-rader uten 3D-fix forkastet "
                   f"(av {sess['gps']['n_raw']}).")
+        # Avbrutt fangst: si det HER, sammen med radtellingen, ikke som en
+        # fotnote. Figuren under viser en kortere måling enn økta var satt til,
+        # og det skal man vite før man sammenligner den med de andre.
+        kutt = sess["gps"]["kutt"]
+        if kutt.grunn:
+            print(f"  gps.csv slutter etter {kutt.rader} rader: {kutt.grunn}. "
+                  f"{kutt.total - kutt.lest} B av {kutt.total} er hale fra en "
+                  f"avbrutt fangst (fila ligger på preallokert lengde).")
         st = sess["stats"]
         print(f"  {len(sess['gps']['t_s'])} punkter, {st['dist']:.0f} m "
               f"tilbakelagt, netto {st['net']:.0f} m mot {st['bearing']:.0f}°")

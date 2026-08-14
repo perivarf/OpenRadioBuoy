@@ -51,6 +51,13 @@ import rawlog                                   # noqa: E402
 import fir                                      # noqa: E402
 from madgwick import Madgwick                   # noqa: E402
 from kalman import Kalman                       # noqa: E402
+from kalman_nxp import KalmanNxp                # noqa: E402
+from mekf import Mekf                           # noqa: E402
+
+# Filtrene som kan kjøres på råstrømmen. Rekkefølgen er den samme som metodene
+# står i postprocess og i bølgetabellen, så en --ahrs-liste og en tabellkolonne
+# alltid leses i samme rekkefølge.
+AHRS_NAVN = ("madgwick", "kalman", "nxp", "mekf")
 
 # Enheter og vertikal-accel kommer fra postprocess, ikke fra egne kopier: vacc må
 # defineres på nøyaktig én plass, ellers kan rekonstruksjonen og analysen gli fra
@@ -107,10 +114,19 @@ class Params:
         self.orientation = cfg.get("orientation_name", "")
 
     def ahrs_navn(self, override=None):
+        """Filternavnet fangsten kjørte, eller det --ahrs ber om.
+
+        cfg.csv kan bare inneholde det firmware skriver: "Madgwick", "Kalman"
+        eller "SFLP" (wave_orientation_name -> WaveAhrs::kName). nxp og mekf er
+        derfor bare tilgjengelige via --ahrs - de er ALTERNATIVER man ber om, ikke
+        noe en fangst kan ha kjørt.
+
+        Selve oppslaget ligger i postprocess.ahrs_fra_cfg, ikke her: analysen
+        gjør nøyaktig samme oversettelse, og to kopier av den kan bli uenige om
+        hvilket filter en fangst kjørte."""
         if override:
             return override
-        n = self.orientation.strip().lower()
-        return "kalman" if n.startswith("kalman") else "madgwick"
+        return pp.ahrs_fra_cfg(self.orientation)
 
     def beskriv(self):
         s = "  cfg: " + (", ".join(self.fra_cfg) if self.fra_cfg else "ingen")
@@ -207,6 +223,26 @@ def world_ned(quat, acc_mg):
     return wx, wy, wz - 1000.0
 
 
+def lag_ahrs(navn, par, odr_hz):
+    """Filteret som skal kjøre på råstrømmen, i fangstens egne konstanter.
+
+    Alle fire har samme grensesnitt (init_from_accel/update/.q), så run_ahrs ser
+    ingen forskjell - men NXP er unntaket ved KONSTRUKSJON: den baker inn 1/fs i
+    stedet for å ta dt per steg (se FAST RATE i kalman_nxp.py). Raten her er
+    RÅRATEN, ikke radraten: filteret kjører per sample. Feil rate der er ikke en
+    mild feil - Hs_nxp på 110314 går fra 0.098 m til 26.8 m ved fjerdedelen av
+    riktig rate."""
+    if navn == "madgwick":
+        return Madgwick(beta=par.madgwick_beta)
+    if navn == "kalman":
+        return Kalman()
+    if navn == "nxp":
+        return KalmanNxp(fs=float(odr_hz))
+    if navn == "mekf":
+        return Mekf()
+    sys.exit(f"ukjent AHRS '{navn}' - kjenner {', '.join(AHRS_NAVN)}")
+
+
 def run_ahrs(t_s, acc_mg, gyr_mdps, filt):
     """AHRS på RÅSTRØMMEN - én update per sample, som imu_sampler.cpp. Returnerer
     quaternionene og vertikal lineær accel (m/s²) per sample."""
@@ -251,8 +287,7 @@ def imu_frame(cap, par, ahrs=None):
 
     wx, wy, wz = world_ned(quat, acc)
     navn = par.ahrs_navn(ahrs)
-    filt = Madgwick(beta=par.madgwick_beta) if navn == "madgwick" else Kalman()
-    q_ahrs, vacc = run_ahrs(t_s, acc, gyr, filt)
+    q_ahrs, vacc = run_ahrs(t_s, acc, gyr, lag_ahrs(navn, par, odr))
     brake = braking_flags(wx, wy, wz, par.brake_g, par.brake_min_samples)
 
     # FIR trinn 1: alle ti seriene gjennom samme filter, levert på rad-rutenettet -
@@ -334,8 +369,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", help="<stamp>_raw.bin eller øktmappa")
     ap.add_argument("--mode", choices=["samples", "imu"], default="samples")
-    ap.add_argument("--ahrs", choices=["madgwick", "kalman"], default=None,
-                    help="overstyr filteret; uten den følges cfg.csv orientation_name")
+    ap.add_argument("--ahrs", choices=list(AHRS_NAVN), default=None,
+                    help="overstyr filteret; uten den følges cfg.csv "
+                         "orientation_name. nxp og mekf finnes bare her - de er "
+                         "alternativer man ber om, ikke noe en fangst kan ha kjørt")
     ap.add_argument("-o", "--out", help="skriv CSV hit (default: ved siden av .bin)")
     ap.add_argument("--compare", action="store_true",
                     help="--mode imu: sammenlign mot enhetens egen imu.csv")

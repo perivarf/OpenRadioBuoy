@@ -38,8 +38,14 @@ struct UBX_PVT{
   int32_t  lat_e7;        // latitude,  1e-7 deg
   int32_t  lng_e7;        // longitude, 1e-7 deg
   int32_t  gSpeed_mms;    // 2D ground speed, mm/s
+  int32_t  velD_mms;      // NED down velocity,  mm/s (POSITIVE DOWN - gps.csv
+                          // logs -velD as vUp, which is what the wave analysis
+                          // builds its elevation spectrum from)
   int32_t  headMot_e5;    // course over ground, 1e-5 deg
   uint32_t hAcc_mm;       // horizontal accuracy estimate, mm
+  uint32_t vAcc_mm;       // vertical accuracy estimate, mm
+  uint32_t sAcc_mms;      // speed accuracy estimate, mm/s
+  uint16_t pDOP_e2;       // position DOP, 0.01 (lower = better geometry)
   uint16_t year;
   uint8_t  month;
   uint8_t  day;
