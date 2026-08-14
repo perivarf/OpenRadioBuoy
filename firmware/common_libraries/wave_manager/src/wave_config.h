@@ -317,13 +317,18 @@ static constexpr uint16_t kRawBlockBytes     = 512;   // SD block; buffered, not
 // Råbufferet må romme en HEL drenering, ikke bare en SD-blokk.
 //
 // Skrivingen lå før inne i pop-løkka: bufferet fyltes opp midt i tømmingen av FIFO-en
-// og ble skrevet der og da. Stanset kortet i det øyeblikket - og det gjør det, 700-900
-// ms om gangen, se 2026-08-14-analysen - så sto det fortsatt uhentede ord igjen i
-// FIFO-en, og halve overskrivningsbudsjettet var allerede brukt før klokka begynte å
-// telle. Nå hentes alle ordene først og skrives etterpå, så stallen treffer en TOM
-// FIFO: 256 ledige nivåer i stedet for ~128, altså 213 ms i stedet for 107 ved 480 Hz.
+// og ble skrevet der og da. Stanset kortet i det øyeblikket, sto det fortsatt uhentede
+// ord igjen i FIFO-en, og halve overskrivningsbudsjettet var allerede brukt før klokka
+// begynte å telle. Nå hentes alle ordene først og skrives etterpå, så en stall treffer
+// en TOM FIFO: 256 ledige nivåer i stedet for ~128, altså 213 ms i stedet for 107 ved
+// 480 Hz.
 //
-// Det fjerner ikke stallen (800 ms > 213 ms), det halverer tapet per hendelse.
+// Om årsaken, siden den ble feildiagnostisert her først: analysen 2026-08-14 tolket de
+// periodiske tapene (~446 s fra hverandre) som at kortet stanset 700-900 ms av seg selv,
+// og konkluderte med at 213 ms uansett ikke rakk. Det var galt. Etter at vaktmerket gikk
+// fra 128 til 64 og fristen ble utledet av ordraten, forsvant tapene HELT - noe de ikke
+// kunne gjort mot en reell 800 ms stall. Det var margin, ikke kort: ved WTM 128 sto
+// FIFO-en 224 av 256 full etter en tapt flanke, og da holder en vanlig blokkskriving.
 static constexpr uint16_t kRawBufBytes =
     (uint16_t)kFifoDepthWords * kRawWordBytes + kRawSyncBytes;   // 256*7 + 17 = 1809
 

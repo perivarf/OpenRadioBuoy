@@ -32,16 +32,28 @@ static void sdDateTimeCallback(uint16_t *date, uint16_t *time){
 }
 
 uint32_t SDWriter::countFilesInDirectory(const char * dirName){
-  // Reads all files in given directory
-  uint16_t fileCount = 0;
+  /*
+    Counts the files in a directory. The entry handle MUST be closed between
+    iterations: SDFAT_FILE_TYPE is 1, so File is File32 and openNext() bails out on
+    isOpen() - leaving the previous entry open made the loop stop after the first
+    file, so this returned 1 for every non-empty directory. logCount then restarted
+    at 1 on every boot, which restarted the reading IDs and overwrote old readings.
+
+    A local handle rather than the member LogFile, so a counting call can never
+    clobber a log that is open.
+  */
+  uint32_t fileCount = 0;
   File directory;
-  directory.open(dirName);
-  while (LogFile.openNext(&directory, O_RDONLY)) {
-    if (!LogFile.isHidden()) {
+  if (!directory.open(dirName, O_RDONLY)) return 0;
+
+  File entry;
+  while (entry.openNext(&directory, O_RDONLY)) {
+    if (!entry.isHidden() && !entry.isDir()) {
       fileCount++;
     }
+    entry.close();
+    IWatchdog.reload();  // a card with hundreds of readings must not trip the watchdog
   }
-  LogFile.close();
   directory.close();
   return fileCount;
 }
@@ -97,7 +109,7 @@ bool SDWriter::begin(void){
         Serial.println("Counting files");
       }
       
-      logCount = countFilesInDirectory("readings/");
+      logCount = countFilesInDirectory(readings_dir);
       //Count amount of files in reading directory to ensure readability
       if (debug_serial){
         Serial.print("Num files: ");
@@ -184,7 +196,16 @@ int8_t SDWriter::startLogging(const char * filename){
     mode   = OLB_SD_WRITE_MODE;
     LogFile = SD.open(filename, FILE_WRITE);
 
-    logCount++;
+    /*
+      logCount is seeded in begin() from the number of files in readings/, and is
+      what names the next reading file and what the GPS/thermo reading_ID is derived
+      from. Only reading logs may bump it: counting boot_info.txt and every
+      messages/transmission log too made the index run ahead of the file count, so
+      after a reboot the numbering fell back into the gap and overwrote old readings.
+    */
+    if (strncmp(filename, readings_dir, sizeof(readings_dir) - 1) == 0){
+      logCount++;
+    }
     return 0;
 
   } else if (SD_fail) {

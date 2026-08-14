@@ -11,6 +11,12 @@
 // Pins live in the project's config.h; this is the bus speed only.
 static constexpr uint8_t  SD_SPI_MHZ      {12};
 
+/*
+  The directory logCount is seeded from and counts. Written with the trailing
+  separator so it doubles as the prefix startLogging() matches a reading log on.
+*/
+static constexpr char readings_dir[] {"readings/"};
+
 
 static constexpr uint8_t OLB_SD_INACTIVE   {0};
 static constexpr uint8_t OLB_SD_WRITE_MODE {1};
