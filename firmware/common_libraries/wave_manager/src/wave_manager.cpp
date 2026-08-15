@@ -286,6 +286,9 @@ uint8_t WaveManager::takeReading(void) {
   readingID_++;
   rowCount_ = 0;
   gpsRowsWritten_ = 0;
+  // Zeroed with the other per-capture counters, so the block in ses.csv describes THIS
+  // capture and carries nothing over from the previous one.
+  wave_timing.resetCapture();
   captureStart_ = now();
   captureStartPos_ = currentFixE7();
   IWatchdog.reload();
@@ -300,7 +303,12 @@ uint8_t WaveManager::takeReading(void) {
   csvActive_ = false;
   imuCsvActive_ = false;   // startSession sets it; a failed open must not leave it set
   if (wave_log_csv && sd_writer.active) {
+    // Not a threat to the FIFO - the stream starts below - but it IS dead time inside the
+    // measurement window, and preAllocate of a reservation this size is the one call here
+    // that can run into hundreds of ms. Recorded as a single value: it happens once.
+    const uint32_t tStart = timeStart();
     csvActive_ = startSession();
+    if (wave_timing_enabled) wave_timing.startSessionUs = micros() - tStart;
   }
 
   IWatchdog.reload();
@@ -317,31 +325,53 @@ uint8_t WaveManager::takeReading(void) {
   uint32_t start = millis();
   while (millis() - start < wave_measurement_duration) {
     const uint32_t elapsed = millis() - start;
+    // TIM_LOOP covers the body but NOT the delay below, so it measures work rather than
+    // the pause. It is the bucket that catches what the others do not: a drain that
+    // arrives late with the INT1 flag already set spent that time somewhere in here, and
+    // if TIM_LOOP's max exceeds the sum of the buckets inside it, the time went to
+    // something none of them measure.
+    const uint32_t tLoop = timeStart();
     // The countdown rides along on the IMU report rather than printing on its own:
     // the two answer one question together - whether the capture is still running,
     // and whether the drain is keeping up while it does.
     imu_.update(Serial, wave_measurement_duration - elapsed);  // drain the FIFO (stay tight)
+    const uint32_t tSync = timeStart();
     syncImuCsvIfPending();          // deferred from onRow: never with the FIFO half full
+    timeAdd(TIM_SYNCCSV, tSync);
+    const uint32_t tGps = timeStart();
     serviceGps(elapsed);            // non-blocking GPS poll -> one gps.csv row per fix
+    timeAdd(TIM_GPS, tGps);
     IWatchdog.reload();
+    timeAdd(TIM_LOOP, tLoop);
     delay(2);  // let the FIFO refill; keeps the drain loop from spinning hot
   }
 
   if (csvActive_) {
+    // Timed per FILE, not as one total: handing back a reservation is the expensive part,
+    // and the three files hold wildly different ones (the raw log reserves tens of MB, the
+    // gps log a couple). A single number would say that shutdown was slow without saying
+    // which file made it so. Same reason these are plain values and not a TimeStat: one
+    // sample each, and a max across all three would answer the wrong question.
+    const uint32_t tStop = timeStart();
+
     // truncate() at the current position hands back the clusters pre-allocation
     // reserved but the capture did not use, and sets the directory entry to the real
     // length. Without it every session folder would claim its full reservation and
     // the tail would read as garbage. Safe to call whether or not preAllocate
     // succeeded: with no reservation the position already is the end of the file.
-    if (imuCsvActive_) { 
+    if (imuCsvActive_) {
+      const uint32_t t0 = timeStart();
       imuFile_.truncate();  IWatchdog.reload();
       imuFile_.sync();      IWatchdog.reload();
-      imuFile_.close();     IWatchdog.reload();}
-    
+      imuFile_.close();     IWatchdog.reload();
+      if (wave_timing_enabled) wave_timing.stopImuUs = micros() - t0;}
+
+    const uint32_t tStopGps = timeStart();
     gpsFile_.truncate();    IWatchdog.reload();
     gpsFile_.sync();        IWatchdog.reload();
     gpsFile_.close();       IWatchdog.reload();
-    
+    if (wave_timing_enabled) wave_timing.stopGpsUs = micros() - tStopGps;
+
     // The raw log's partial block has to be pushed BEFORE truncate(), or the tail is
     // cut at the last full block and the final records are lost. Detaching the sink
     // first stops a late drain from appending past the truncation point.
@@ -351,12 +381,15 @@ uint8_t WaveManager::takeReading(void) {
       // delvise bufferet - opptil kRawBufBytes, altså en drenerings verdi av data og
       // sync-posten som beskriver den. Ingen drenering kan smyge seg inn mellom de to
       // linjene: INT1-rutinen setter bare et flagg, den tømmer ingenting.
+      const uint32_t tStopRaw = timeStart();
       imu_.flushRaw();          IWatchdog.reload();
       imu_.setRawSink(nullptr); IWatchdog.reload();
       rawFile_.truncate();      IWatchdog.reload();
       rawFile_.sync();          IWatchdog.reload();
       rawFile_.close();         IWatchdog.reload();
+      if (wave_timing_enabled) wave_timing.stopRawUs = micros() - tStopRaw;
     }
+    if (wave_timing_enabled) wave_timing.stopTotalUs = micros() - tStop;
     // sessionFile_ stays open: the summary is appended in processReading.
   }
 
@@ -652,7 +685,53 @@ void WaveManager::writeSessionSummary(bool ok, const WaveParams &params) {
     sessionFile_.print("Tc,"); sessionFile_.println(params.tc, 2);
     sessionFile_.print("Tp,"); sessionFile_.println(params.tp, 2);
   }
+  writeTimingBlock();
   sessionFile_.sync();
+}
+
+/*
+  The timing buckets, in the same key,value form as the rest of ses.csv. This is the half
+  of the reporting that survives a field deployment: the [TIM] serial line needs someone
+  watching the monitor, and an 18-minute capture in the water has no one.
+
+  n, mean AND max for every bucket. The max is not decoration - a stall is a tail event,
+  and a mean over thousands of drains divides a 300 ms outlier down into the noise. The
+  mean says what the loop normally costs; the max says whether anything in it could have
+  emptied the FIFO budget. Both are per CAPTURE here (the *Cap accumulators), where the
+  serial line reports per print interval.
+
+  Written from processReading, so an interrupted capture gets no block - the same way it
+  gets no stop_utc_epoch and no ana.csv. Absence is the signal, as everywhere else here.
+*/
+void WaveManager::writeTimingBlock(void) {
+  if (!wave_timing_enabled || !sessionFile_) return;
+
+  for (uint8_t i = 0; i < TIM_COUNT; i++) {
+    const TimeStat &s = wave_timing.b[i];
+    sessionFile_.print("tim_"); sessionFile_.print(kTimingNames[i]);
+    sessionFile_.print("_n,");       sessionFile_.println(s.nCap);
+    sessionFile_.print("tim_"); sessionFile_.print(kTimingNames[i]);
+    sessionFile_.print("_us_mean,"); sessionFile_.println(s.meanUsCap());
+    sessionFile_.print("tim_"); sessionFile_.print(kTimingNames[i]);
+    sessionFile_.print("_us_max,");  sessionFile_.println(s.maxUsCap);
+  }
+
+  // Turns tim_flush into us/kB rather than us/drain, which is what tells a slow card
+  // apart from a big write.
+  sessionFile_.print("tim_flush_bytes,");  sessionFile_.println(wave_timing.flushBytesCap);
+
+  // The one-shot costs outside the loop. No FIFO risk, but they are dead time in the
+  // capture window - and stop_raw is where a multi-MB reservation is handed back.
+  sessionFile_.print("tim_start_session_us,"); sessionFile_.println(wave_timing.startSessionUs);
+  sessionFile_.print("tim_stop_imu_us,");      sessionFile_.println(wave_timing.stopImuUs);
+  sessionFile_.print("tim_stop_gps_us,");      sessionFile_.println(wave_timing.stopGpsUs);
+  sessionFile_.print("tim_stop_raw_us,");      sessionFile_.println(wave_timing.stopRawUs);
+  sessionFile_.print("tim_stop_total_us,");    sessionFile_.println(wave_timing.stopTotalUs);
+
+  // The budget every number above is measured against, so the file can be read without
+  // the firmware that wrote it. See kFifoPollFallbackMs in wave_config.h.
+  sessionFile_.print("tim_fifo_budget_us,");
+  sessionFile_.println((uint32_t)kFifoDepthWords * 1000000UL / kFifoWordsPerSec);
 }
 
 // Close the session file. The folder already carries its final name, so there is

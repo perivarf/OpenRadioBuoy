@@ -1,0 +1,32 @@
+FØR SPI Block
+
+[TIM] update 1753x 7138/119302us  status 1753x 26/50us  pop 1753x 5389/119226us  spi 23363x 37/40us  
+      ahrs 9345x 199/203us  fir 2010x 2308/2347us  rowsink 2011x 90/117780us  flush 1753x 1671/11971us  
+      synccsv 1753x 2/4us  gps 1753x 2773/55688us  loop 1753x 9924/158828us  dbgprint 1x 34483/34483us  
+      per word 37 us  per ahrs 199 us  raw 188.8 kB at 15.16 us/B
+[IMU] 1159 s left  |  Accel: 467 Hz, Gyro: 467
+[TIM] update 1269x 9891/65281us  status 1269x 30/50us  pop 1269x 7367/32227us  spi 23389x 37/40us  
+      ahrs 9356x 199/203us  fir 2013x 2312/2350us  rowsink 2013x 31/250us  flush 1269x 2424/10463us  
+      synccsv 1269x 2/4us  gps 1269x 4377/52583us  loop 1269x 14282/66101us  dbgprint 1x 35967/35967us  
+      per word 37 us  per ahrs 199 us  raw 181.0 kB at 16.60 us/B
+[IMU] 1139 s left  |  Accel: 424 Hz, Gyro: 424  [WARN] FIFO overrun x4
+
+
+Etter endring av SPI -block
+
+WaveManager: logging session to waves/20260815_135144
+[IMU] 1780 s left  |  Accel: 466 Hz, Gyro: 466
+[TIM] update 1084x 11403/37743us  status 1085x 33/50us  pop 1085x 8359/27755us  spi 23325x 28/33us  
+      ahrs 9329x 199/205us  fir 2007x 2321/2365us  rowsink 2006x 7/9us  flush 1085x 2984/10968us  
+      synccsv 1084x 2/3us  gps 1084x 5520/50113us  loop 1084x 16937/61045us  dbgprint 0x 0/0us  
+      per word 28 us  per ahrs 199 us  raw 177.5 kB at 17.82 us/B
+[IMU] 1760 s left  |  Accel: 468 Hz, Gyro: 468
+[TIM] update 1103x 11357/56687us  status 1103x 32/48us  pop 1103x 8254/31834us  spi 23378x 28/33us  
+      ahrs 9351x 199/211us  fir 2003x 2327/2413us  rowsink 2003x 19/251us  flush 1103x 2983/10911us  
+      synccsv 1103x 2/3us  gps 1103x 5294/49846us  loop 1103x 16664/69492us  dbgprint 1x 31185/31185us  
+      per word 28 us  per ahrs 199 us  raw 178.1 kB at 18.04 us/B
+[TIM] update 1075x 11575/53005us  status 1075x 33/48us  pop 1075x 8481/39625us  spi 23362x 28/31us  
+      ahrs 9345x 199/203us  fir 2002x 2325/2354us  rowsink 2002x 31/251us  flush 1075x 2997/11819us  
+      synccsv 1075x 2/3us  gps 1075x 5557/60814us  loop 1075x 17145/82903us  dbgprint 1x 35046/35046us  
+      per word 28 us  per ahrs 199 us  raw 177.5 kB at 17.72 us/B
+[IMU] 1599 s left  |  Accel: 467 Hz, Gyro: 467

@@ -215,6 +215,10 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
 // row being assembled. Everything here should referr to the same point in time instant:
 // the centre of the current window
 void ImuSampler::latchRowValues() {
+  // Timed here rather than at the two call sites: the normal one (a sample reaching the
+  // window centre) and the late one (closeWindow, after a FIFO gap) cost the same
+  // kFirNtap x 10 evaluation, and both run inside the pop loop.
+  WAVE_TIME(TIM_FIR);
   fir_.eval(pendingRow_);
   float mq[4], sq[4];
   qDelay_.read(mq, sq);
@@ -231,14 +235,28 @@ void ImuSampler::latchRowValues() {
 
 // Raw multi-byte burst read on the shared SPI bus. With IF_INC = 1 (the default) the
 // sensor auto-increments the address, so consecutive registers arrive in ONE CS-low
-// transfer. 
+// transfer.
 // Settings must match what the driver uses for its own reads or the two would
 // disagree about the bus: MODE3, MSB first, 0x80 as the read bit.
+//
+// The payload goes out as ONE block transfer, not a byte-at-a-time loop. Both forms
+// clock the same bits down the same CS-low transaction - the difference is how often
+// the core is entered: SPI.transfer(uint8_t) runs the whole of spi_transfer() per byte,
+// so a 7-byte FIFO word paid that entry eight times. Measured 2026-08-15 at 37 us per
+// word, of which only ~11 is the bus (see below); the rest was the eight entries.
+//
+// NB: the bus does NOT run at kImuSpiHz. spi_init picks the fastest prescaler that does
+// not exceed the request, so 8 MHz against a 48 MHz PCLK2 lands on /8 = 6 MHz. /4 would
+// be 12 MHz, past the sensor's 10 MHz rating, so 6 MHz is the ceiling here and raising
+// kImuSpiHz buys nothing.
+//
+// tx_buf = nullptr clocks out 0xFF rather than the 0x00 the old loop sent. MOSI is
+// don't-care for the duration of a read, so the sensor cannot tell the two apart.
 void ImuSampler::imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len) {
   SPI.beginTransaction(SPISettings(kImuSpiHz, MSBFIRST, SPI_MODE3));
   digitalWrite(SPI_CS_IMU_PIN, LOW);
-  SPI.transfer(startReg | 0x80);  // 0x80 = READ bit
-  for (uint8_t i = 0; i < len; i++) buf[i] = SPI.transfer(0x00);
+  SPI.transfer(startReg | 0x80);    // 0x80 = READ bit
+  SPI.transfer(nullptr, buf, len);  // len dummy bytes out, the answer straight into buf
   digitalWrite(SPI_CS_IMU_PIN, HIGH);
   SPI.endTransaction();
 }
@@ -402,7 +420,14 @@ void ImuSampler::closeWindow() {
   pendingRow_.braking = winBraking_ ? 1 : 0;
   pendingRow_.sflpNan = winSflpNan_ ? 1 : 0;
   pendingRow_.fifoOvf = winFifoOvf_ ? 1 : 0;
-  if (rowSink_) rowSink_(pendingRow_);
+  if (rowSink_) {
+    // The sink is the analyzer plus - in a Csv build - the imu.csv row. Both sit inside
+    // the pop loop, so this is one of the two ways a row can hold up the drain; the
+    // other is the FIR eval in latchRowValues.
+    const uint32_t tSink = timeStart();
+    rowSink_(pendingRow_);
+    timeAdd(TIM_ROWSINK, tSink);
+  }
 }
 
 // Drain all pending FIFO words. Three tags are batched together: accel (2), gyro
@@ -423,9 +448,15 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   }
   fifoFlag_ = false;
 
+  // Below the gate, so TIM_UPDATE counts drains and not the far more numerous calls
+  // that only tested a flag - a mean over those would be meaningless.
+  WAVE_TIME(TIM_UPDATE);
+
   // Level and flags from one read, so the count and the flags describe the same
   // instant - see readFifoStatus for the register and why it is not the wrapper's.
+  const uint32_t tStatus = timeStart();
   const FifoStatus st = readFifoStatus();
+  timeAdd(TIM_STATUS, tStatus);
   const uint16_t nSamples = st.level;
 
   // Loss is OVR, not FULL. Counting FULL as loss over-reports - the brim can be reached
@@ -446,9 +477,14 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // Sync record first, so the words that follow it are the ones it describes.
   rawEmitSync(nSamples, lost ? kRawFlagFifoOvf : 0);
 
+  // TIM_POP spans the whole loop; TIM_SPI inside it isolates the bus from the work done
+  // on the words, and the difference between them is what the maths costs.
+  const uint32_t tPop = timeStart();
   for (uint16_t i = 0; i < nSamples; i++) {
     uint8_t payload[6];
+    const uint32_t tSpi = timeStart();
     const uint8_t tag = readFifoWord(payload);   // tag + data, one transfer
+    timeAdd(TIM_SPI, tSpi);
     // EVERY word, including tags this code does not decode: the raw log is a record
     // of what the sensor produced, not of what the wave chain happens to consume.
     rawEmitWord(tag, payload);
@@ -491,8 +527,10 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
         // One update per raw sample - no divider. dt comes from samplePeriodMs_,
         // which self-calibrates against the wall clock, so a slow drain shows up as
         // a longer dt rather than as a silently wrong integration rate.
+        const uint32_t tAhrs = timeStart();
         ahrs_.update(latestGx_ * kMdps2Rads, latestGy_ * kMdps2Rads, latestGz_ * kMdps2Rads,
                      axS, ayS, azS, (float)samplePeriodMs_ * 1.0e-3f);
+        timeAdd(TIM_AHRS, tAhrs);
         // The attitude is not filtered, but it is carried back by the same group
         // delay the FIR imposes on ax..gz, so the whole row describes one instant.
         // At one step per sample that delay is kFirHalf pushes exactly.
@@ -579,6 +617,7 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
       lastUnknownTag_ = tag;
     }
   }
+  timeAdd(TIM_POP, tPop);
 
   // HER, og bare her, skrives dreneringen til kortet. FIFO-en er nettopp tømt, så
   // dette er det ene punktet i runden der et sd-stall møter fullt overskrivnings-
@@ -588,7 +627,14 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // Rekkefølgen mot readFifoStatus() under er ikke tilfeldig: den lesingen skal skje
   // ETTER skrivingen, for det er under skrivingen en overflow nå oppstår, og
   // FIFO_OVR_LATCHED er det eneste sporet den etterlater seg.
+  // TIM_FLUSH is the sd-card, seen from the one place that can threaten the FIFO. Its
+  // max is the number to hold against the drain budget when a capture reports an
+  // overrun; flushBytes turns it into us/kB so a slow card and a big write can be told
+  // apart. The byte count is read before flushRaw resets rawLen_.
+  wave_timing.addFlushBytes(rawLen_);
+  const uint32_t tFlush = timeStart();
   flushRaw();
+  timeAdd(TIM_FLUSH, tFlush);
 
   lastDrainMs_ = millis();
 
@@ -605,7 +651,9 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
     // above. A card stall mid-loop can fill the FIFO and overwrite words, and the rest
     // of the loop then drains the level back under the brim - so the next drain's
     // FIFO_OVR_IA reads zero and the loss would leave no trace anywhere else.
+    const uint32_t tRearm = timeStart();
     const FifoStatus after = readFifoStatus();
+    timeAdd(TIM_STATUS, tRearm);
     if (after.ovrLatched) pendingOvrLatched_ = true;
     if (after.level >= kFifoWatermark) fifoFlag_ = true;
   }
@@ -624,6 +672,11 @@ void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs) {
   if (!debug_serial || imu_debug_print_period == 0) return;
   uint32_t now = millis();
   if (now - dbgLastPrint_ < imu_debug_print_period) return;
+
+  // The printout is itself work done inside the capture loop: ~250 characters at 115200
+  // baud is over 20 ms of blocking writes, which is a tenth of the drain budget. Timed
+  // like everything else, so it can be ruled in or out rather than assumed harmless.
+  const uint32_t tDbg = timeStart();
 
   double elapsedS = (now - dbgLastPrint_) / 1000.0;
   double accHz = elapsedS > 0 ? nAccDbg_ / elapsedS : 0.0;
@@ -647,4 +700,48 @@ void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs) {
   nUnknownDbg_ = 0;
   nAccDbg_ = nGyrDbg_ = 0;
   dbgLastPrint_ = now;
+
+  if (wave_timing_enabled) {
+    /*
+      Every bucket as n and mean/max in microseconds, four to a line. MEAN AND MAX BOTH,
+      and the max is the one that matters here: a stall is by definition a tail event, and
+      a mean over a 20 s window with ~380 drains in it would divide a 300 ms stall down to
+      under a millisecond and hide exactly what we are looking for.
+
+      Microseconds throughout rather than a scaled unit per bucket - a reader comparing
+      two columns should not first have to check which one is in ms.
+    */
+    for (uint8_t i = 0; i < TIM_COUNT; i++) {
+      const TimeStat &s = wave_timing.b[i];
+      if (i % 4 == 0) dbg.print(i == 0 ? "[TIM] " : "\n      ");
+      dbg.print(kTimingNames[i]); dbg.print(' ');
+      dbg.print(s.n);             dbg.print("x ");
+      dbg.print(s.meanUs());      dbg.print('/');
+      dbg.print(s.maxUs);         dbg.print("us  ");
+    }
+    dbg.println();
+
+    // The two per-unit numbers the buckets cannot show directly, plus the raw log's write
+    // cost per byte - which is what separates a slow card from a big write.
+    const TimeStat &spi = wave_timing.b[TIM_SPI];
+    const TimeStat &ahrs = wave_timing.b[TIM_AHRS];
+    const TimeStat &flush = wave_timing.b[TIM_FLUSH];
+    dbg.print("      per word ");   dbg.print(spi.meanUs());
+    dbg.print(" us  per ahrs ");    dbg.print(ahrs.meanUs());
+    dbg.print(" us  raw ");         dbg.print(wave_timing.flushBytes / 1024.0, 1);
+    dbg.print(" kB");
+    if (wave_timing.flushBytes > 0) {
+      dbg.print(" at ");
+      dbg.print((float)flush.sumUs / (float)wave_timing.flushBytes, 2);
+      dbg.print(" us/B");
+    }
+    dbg.println();
+
+    // Reset the window, THEN charge this print to the window that just opened: measured
+    // into the window it closes, the value would be wiped by the reset one line above it.
+    // The dbgprint column therefore describes the PREVIOUS print - one interval late,
+    // which is the only way a report can carry its own cost at all.
+    wave_timing.resetInterval();
+    timeAdd(TIM_DBGPRINT, tDbg);
+  }
 }

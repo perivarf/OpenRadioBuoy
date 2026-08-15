@@ -18,12 +18,36 @@
 
 // Per-capture SD logging: one directory "<stamp>", never renamed. Up to six files
 // inside, all prefixed "<stamp>_": imu, gps, ses, cfg, spec, ana.
-//
+
 // An interrupted capture is told apart by what is MISSING, not by the folder name:
 // spec/ana are written by processReading and ses.csv gets its summary block there,
 // so a folder without ana.csv - or a ses.csv with no stop_utc_epoch - never reached
 // the end. That fact is a plain consequence of the write order and needs no separate
 // marker to be kept in sync with it.
+
+// Misc timing calculations:
+
+// With kFifoDepthWords (256), rates f_imu and f_sflp the FIFO fills up in 
+// TimeToFillUpImu = kFifoDepthWords / (2·f_imu + f_sflp) = (for instance) 256 / (2·480 + 240) = 256 / 1200 = 213 ms
+
+// Draining N words depends on SPI rate. One word is 6B payload (x,y,z x 2B) + 1B tag. Address tag is 1B, so 8B total.
+// The floor would be
+// t_spi = N · (sizeof(addresstag) + sizeof(payload) + sizeof(tag)) B · 8 bit / f_spi  = 256 · 64 bit / 8 MHz = 2.05 ms
+
+// I.e. draining the FIFO is fast enough, the bottleneck is calculating AHRS filter + writing to SD card.
+// Writing this to SD card depends on the card speed class etc
+
+// Writing RAW-data to SD. 
+// 
+// N values (for instance 256) would be 256 · 8 B = 2 kB. A class 10 card is guaranteed to write at least 10 MB/s, so the floor is
+// t_write_sd = N · 8 B · 8 bit / 10 MB/s = 256 · 64 bit / 10 MB/s = 1.64 ms
+// 
+// At the same time, we are also limited by SPI speed of 12Mhz, which gives transfer time
+// t_transfer_sd = N · 8 B · 8 bit / 12 MHz = 256 · 64 bit / 12 MHz = 1.37 ms
+
+// So if we want i.e. 50% duty cycle for IMU-processing, we need to use at most 
+// TimeToFillUpImu * 50% = 106 ms to drain the FIFO, calculate AHRS and write to SD.
+
 
 static constexpr bool     wave_log_csv                    {true};
 static constexpr uint16_t wave_csv_sync_rows              {1024}; // File.sync() cadence
@@ -180,7 +204,7 @@ static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 // false falls back to pure polling
 // -----------------------------------------------------------------------------
 
-static constexpr bool kImuUseInt1 = true;
+static constexpr bool kImuUseInt1 = false;
 
 // FIFO-dybden i ord. IKKE 512, som denne fila hevdet fram til 2026-08-14:
 //
@@ -279,6 +303,43 @@ static_assert(1000 % kRowOdrHz == 0,
 // "is the drain healthy" and "is this thing still counting down".
 static constexpr uint32_t imu_debug_print_period = {20*s_2_ms};  // 20 s
 
+// -----------------------------------------------------------------------------
+// Tidsmåling av den varme stien (wave_timing.h). Et diagnoseverktøy, ikke en driftslogg:
+// slå den av igjen før en utsetting som skal vare, slik at målingen ikke er med i de
+// tallene den selv skulle forklare.
+//
+// Hva den svarer på: budsjettet over sier at en fangst mister ord først når det går mer
+// enn kFifoDepthWords / kFifoWordsPerSec uten en drenering. Råloggen viser AT slike
+// opphold finnes - sync-posten stempler hver drenering med millis - men ikke HVA tiden
+// gikk med. Bøttene i wave_timing.h måler hver del av løkka mot det samme budsjettet:
+// SPI per ord, Madgwick per sample, FIR per rad, råloggens sd-skriving, den periodiske
+// sync-en, GPS-raden, og hele iterasjonen, så en stall kan tilskrives noe konkret.
+//
+// PRISEN, og den skal leses før tallene brukes: målingen koster to micros()-kall per
+// FIFO-ord og to per accel-sample, altså 300-400 kall på en drenering på ~128 ord.
+// micros() er en SysTick-avlesning på ~0.5-1 us, så det er ~0.3 ms lagt til en drenering
+// på ~5 ms - rundt 6 %. TIM_SPI og TIM_AHRS er derfor systematisk litt for høye, og
+// TIM_POP bærer overheaden fra begge. Godt nok til å finne en stall på hundrevis av ms;
+// ikke godt nok til å sitere 18 us/ord som en eksakt verdi.
+//
+// Rapporteres to steder: en [TIM]-linje på seriemonitoren hver imu_debug_print_period,
+// og en aggregatblokk i ses.csv ved capture-slutt (den overlever en feltkjøring uten
+// seriemonitor). ses.csv-blokka skrives fra processReading, så en avbrutt fangst får
+// ingen - samme forbehold som resten av sammendraget.
+//
+// Begge steder rapporteres n, MIDDEL og MAKS. Maks er den som betyr noe når spørsmålet er
+// overrun: en stall er per definisjon en haleverdi, og et middel over tusenvis av
+// dreneringer deler en utligger på 300 ms ned i støyen. Middelet sier hva løkka normalt
+// koster, maks sier om noe i den kan ha tømt budsjettet.
+//
+// Målt kostnad ved å slå den AV igjen (orb_drifter, 2026-08-15): flash faller tilbake til
+// utgangspunktet, mens de ~312 byte som wave_timing-globalen legger i .bss blir stående -
+// en global med ekstern linkage fjernes ikke selv om ingen leser den. Mot 12 kB ledig RAM
+// er det uvesentlig, men det er ikke null, og det er verdt å vite før noen leter etter
+// forskjellen.
+// -----------------------------------------------------------------------------
+static constexpr bool wave_timing_enabled {true};
+
 // Raw IMU log: the 6-byte payload of every FIFO word verbatim, where imu.csv is the
 // FIR-decimated record. Not decoded on the way out - the sensitivities are in the
 // header, and this runs inside the drain. No per-word timestamp: word order is the time
@@ -325,10 +386,17 @@ static constexpr uint16_t kRawBlockBytes     = 512;   // SD block; buffered, not
 //
 // Om årsaken, siden den ble feildiagnostisert her først: analysen 2026-08-14 tolket de
 // periodiske tapene (~446 s fra hverandre) som at kortet stanset 700-900 ms av seg selv,
-// og konkluderte med at 213 ms uansett ikke rakk. Det var galt. Etter at vaktmerket gikk
-// fra 128 til 64 og fristen ble utledet av ordraten, forsvant tapene HELT - noe de ikke
-// kunne gjort mot en reell 800 ms stall. Det var margin, ikke kort: ved WTM 128 sto
-// FIFO-en 224 av 256 full etter en tapt flanke, og da holder en vanlig blokkskriving.
+// og konkluderte med at 213 ms uansett ikke rakk. Det var for kategorisk. Etter at
+// vaktmerket gikk fra 128 til 64 og fristen ble utledet av ordraten, falt tapene
+// dramatisk - fra 24-42 per økt ved WTM 128 til 1 på ~20 min, målt 2026-08-15. Marginen
+// var altså hovedsaken: ved WTM 128 sto FIFO-en 224 av 256 full etter en tapt flanke, og
+// da holder en vanlig blokkskriving.
+//
+// Men de forsvant ikke HELT, slik denne kommentaren hevdet fram til 2026-08-15, og det
+// gjenstående tapet kan ikke forklares av en tapt flanke: fristen på 106 ms etterlater
+// 128 av 256 nivåer, så en overrun krever over 213 ms uten drenering. Noe bruker den
+// tiden. wave_timing_enabled er lagt inn for å finne ut hva - ikke fordi konklusjonen
+// over var feil, men fordi den var basert på fravær av tap og nå har et moteksempel.
 static constexpr uint16_t kRawBufBytes =
     (uint16_t)kFifoDepthWords * kRawWordBytes + kRawSyncBytes;   // 256*7 + 17 = 1809
 
@@ -590,12 +658,13 @@ static constexpr uint8_t kSflpRotationTag = 0x13;          // FIFO tag: SFLP rot
 // Words the FIFO takes in a second: accel and gyro at kImuOdrHz, plus the rotation
 // vector at the fusion's own rate when it is batched. This is the denominator behind
 // every timing claim in the INT1 section above.
+
 static constexpr uint32_t kFifoWordsPerSec =
     2u * (uint32_t)kImuOdrHz + (kEnableSflp ? (uint32_t)kSflpOdrHz : 0u);
 
 // Deferred from the INT1 section: it is kFifoWordsPerSec above that it needs.
 //
-// Fristen er «tiden det tar å samle to vaktmerker til». En fast verdi klarer ikke to
+// Fristen er «tiden det tar å samle to vannmerker til». En fast verdi klarer ikke to
 // ODR-er: 80 ms lot 480 Hz stå igjen med 96 ord etter en tapt flanke, men 960 Hz med
 // 19 - og senket man den til 50 for å redde 960, kom den under vaktmerkets egen takt
 // ved 480 og ble den normale utløseren i stedet for reserven. Utledet av ordraten
@@ -609,6 +678,8 @@ static constexpr uint32_t kFifoWordsPerSec =
 //
 // Merk at formen også setter et tak på vaktmerket: 3*kFifoWatermark må under
 // kFifoDepthWords, altså WTM <= 85. Den øvre assert-en er det som håndhever det.
+
+
 static constexpr uint32_t kFifoPollFallbackMs =
     2u * (uint32_t)kFifoWatermark * 1000u / kFifoWordsPerSec;
 

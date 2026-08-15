@@ -5,6 +5,7 @@
 #include <SPI.h>
 #include <LSM6DSV16XSensor.h>
 #include "wave_config.h"
+#include "wave_timing.h"  // wave_timing buckets; compiles away with wave_timing_enabled
 #include "fir.h"
 #include "fir_coeffs.h"   // kFirCoeffsStage1 - generated, see tools/gen_fir_table.py
 #include "quat_delay.h"

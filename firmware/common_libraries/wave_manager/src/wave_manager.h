@@ -115,6 +115,7 @@ class WaveManager {
   void writeSessionAnchor(void);    // reading ID + start UTC (crash-safe, written up front)
   void writeSessionConfig(File &f); // cfg.csv: every constant the capture depends on
   void writeSessionSummary(bool ok, const WaveParams &params);  // stop UTC, duration, rows, params
+  void writeTimingBlock(void);      // wave_timing buckets; empty unless wave_timing_enabled
   void serviceGps(uint32_t relMs);  // drive gps_manager.update(); log a gps.csv row per fix
   bool waitForGpsFix(void);         // block up to wave_gps_fix_timeout for a valid PVT
 
