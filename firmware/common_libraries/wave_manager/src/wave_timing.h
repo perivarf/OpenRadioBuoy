@@ -117,7 +117,8 @@ enum TimingBucket : uint8_t {
   TIM_WELCH,       // the deferred accumSegment: one FFT every 25.6 s, ~88 ms. n is the
                    // segment count and must match welch_segments in ana.csv exactly -
                    // a shortfall means segments are being dropped, not just delayed.
-  TIM_GPS,         // serviceGps: the receiver poll and one gps.csv row
+  TIM_GPS,         // serviceGps: the receiver poll and one gps.csv row. n = 0 when
+                   // wave_gps_track_in_capture is off - the call is compiled out
   TIM_LOOP,        // one capture-loop iteration, delay() excluded
   TIM_DBGPRINT,    // the serial report itself - 115200 baud is not free
   TIM_COUNT

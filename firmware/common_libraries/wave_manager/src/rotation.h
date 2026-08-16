@@ -2,22 +2,21 @@
 #define ROTATION_H
 
 /*
-  Quaternion / rotation math shared by the orientation methods, split out of
-  wave_analysis.cpp and madgwick.cpp so neither owns primitives the other needs:
+  Quaternion / rotation math shared by the orientation methods, so neither owns
+  primitives the other needs:
 
     Madgwick  -> rollPitchFromAccel + quatFromRollPitch to seed its quaternion
     Kalman    -> rollPitchFromAccel for the accel measurement, quatFromRollPitch
                  to turn the two filtered angles back into a quaternion
     both/SFLP -> verticalAccel to project body acceleration onto world Z
 
-  Convention throughout: q = [w,x,y,z], body -> world, right-handed, roll about x
-  and pitch about y, yaw = 0 (unobservable without a magnetometer). Every method
-  must produce this same convention, otherwise verticalAccel() silently returns
-  the wrong projection.
+  Convention throughout: q = [w,x,y,z], body -> world, right-handed, roll about x and
+  pitch about y, yaw = 0 (unobservable without a magnetometer). Every method must
+  produce this same convention, or verticalAccel() silently returns the wrong
+  projection.
 
-  Deliberately free of Arduino / wave_config.h dependencies (only <math.h>), so
-  it compiles on a host next to tools/postprocess.py - hence gravity is
-  a parameter rather than kGravity.
+  Deliberately free of Arduino and config dependencies (only <math.h>), so it compiles
+  on a host next to tools/postprocess.py - hence gravity is a parameter, not kGravity.
 */
 
 // Tilt from one accel sample: roll about x, pitch about y (rad). Valid only when

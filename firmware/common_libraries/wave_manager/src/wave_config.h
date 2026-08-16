@@ -29,10 +29,22 @@
 // Capture scheduling
 // -----------------------------------------------------------------------------
 
-// How long takeReading() waits for a valid GNSS solution before giving up.
+// How long takeReading() waits for a valid GNSS solution before giving up. Used for the
+// fix at each end of the capture. A ceiling, not a cost: waitForGpsFix returns on the
+// first fresh solution, which is ~100-200 ms with a lock (GPS_nav_period_ms is 100).
 static constexpr uint32_t wave_gps_fix_timeout {120000};  // ms
 
 // Whether that timeout ABORTS the capture or merely ends the wait.
 static constexpr bool wave_measurement_require_gps {true};
+
+// Whether the capture LOOP polls the receiver and logs the drift track to gps.csv.
+// The positions at each end of the window are taken either way - they come from calls
+// outside the loop, and the wave analysis reads nothing else from the GPS.
+//
+// What this costs when on: 383 us mean and 19.2 ms max per loop iteration, ~12 % of CPU
+// over a capture, and gps.csv's ~2 MB reservation. With it off there is no gps.csv at
+// all, and cfg.csv's gps_track_in_capture is what tells that apart from a receiver that
+// failed.
+static constexpr bool wave_gps_track_in_capture = false;
 
 #endif  // WAVE_CONFIG_H

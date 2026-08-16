@@ -26,12 +26,9 @@ struct WaveResult {
   uint16_t wave_spectrum[welch_bins];  // quantised acceleration PSD, bins welch_bin_min..max
   time_t   timestamp_start;
   time_t   timestamp_end;
-  /*
-    Position at the two ends of the capture window, 1e-7 deg, straight off
-    UBX_PVT so nothing is rescaled before the message needs it. 0 means no valid
-    fix was held at that moment, which the 'W' message forwards as 0,0 - see
-    readings.h for why that is the agreed way to say "unknown".
-  */
+  // Position at each end of the capture window, 1e-7 deg straight off UBX_PVT so
+  // nothing is rescaled before the message needs it. 0 means no valid fix was held
+  // then; the 'W' message forwards that as 0,0, the agreed "unknown" (readings.h).
   int32_t  lat_start_e7;
   int32_t  lng_start_e7;
   int32_t  lat_end_e7;
@@ -39,9 +36,12 @@ struct WaveResult {
 };
 
 /*
-  Wave manager: owns the IMU sampler and the streaming wave analyzer, and follows
-  the same manager contract as thermo_manager / gps_manager
+  Owns the IMU sampler and the streaming wave analyzer, and follows the same manager
+  contract as thermo_manager / gps_manager
   (begin/wake/sleep/takeReading/processReading/updateTransmitMessage + msgB).
+
+  Implemented across three files: wave_manager.cpp (lifecycle and the capture loop),
+  wave_session_log.cpp (the sd-card files), wave_message.cpp (radio serialisation).
 */
 class WaveManager {
  public:
@@ -70,15 +70,11 @@ class WaveManager {
   // length, or 0 if the queue is empty. Does NOT pop - see popTransmittedResult.
   size_t updateTransmitMessage(void);
 
-  /*
-    Serialise the front result's SPECTRUM into psdB ('P' ... 'E') and return the
-    length. Returns 0 when the queue is empty or kSendPsd is off, which the caller
-    reads as "nothing to send" - a build that does not transmit spectra simply
-    stops sending the second message, rather than sending an empty one.
-
-    Both messages carry the same ts_start, which is what pairs them up; see the
-    join-key note in readings.h.
-  */
+  // Serialise the front result's SPECTRUM into psdB ('P' ... 'E') and return the
+  // length. 0 when the queue is empty or kSendPsd is off, which the caller reads as
+  // "nothing to send" - a build that does not transmit spectra stops sending the second
+  // message rather than sending an empty one. Both messages carry the same ts_start,
+  // which is what pairs them up; see the join-key note in readings.h.
   size_t updatePsdTransmitMessage(void);
 
   // Drop the result the two updateTransmitMessage calls just serialised
@@ -89,9 +85,9 @@ class WaveManager {
   // the SAME deque processReading feeds, so everything downstream runs unmodified.
   void enqueueFakeResult(void);
 
-  // Dump the result that is about to be transmitted. Takes the stream as an argument
-  // rather than using Serial, because on the drifter Serial is never begun - the
-  // console is main.cpp's mySerial. Does NOT pop: call it before updateTransmitMessage.
+  // Dump the result about to be transmitted. Takes the stream as an argument because
+  // on the drifter Serial is never begun - the console is main.cpp's mySerial. Does NOT
+  // pop: call it before updateTransmitMessage.
   void printPendingResult(Print &out) const;
 #endif
 
@@ -119,8 +115,10 @@ class WaveManager {
   void appendImuCsvRow(const ImuRow &r);        // one imu.csv line; called from onRow
   void writeSpecCsv(void);                      // spec.csv: the PSD, bin by bin
   void writeAnaCsv(const WaveParams &params);   // ana.csv: counters + wave parameters
-  void serviceGps(uint32_t relMs);  // drive gps_manager.update(); log a gps.csv row per fix
-  bool waitForGpsFix(void);         // block up to wave_gps_fix_timeout for a valid PVT
+  void serviceGps(uint32_t relMs);  // poll the receiver, log a gps.csv row per fresh fix.
+                                    // Only called when wave_gps_track_in_capture is set
+  bool waitForGpsFix(void);         // block up to wave_gps_fix_timeout for a FRESH valid
+                                    // PVT; used at both ends of the capture
 
   // Reading ID continuity across resets. See seedReadingId in the .cpp.
   uint16_t countSessionDirs(void);  // session folders already under waves/
@@ -141,23 +139,22 @@ class WaveManager {
   File     gpsFile_;
   File     sessionFile_;
   File     rawFile_;               // <stamp>_raw.bin, only when wave_raw_log
-  bool     csvActive_ = false;     // session opened (gps/ses/spec/ana), all log modes
+  bool     csvActive_ = false;     // session opened (ses/spec/ana), all log modes
   bool     imuCsvActive_ = false;  // imu.csv specifically - false in WaveLogMode::Raw
+  bool     gpsCsvActive_ = false;  // gps.csv - false unless wave_gps_track_in_capture
   uint16_t rowsSinceSync_ = 0;
-  // Set by onRow when the sync cadence is due, acted on between drains. onRow runs
-  // from inside the FIFO pop loop, and sync() is the one call in the csv path that
-  // is not a plain block write: it seeks off to the FAT and the directory entry and
-  // back, which is exactly the kind of card operation that goes busy for hundreds of
-  // ms. Doing that with words still sitting in the FIFO spent the overwrite budget
-  // it needs. See syncImuCsvIfPending.
+  // Set by onRow when the sync cadence is due, acted on between drains. sync() is the
+  // one call in the csv path that is not a plain block write - it seeks off to the FAT
+  // and the directory entry and back, which is the kind of card operation that goes
+  // busy for hundreds of ms - and onRow runs inside the FIFO pop loop. See
+  // syncImuCsvIfPending.
   bool     imuSyncPending_ = false;
   char     logStamp_[16]   = "00000000_000000";  // YYYYMMDD_HHMMSS
   char     sessionDir_[40] = "";                  // waves/<stamp>
   uint32_t gpsRowsWritten_ = 0;
-  // Whether the capture started with a valid fix. Logged to ses.csv: with
-  // wave_measurement_require_gps false a capture can legitimately run without one,
-  // and this is what separates that from a receiver that failed - both leave gps.csv
-  // holding nothing but its header line.
+  // Whether the capture started with a valid fix, logged to ses.csv. With
+  // wave_measurement_require_gps false a capture can legitimately run without one, and
+  // this is what separates that from a receiver that failed.
   bool     gpsFixAtStart_ = false;
 
   uint16_t readingID_ = 0;
@@ -167,10 +164,15 @@ class WaveManager {
   time_t   captureEnd_ = 0;
 
   /*
-    Where the buoy was at each end of the window. Sampled at the same two lines
-    that set captureStart_/captureEnd_, so the position and the timestamp always
-    describe the same instant - reading the fix later would give whatever the
-    receiver had by then, which after a 30-minute drift is a different place.
+    Where the buoy was at each end of the window. Sampled next to the lines that set
+    captureStart_/captureEnd_, so each position belongs to its own end of the capture -
+    reading the fix later would give whatever the receiver had by then, which after a
+    30-minute drift is a different place.
+
+    The END pair is not quite simultaneous when wave_gps_track_in_capture is off: the
+    timestamp is taken when the loop exits, then the receiver is re-polled, so the
+    position is up to one fix later (~100-200 ms with a lock). The timestamp is the one
+    that has to stay honest, since ses.csv and the 'W' message both carry it.
   */
   struct FixE7 { int32_t lat = 0; int32_t lng = 0; };
   FixE7 captureStartPos_;

@@ -35,8 +35,7 @@ size_t WaveManager::updateTransmitMessage(void) {
   msgB[offset++] = 'W';
   msg_insert_uint(msgB, res.reading_ID, offset, wave_message_size, offset, true);
 
-  // Full time_t, 8 bytes, as every other message here serialises it - the split
-  // left this message small enough that narrowing buys nothing. See readings.h.
+  // Full time_t, 8 bytes, as every other message here serialises it. See readings.h.
   msg_insert_uint(msgB, res.timestamp_start, offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, res.timestamp_end,   offset, wave_message_size, offset, true);
 
@@ -45,10 +44,9 @@ size_t WaveManager::updateTransmitMessage(void) {
   msg_insert_uint(msgB, waveToFixed(res.Tp), offset, wave_message_size, offset, true);
   msg_insert_uint(msgB, waveToFixed(res.Tz), offset, wave_message_size, offset, true);
 
-  // msg_insert_int, so the sign survives: sign-and-magnitude, five bytes each, the
-  // same encoding the 'G' message uses for coordinates. They are already 1e-7 deg
-  // (gps_coord_scale) straight from the receiver, so nothing is rescaled here.
-  // 0,0 is what a window with no fix sends, and it means "unknown".
+  // msg_insert_int so the sign survives: sign-and-magnitude, five bytes each, the same
+  // encoding the 'G' message uses. Already 1e-7 deg (gps_coord_scale) straight from the
+  // receiver, so nothing is rescaled. 0,0 means "unknown" - see readings.h.
   msg_insert_int(msgB, res.lat_start_e7, offset, wave_message_size, offset, true);
   msg_insert_int(msgB, res.lng_start_e7, offset, wave_message_size, offset, true);
   msg_insert_int(msgB, res.lat_end_e7,   offset, wave_message_size, offset, true);
@@ -88,11 +86,9 @@ size_t WaveManager::updatePsdTransmitMessage(void) {
   };
   msg_insert_uint(psdB, toPsdFixed(res.max_value), offset, wave_spectrum_message_size, offset, true);
 
-  // Frequency axis, so the base station can label the bins it is about to read. Bin
-  // CENTRES, and the count immediately before the bins themselves - the receiver
-  // needs it to know how many to consume.
-  // wave_freq_scale, not scale_factor - see readings.h for why the axis needs the
-  // finer scale.
+  // Frequency axis, so the base station can label the bins it is about to read: bin
+  // CENTRES, then the count immediately before the bins themselves, which is what tells
+  // the receiver how many to consume. wave_freq_scale, not scale_factor - see readings.h.
   auto toFreqFixed = [](float f) -> uint32_t {
     return (uint32_t)llround((double)f * (double)wave_freq_scale);
   };
@@ -130,12 +126,11 @@ void WaveManager::enqueueFakeResult(void) {
   res.Tz        = 4.29f;   // s
   res.max_value = 0.0842f; // peak acceleration PSD ((m/s^2)^2/Hz)
 
-  // A single smooth peak, encoded exactly as finalize() does: the wire value is
-  // sqrt(binAcc/peakAcc) * 65535, so the far side reconstructs
-  // (value/65535)^2 * max_value. The sqrt has to be here too - a fixture that encodes
-  // linearly would still decode to a plausible-looking gaussian on the receiver and
-  // stop testing the one thing it exists to test.
-  // Peak placed off-centre so a mirrored or off-by-one bin axis is visible.
+  // A single smooth peak, encoded exactly as finalize() does: sqrt(binAcc/peakAcc) *
+  // 65535, so the far side reconstructs (value/65535)^2 * max_value. The sqrt has to be
+  // here too - a fixture that encoded linearly would still decode to a plausible
+  // gaussian and stop testing the one thing it exists to test. The peak sits off-centre
+  // so a mirrored or off-by-one bin axis is visible.
   const float peakBin = 0.35f * (float)kSpecNBins;
   const float width   = 0.12f * (float)kSpecNBins;
   for (size_t j = 0; j < kSpecNBins; j++) {
@@ -148,10 +143,10 @@ void WaveManager::enqueueFakeResult(void) {
   res.timestamp_start = res.timestamp_end -
                         (time_t)(wave_measurement_duration / s_2_ms);
 
-  // A short synthetic drift, and both signs present: a receiver that drops the
-  // sign character, or reads the pair in the wrong order, cannot produce these
-  // four numbers by accident. West of Greenwich on purpose - a bench test that
-  // only ever sees positive coordinates would not exercise the 'N' branch.
+  // A short synthetic drift with both signs present: a receiver that drops the sign
+  // character, or reads the pair in the wrong order, cannot produce these four numbers
+  // by accident. One is west of Greenwich on purpose - all-positive coordinates would
+  // never exercise the sign branch.
   res.lat_start_e7 =  599578000;   //  59.9578 N
   res.lng_start_e7 =  110686000;   //  11.0686 E
   res.lat_end_e7   =  599601000;   //  59.9601 N, drifted north
@@ -199,17 +194,15 @@ void WaveManager::printPendingResult(Print &out) const {
   printPos(F("    pos start"), r.lat_start_e7, r.lng_start_e7);
   printPos(F("    pos end  "), r.lat_end_e7,   r.lng_end_e7);
 
-  // The wire format is a normalised, sqrt-companded uint16 per bin; the base station
-  // reconstructs (value/65535)^2 * max_value. Both are printed so the raw payload can
-  // be checked against the decoded value without doing the arithmetic by hand - and
-  // this line must stay identical to print_wave_analysis_reading() in
-  // message_parser.cpp, since disagreeing with it is what would reveal a half-finished
-  // format change.
+  // Raw uint16 and decoded value side by side, so the payload can be checked without
+  // doing (value/65535)^2 * max_value by hand. Must stay identical to
+  // print_wave_analysis_reading() in message_parser.cpp - disagreement between the two
+  // is what would reveal a half-finished format change.
   //
-  // The frequency is built from kSpecFMinHz and kSpecBinWidthHz - the two values
-  // updateTransmitMessage puts in the message - rather than from welch_bin_min and
-  // the group size, so this really is the receiver's arithmetic and not a parallel
-  // derivation that could agree here and disagree over the air.
+  // The frequency is built from kSpecFMinHz and kSpecBinWidthHz, the two values the
+  // message actually carries, rather than from welch_bin_min and the group size - so
+  // this is the receiver's arithmetic and not a parallel derivation that could agree
+  // here and disagree over the air.
   if (!kSendPsd) {
     out.println(F("    PSD not transmitted (kSendPsd off) - num_bins 0"));
     return;

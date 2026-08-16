@@ -202,17 +202,23 @@ uint8_t WaveManager::takeReading(void) {
   wave_timing.resetCapture();
   captureStart_ = now();
   captureStartPos_ = currentFixE7();
+  // The end position is only assigned if a fix is actually held then, so it has to be
+  // cleared here - otherwise a capture that ends without one would report the PREVIOUS
+  // capture's position as its own.
+  captureEndPos_ = FixE7{};
   IWatchdog.reload();
 
   analyzer_.begin();
 
-  // Open the session directory (imu/gps/ses/cfg) BEFORE starting the FIFO stream: the
-  // mkdir + opening 4 files + writing headers/anchor/config + syncs take tens of ms of SD
-  // activity, and if the FIFO were already streaming it would overflow before the
-  // first drain. csvActive_ spans take+process: spec/ana are added and the session
-  // file closed in processReading -> stopSession.
+  // Open the session directory BEFORE starting the FIFO stream: the mkdir, the file
+  // opens and the headers/anchor/config take tens of ms of SD activity, and a FIFO
+  // already streaming would overflow before the first drain. csvActive_ spans
+  // take+process: spec/ana are added and the session file closed in processReading ->
+  // stopSession.
   csvActive_ = false;
-  imuCsvActive_ = false;   // startSession sets it; a failed open must not leave it set
+  // startSession sets these; a failed open must not leave them set.
+  imuCsvActive_ = false;
+  gpsCsvActive_ = false;
   if (wave_log_csv && sd_writer.active) {
     // Not a threat to the FIFO - the stream starts below - but it IS dead time inside the
     // measurement window, and preAllocate of a reservation this size is the one call here
@@ -259,9 +265,14 @@ uint8_t WaveManager::takeReading(void) {
     // the segment count, and it must equal welch_segments in ana.csv.
     const uint32_t tWelch = timeStart();
     if (analyzer_.processPendingSegment()) timeAdd(TIM_WELCH, tWelch);
-    const uint32_t tGps = timeStart();
-    serviceGps(elapsed);            // non-blocking GPS poll -> one gps.csv row per fix
-    timeAdd(TIM_GPS, tGps);
+    // The drift track, and the only GPS work inside the loop. Compiled out entirely
+    // when wave_gps_track_in_capture is off, which leaves tim_gps at n = 0; the
+    // positions at each end of the capture come from outside this loop either way.
+    if constexpr (wave_gps_track_in_capture) {
+      const uint32_t tGps = timeStart();
+      serviceGps(elapsed);          // non-blocking GPS poll -> one gps.csv row per fix
+      timeAdd(TIM_GPS, tGps);
+    }
     IWatchdog.reload();
     timeAdd(TIM_LOOP, tLoop);
     delay(2);  // let the FIFO refill; keeps the drain loop from spinning hot
@@ -287,11 +298,13 @@ uint8_t WaveManager::takeReading(void) {
       imuFile_.close();     IWatchdog.reload();
       if (wave_timing_enabled) wave_timing.stopImuUs = micros() - t0;}
 
-    const uint32_t tStopGps = timeStart();
-    gpsFile_.truncate();    IWatchdog.reload();
-    gpsFile_.sync();        IWatchdog.reload();
-    gpsFile_.close();       IWatchdog.reload();
-    if (wave_timing_enabled) wave_timing.stopGpsUs = micros() - tStopGps;
+    if (gpsCsvActive_) {
+      const uint32_t tStopGps = timeStart();
+      gpsFile_.truncate();  IWatchdog.reload();
+      gpsFile_.sync();      IWatchdog.reload();
+      gpsFile_.close();     IWatchdog.reload();
+      if (wave_timing_enabled) wave_timing.stopGpsUs = micros() - tStopGps;
+    }
 
     // The raw log's partial block has to be pushed BEFORE truncate(), or the tail is
     // cut at the last full block and the final records are lost. Detaching the sink
@@ -315,8 +328,26 @@ uint8_t WaveManager::takeReading(void) {
     // sessionFile_ stays open: the summary is appended in processReading.
   }
 
+  // Taken here, before the fix below: this is when the capture actually ended, and it is
+  // what ses.csv and the 'W' message carry.
   captureEnd_ = now();
-  captureEndPos_ = currentFixE7();
+
+  /*
+    The end position. With the loop polling, lastFix() is already fresh and this is a
+    read. Without it, lastFix() still holds the solution decoded BEFORE the capture -
+    and returning that would report a 30-minute drift of zero, which looks like a
+    measurement rather than a missing one. So re-poll.
+
+    waitForGpsFix is the right primitive rather than a bare gps_manager.update(): it
+    requires freshFix() && valid, so it cannot pass on the stale start fix, and it keeps
+    polling until one decodes - which matters because the receiver's DDC buffer has been
+    left unread for the whole capture. On failure the position stays 0,0, i.e. unknown.
+
+    No FIFO is at risk here: the drain loop has finished and nothing is left to lose.
+  */
+  if (wave_gps_track_in_capture || waitForGpsFix()) {
+    captureEndPos_ = currentFixE7();
+  }
   return 0;
 }
 
