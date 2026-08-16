@@ -439,6 +439,7 @@ void task_transmit() {
     sd_writer.logByteArray(thermo_manager.msgB, thermo_message_size);
     sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
 
+
     delay(200);
     LORA.packet_count++;
     IWatchdog.reload();
@@ -461,6 +462,8 @@ void task_transmit() {
     // not Serial: Serial is never begun on the drifter.
     wave_manager.printPendingResult(mySerial);
 #endif
+
+    // Wave statistics (Significant wave height, peak period, etc) message
     size_t wave_len = wave_manager.updateTransmitMessage();
     if (wave_len == 0){
       break;  // nothing serialised, so there is nothing to send or to pop
@@ -472,35 +475,17 @@ void task_transmit() {
     }
     message_data = LORA.sendData(wave_manager.msgB, (uint8_t)wave_len, 10000);
     IWatchdog.reload();
+
     delay(500);
-
-    /*
-      The result is only dropped once the radio confirmed TxDone. 
-    */
-    if (!message_data.sent){
-      if (debug_serial){
-        mySerial.println(F("Wave send got no TxDone - keeping result for the next window"));
-      }
-      break;
-    }
-
-    // Logged only on success, so a result that is retried next window does not end
-    // up on the SD card twice.
     sd_writer.logByteArray(wave_manager.msgB, wave_len);
     sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
-    LORA.packet_count++;
+    
     delay(200);
+    LORA.packet_count++;
+    IWatchdog.reload();
 
     /*
       The spectrum follows as its own message, paired to the one above by ts_start.
-      It is sent SECOND and BEST-EFFORT, and the result is popped either way.
-
-      That ordering is the point of the split. The parameters are what the
-      measurement is for and they are already delivered; the spectrum is four times
-      the airtime and the first thing a marginal link drops. Retrying the pair to
-      recover it would re-send Hs on a link that is already failing and keep the
-      queue from draining, so a lost 'P' costs the spectrum and nothing else - which
-      is exactly the failure mode the single combined message did not have.
     */
     size_t psd_len = wave_manager.updatePsdTransmitMessage();
     if (psd_len > 0){
@@ -509,17 +494,17 @@ void task_transmit() {
         mySerial.print(" bytes on "); mySerial.print(LORA.current_frequency, 3);
         mySerial.println(" MHz");
       }
+
       message_data = LORA.sendData(wave_manager.psdB, (uint8_t)psd_len, 10000);
       IWatchdog.reload();
+
       delay(500);
-      if (message_data.sent){
-        sd_writer.logByteArray(wave_manager.psdB, psd_len);
-        sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
-        LORA.packet_count++;
-        delay(200);
-      } else if (debug_serial){
-        mySerial.println(F("PSD send got no TxDone - parameters are already through, dropping the spectrum"));
-      }
+      sd_writer.logByteArray(wave_manager.psdB, psd_len);
+      sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
+
+      delay(200);
+      LORA.packet_count++;
+      IWatchdog.reload();
     }
 
     wave_manager.popTransmittedResult();
@@ -527,8 +512,11 @@ void task_transmit() {
 
   // Wrap up transmission, wait for base station instructions
   if (LORA.available){
-    LORA.transmitFinished(thermo_manager.temperatures.size());
+
+    LORA.transmitFinished(thermo_manager.temperatures.size()+wave_manager.wave_analysis_results.size());
+
     if (enable_baseStation_parameter_updates){
+
       // We listen for new parameters
       LORA.receiveInstructions();
 
@@ -538,7 +526,6 @@ void task_transmit() {
       //sd_writer.fetchRequestedMeasurements(LORA.measurementTargets);
     }
     LORA.updateMeasurementFrequency(gps_manager.current_buoy_velocity, maximal_measurement_period, minimal_measurement_period);
-
   }
   
   sd_writer.logString("Transmission done");
