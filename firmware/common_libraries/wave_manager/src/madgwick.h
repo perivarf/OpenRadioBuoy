@@ -17,6 +17,9 @@
   the initialisation set it to.
 */
 
+static constexpr float kMadgwickBeta = 0.05f;
+
+
 class Madgwick {
  public:
   explicit Madgwick(float beta) : beta_(beta) {}

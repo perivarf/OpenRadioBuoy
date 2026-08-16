@@ -4,72 +4,6 @@
 #include <math.h>
 
 // -----------------------------------------------------------------------------
-// FirRowBank
-// -----------------------------------------------------------------------------
-void FirRowBank::reset(void) {
-  ax_.reset(); ay_.reset(); az_.reset();
-  nx_.reset(); ny_.reset(); nz_.reset();
-  gx_.reset(); gy_.reset(); gz_.reset();
-  vacc_.reset();
-}
-
-void FirRowBank::push(float ax, float ay, float az,
-                      float nx, float ny, float nz,
-                      float gx, float gy, float gz, float vacc) {
-  ax_.push(ax); ay_.push(ay); az_.push(az);
-  nx_.push(nx); ny_.push(ny); nz_.push(nz);
-  gx_.push(gx); gy_.push(gy); gz_.push(gz);
-  vacc_.push(vacc);
-}
-
-void FirRowBank::eval(ImuRow &r) const {
-
-  // Eval gives value at centre of tap, so the series are aligned
-  // for both filtered and unfiltered.
-
-  // vacc_ is the only channel the wave chain reads - StreamAnalyzer::ingest takes
-  // r.vaccFir from the row and nothing else that comes from this bank - so it is
-  // evaluated unconditionally, filtered and unfiltered alike.
-  r.vaccFir = vacc_.eval();
-  r.vacc    = vacc_.center();
-
-  /*
-    The other nine are imu.csv columns and nothing else. Each of them has exactly one
-    reader: the print run in WaveManager::onRow, behind its early return on a closed
-    file. In WaveLogMode::Raw that file is never opened, and evaluating them anyway was
-    9/10 of TIM_FIR - 210 of 234 ms/s, the largest single per-second cost in the capture
-    loop - spent on nobody.
-
-    The gate is the COMPILE-TIME mode, not the runtime imuCsvActive_. That flag is also
-    false when the file merely failed to open, and a Csv capture must not quietly lose
-    nine columns because the sd-card had a bad day; it has to fail the way it does today.
-
-    Only the convolution is skipped. push() still runs for all ten (ImuSampler::update),
-    so every delay line stays warm and this remains a change to eval() alone - see
-    fir.h on why the two are separate and which of them carries the cost.
-  */
-  if constexpr (wave_mode_imu_csv()) {
-    // Filtered
-    r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
-    r.axnSflp = nx_.eval(); r.aynSflp = ny_.eval(); r.aznSflp = nz_.eval();
-    r.gx = gx_.eval(); r.gy = gy_.eval(); r.gz = gz_.eval();
-    r.vaccSflpFir = r.aznSflp * kMg2Ms2;
-
-    // Unfiltered
-    r.vaccSflp = nz_.center() * kMg2Ms2;
-  } else {
-    // Zeroed rather than left alone: pendingRow_ is reused across rows, so a field
-    // nothing writes would carry an indeterminate value under a real column name. No
-    // file can ever receive these - their only writer is gated on the same constant -
-    // but the row leaves here fully defined either way.
-    r.ax = r.ay = r.az = 0.0f;
-    r.axnSflp = r.aynSflp = r.aznSflp = 0.0f;
-    r.gx = r.gy = r.gz = 0.0f;
-    r.vaccSflpFir = r.vaccSflp = 0.0f;
-  }
-}
-
-// -----------------------------------------------------------------------------
 // ImuSampler
 // -----------------------------------------------------------------------------
 void ImuSampler::resetWindowing(uint32_t captureStartMs) {
@@ -375,20 +309,19 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   }
   timeAdd(TIM_POP, tPop);
 
-  // HERE, and only here, does the drain reach the card. The FIFO has just been
-  // emptied, so this is the one point in the round where an sd-stall meets the full
-  // overwrite budget: 256 free levels rather than the ~128 a mid-loop write left.
-  //
-  // The order against the re-arm read below matters: that read must come AFTER the
-  // write, because the write is where an overflow now happens and FIFO_OVR_LATCHED is
-  // the only trace it leaves.
-  //
-  // TIM_FLUSH is the sd-card seen from the one place that can threaten the FIFO. Its
-  // max is the number to hold against the drain budget when a capture reports an
-  // overrun; flushBytes turns it into us/kB, which separates a slow card from a big
-  // write. Booked only when bytes were ACTUALLY written - most drains return without
-  // touching the card (kRawFlushThreshold), and counting those would fill the bucket
-  // with zeros and make the mean useless as a measure of what a write costs.
+
+  // Calibrate the accel sample period from real elapsed time / total samples, so
+  // the time axis tracks the wall clock and the last sample lands on real elapsed time.
+  // TODO -> burde ikke denne vært fra forrige FIFO-drain?
+  if (accelIdx_ > 0) {
+    samplePeriodMs_ = (double)(millis() - sessionStartMs_) / (double)accelIdx_;
+  }
+  
+  // Updating last drain
+  lastDrainMs_ = millis();
+
+  // FIFO just been emptied, so flushing the raw log where it is least likely
+  // to overflow the FIFO buffer
   if (rawLog_) {
     const uint32_t tFlush = timeStart();
     const uint16_t wroteBytes = rawLog_->flush();
@@ -398,44 +331,18 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
     }
   }
 
-  lastDrainMs_ = millis();
-
-  if (kImuUseInt1) {
-    // Recovery from a lost rising edge, and the only one there is. The watermark
-    // interrupt is LEVEL driven: if this drain ended with the FIFO still above the
-    // watermark - after a blocking SD flush, say - the line never falls, no new RISING
-    // edge arrives, and the stream dies silently. Re-arm whenever a backlog remains.
-    //
-    // This read has a second job: it is the only one positioned to catch
-    // FIFO_OVR_LATCHED from the pop loop above. A card stall mid-loop can fill the FIFO
-    // and overwrite words, and the rest of the loop then drains the level back under
-    // the brim - so the next drain's FIFO_OVR_IA reads zero and the loss would leave no
-    // trace anywhere else.
-    const uint32_t tRearm = timeStart();
-    const ImuFifoStatus after = dev_.status();
-    timeAdd(TIM_STATUS, tRearm);
-    if (after.ovrLatched) pendingOvrLatched_ = true;
-    if (after.level >= kFifoWatermark) dev_.setFifoReady();
-  }
-
-  // Calibrate the accel sample period from real elapsed time / total samples, so
-  // the time axis tracks the wall clock and the last sample lands on real elapsed time.
-  if (accelIdx_ > 0) {
-    samplePeriodMs_ = (double)(millis() - sessionStartMs_) / (double)accelIdx_;
-  }
-
   debugPrintStatus(dbg, captureLeftMs);
 }
 
 // Print the effective accel/gyro sample rate + mean magnitudes
 void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs) {
   if (!debug_serial || imu_debug_print_period == 0) return;
+
   uint32_t now = millis();
   if (now - dbgLastPrint_ < imu_debug_print_period) return;
 
   // The printout is itself work done inside the capture loop: ~250 characters at 115200
-  // baud is over 20 ms of blocking writes, which is a tenth of the drain budget. Timed
-  // like everything else, so it can be ruled in or out rather than assumed harmless.
+  // baud is over 20 ms of blocking writes, which is a tenth of the drain budget at 480Hz.
   const uint32_t tDbg = timeStart();
 
   double elapsedS = (now - dbgLastPrint_) / 1000.0;

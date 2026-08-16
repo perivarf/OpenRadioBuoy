@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include "config.h"        // common_config.h: welch_bins (wire-format bin count)
 #include "wave_config.h"
-#include "imu_sampler.h"   // ImuRow
+#include "imu_row.h"       // ImuRow - ingest() takes one; the sampler itself is not needed
 #include "fir.h"           // FirDecimator - the second decimation stage
 #include "fir_coeffs.h"    // kFirCoeffsStage2
 

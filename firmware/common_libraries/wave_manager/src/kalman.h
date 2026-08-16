@@ -1,6 +1,8 @@
 #ifndef KALMAN_H
 #define KALMAN_H
 
+#include "constants.h"
+
 /*
   Quaternion Kalman AHRS for a 6-axis IMU: a multiplicative / error-state EKF.
   The attitude is carried as a unit quaternion and never enters the covariance;
@@ -83,6 +85,22 @@ struct KalmanAhrsParams {
   float gravity;   // [m/s^2]; ACCEL MUST BE IN THE SAME UNIT - see update()
   float p0Angle;   // initial attitude uncertainty [rad]
   float p0Bias;    // initial bias uncertainty [rad/s]
+};
+
+
+// Kalman: quaternion error-state EKF with an adaptive measurement noise. See kalman.h
+// for what R's three terms do.
+static constexpr KalmanAhrsParams kKalmanParams = {
+    /* sigmaG  */ 0.005f,        // rad/s/sqrt(Hz), ~0.3 deg/s/sqrt(Hz)
+    /* sigmaB  */ 1.0e-5f,       // rad/s^2/sqrt(Hz)
+    /* r0      */ 1.0e-3f,
+    /* dtRef   */ 0.020f,        // s - the rate the original parameter sweep was run at
+    /* lambdaA */ 0.0f,
+    /* lambdaW */ 2.0f,
+    /* w0      */ 1.0f,          // rad/s
+    /* gravity */ kGravity,
+    /* p0Angle */ 5.0f * (float)M_PI / 180.0f,    // 5 deg
+    /* p0Bias  */ 1.0f * (float)M_PI / 180.0f,    // 1 deg/s
 };
 
 class KalmanAhrs {

@@ -20,13 +20,6 @@
   the budget.
 */
 
-// -----------------------------------------------------------------------------
-// Units. Here because the sensitivities below are what they convert.
-// -----------------------------------------------------------------------------
-static constexpr float kGravity    = 9.80665f;
-static constexpr float kMg2Ms2     = kGravity / 1000.0f;             // mg -> m/s^2
-static constexpr float kMdps2Rads  = 1.0e-3f * (float)M_PI / 180.0f; // mdps -> rad/s
-
 // Upper edge of the analysed band. An analysis quantity, but it lives here because the
 // LPF2 divisor below is derived from it and has to come after it.
 static constexpr float kWaveFMax = 1.0f;

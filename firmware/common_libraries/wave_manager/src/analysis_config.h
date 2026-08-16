@@ -28,14 +28,14 @@
 // wave analysis whether or not imu.csv is written.
 //
 // The VALUE is chosen for the sd-card, not the analysis - stage 2 decimates to
-// kWelchInputOdrHz regardless. What it caps is offline reanalysis in WaveLogMode::Csv;
-// WaveLogMode::Raw logs every FIFO word at kImuOdrHz. Note that with LPF2 on,
-// kLpf2CutoffHz is the real ceiling for postprocessing either way.
+// kWelchInputOdrHz regardless.
 // -----------------------------------------------------------------------------
 static constexpr uint16_t kRowOdrHz    = 100;
 static constexpr uint16_t kRowPeriodMs = 1000 / kRowOdrHz;
 static_assert(1000 % kRowOdrHz == 0,
               "kRowOdrHz must divide 1000 - the row grid is kept in whole ms");
+static_assert(kRowOdrHz < kImuOdrHz,
+              "kRowOdrHz must be lower than kImuOdrHz");
 
 // Welch input rate: the end of the chain.
 static constexpr uint16_t kWelchInputOdrHz    = 10;
@@ -46,7 +46,6 @@ static_assert(1000 % kWelchInputOdrHz == 0,
 // -----------------------------------------------------------------------------
 // Orientation: AHRS -> vertical acceleration
 // -----------------------------------------------------------------------------
-static constexpr float kMadgwickBeta = 0.05f;
 
 // The AHRS runs on every raw sample straight off the FIFO - no divider and no FIR ahead
 // of it, so the gyro is integrated at the rate it was measured at and the quaternion
@@ -60,20 +59,6 @@ static_assert(kImuOdrHz <= kAhrsInputOdrCapHz,
               "the AHRS runs on every raw sample - kImuOdrHz above kAhrsInputOdrCapHz does "
               "not fit the CPU budget; lower the ODR rather than re-introducing a divider");
 
-// Kalman: quaternion error-state EKF with an adaptive measurement noise. See kalman.h
-// for what R's three terms do.
-static constexpr KalmanAhrsParams kKalmanParams = {
-    /* sigmaG  */ 0.005f,        // rad/s/sqrt(Hz), ~0.3 deg/s/sqrt(Hz)
-    /* sigmaB  */ 1.0e-5f,       // rad/s^2/sqrt(Hz)
-    /* r0      */ 1.0e-3f,
-    /* dtRef   */ 0.020f,        // s - the rate the original parameter sweep was run at
-    /* lambdaA */ 0.0f,
-    /* lambdaW */ 2.0f,
-    /* w0      */ 1.0f,          // rad/s
-    /* gravity */ kGravity,
-    /* p0Angle */ 5.0f * (float)M_PI / 180.0f,    // 5 deg
-    /* p0Bias  */ 1.0f * (float)M_PI / 180.0f,    // 1 deg/s
-};
 
 // THE orientation selection, at compile time: only the selected filter is linked and
 // only its state occupies RAM. The two share an API, so makeWaveAhrs() - which exists
@@ -142,20 +127,16 @@ static_assert(wave_measurement_filter_warm_up > (uint32_t)kFirNtap * kRowPeriodM
 
 // ---- Orientation delay ----
 // The quaternions are NOT filtered: attitude is already the output of a heavy low-pass
-// (Madgwick's accel correction has a multi-second time constant, and the gyro feeding it
-// is band-limited by the sea), so there is nothing to alias - and a linear FIR over
+// filter, so there is nothing to alias - and a linear FIR over
 // quaternion components neither preserves |q| = 1 nor survives the +-q sign ambiguity.
 //
-// What they DO need is the same DELAY: the FIR ahead of ax..gz is causal, so those
-// columns describe the signal kFirHalf raw samples earlier than the row's timestamp.
-// Holding a plain latest-quaternion would make the row describe two different instants -
-// ~4 deg of error at 1 Hz and 10 deg tilt. QuatDelay carries the attitude the same
-// distance back; see quat_delay.h.
+// Need to correct for delay. Due to FIR, ax..gz describe the signal kFirHalf raw samples earlier than the row's timestamp.
+// Holding a plain latest-quaternion would make the row describe two different instants
 //
 // The AHRS steps once per raw sample, so the delay is the FIR group delay itself - no
 // conversion, nothing that has to divide evenly, zero residual phase error.
-static constexpr uint16_t kQuatDelaySteps = kFirHalf;              // 64 raw samples
-static constexpr uint16_t kQuatDelaySlots = kQuatDelaySteps + 1;   // 65 (2080 B)
+static constexpr uint16_t kQuatDelaySteps = kFirHalf;
+static constexpr uint16_t kQuatDelaySlots = kQuatDelaySteps + 1;
 
 // -----------------------------------------------------------------------------
 // Braking wave detection: linear |a| over threshold long enough within a window.
@@ -256,7 +237,7 @@ static_assert(kPsdMaxBin > welch_bin_min,
               "kPsdMinFreq and kPsdMaxFreq are inside the same PSD bin - widen the "
               "band, or raise kWelchSegLen so the bins get finer");
 
-// welch_bins (common_config.h) is the SIZE of wave_spectrum[] and the message budget,
+// welch_bins is the SIZE of wave_spectrum[] and the message budget,
 // not the actual count. num_bins rides in the message and the spectrum is the last
 // field, so shipping fewer bins simply makes the message shorter (see readings.h).
 //

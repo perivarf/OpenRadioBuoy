@@ -18,7 +18,12 @@
   That follows from the write order and needs no separate marker to stay in sync with it.
 */
 
-static constexpr bool     wave_log_csv       {true};
+// Master switch for sd-logging. Off means startSession() is never called, so no session
+// directory is created and NONE of the seven files exist - raw.bin included, despite it
+// not being a csv. The capture itself is unaffected: the IMU is sampled, the wave chain
+// runs and the radio message goes out either way. wave_log_mode below is a different
+// question entirely - it picks the IMU FORMAT, and only once this is true.
+static constexpr bool     wave_log_to_sd     {true};
 static constexpr uint16_t wave_csv_sync_rows {1024};  // File.sync() cadence
 
 // Row widths for preAllocate(). Without it, too much time goes to allocating clusters

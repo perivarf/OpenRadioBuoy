@@ -2,75 +2,16 @@
 #define IMU_SAMPLER_H
 
 #include <Arduino.h>
+#include "constants.h"
 #include "wave_config.h"
 #include "wave_timing.h"  // wave_timing buckets; compiles away with wave_timing_enabled
-#include "fir.h"
+#include "imu_row.h"      // ImuRow, ImuRowSink - what a closed window produces
+#include "fir_row_bank.h" // FirRowBank - the ten first-stage decimation filters
 #include "fir_coeffs.h"   // kFirCoeffsStage1 - generated, see tools/gen_fir_table.py
 #include "quat_delay.h"
 #include "imu_device.h"   // ImuDevice, ImuFifoWord - the sensor, and the only place
                           // that knows which one it is
 #include "raw_log.h"      // RawLogWriter - the <stamp>_raw.bin byte format
-
-/*
-  One row per kRowPeriodMs. Every field describes the SAME instant - the window centre,
-  where the decimating FIR's group delay puts it (kFirS1DelayS, 66.7 ms at 960 Hz). The
-  quaternions are not filtered but are delayed by the same amount to match.
-  winStartMs labels the window; it is not the instant the values describe.
-*/
-struct ImuRow {
-  uint32_t winStartMs;                  // window start, relative ms from capture start
-  uint16_t n;                           // accel samples in the window (quality metric only)
-  float ax, ay, az;                     // FIR-decimated accel (mg, body frame)
-  float axnSflp, aynSflp, aznSflp;      // FIR-decimated linear accel rotated by the SFLP
-                                        // quaternion (mg, world frame, gravity removed)
-  float gx, gy, gz;                     // FIR-decimated gyro (mdps)
-  float qwSflp, qxSflp, qySflp, qzSflp; // on-chip SFLP quaternion, delay-matched to the above
-  uint8_t braking;                      // 1 if linear |a| > threshold long enough
-  uint8_t fifoOvf;                      // 1 if the FIFO overflowed while this window was open
-  float qw, qx, qy, qz;                 // the SELECTED WaveAhrs (Madgwick/Kalman) quaternion,
-                                        // delay-matched to the above
-  float vacc, vaccSflp;                 // UNFILTERED vertical linear accel (m/s^2) at the same
-                                        // instant: selected method, and SFLP
-  float vaccFir, vaccSflpFir;           // the same two series, FIR-decimated
-  uint8_t sflpNan;                      // 1 if a NaN SFLP quaternion was rejected in the window
-};
-
-// Called when a window closes. The row leaves ImuSampler complete, hence const.
-using ImuRowSink = void (*)(const ImuRow &);
-
-/*
-  The ten series decimated per row - everything imu.csv logs, all through the same
-  filter, so an offline AHRS sees the antialiasing the on-device one saw.
-
-  Cost is paid at the OUTPUT rate: push() is a store at kImuOdrHz, eval() the real work
-  at kRowOdrHz. Lowering kImuOdrHz makes them cheaper; lowering the row rate barely does.
-*/
-class FirRowBank {
- public:
-  explicit FirRowBank(const float *coeffs)
-      : ax_(coeffs), ay_(coeffs), az_(coeffs),
-        nx_(coeffs), ny_(coeffs), nz_(coeffs),
-        gx_(coeffs), gy_(coeffs), gz_(coeffs), vacc_(coeffs) {}
-
-  void reset(void);
-
-  // One raw sample into all ten delay lines. Accel/NED in mg, gyro in mdps, vacc in
-  // m/s^2 - the units the row is logged in, so no scaling happens after filtering.
-  void push(float ax, float ay, float az,
-            float nx, float ny, float nz,
-            float gx, float gy, float gz, float vacc);
-
-  // Evaluate all ten and fill the value fields of r. Also fills the unfiltered
-  // vacc pair from the delay lines' centre taps, so filtered and unfiltered land on
-  // one time base.
-  void eval(ImuRow &r) const;
-
- private:
-  FirDecimator ax_, ay_, az_;
-  FirDecimator nx_, ny_, nz_;
-  FirDecimator gx_, gy_, gz_;
-  FirDecimator vacc_;
-};
 
 /*
   The sampling pipeline: drain the FIFO, run the AHRS on every raw sample, decimate

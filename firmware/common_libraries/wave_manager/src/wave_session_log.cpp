@@ -123,7 +123,6 @@ bool WaveManager::startSession(void) {
   if (wave_mode_imu_csv()) {
     snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_IMU_PREFIX);
     imuFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
-    imuCsvActive_ = (bool)imuFile_;
   }
   // No drift track means no gps.csv at all, rather than one holding only its header -
   // that is what a failed receiver produces, and the two must stay distinguishable.
@@ -131,12 +130,11 @@ bool WaveManager::startSession(void) {
   if (wave_gps_track_in_capture) {
     snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_GPS_PREFIX);
     gpsFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
-    gpsCsvActive_ = (bool)gpsFile_;
   }
   snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_SESSION_PREFIX);
   sessionFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
-  if ((wave_mode_imu_csv() && !imuCsvActive_) ||
-      (wave_gps_track_in_capture && !gpsCsvActive_) || !sessionFile_) {
+  if ((wave_mode_imu_csv() && !imuFile_) ||
+      (wave_gps_track_in_capture && !gpsFile_) || !sessionFile_) {
     if (debug_serial) Serial.println("WaveManager: could not open session files");
     return false;
   }
@@ -156,11 +154,11 @@ bool WaveManager::startSession(void) {
   const uint32_t durationS = wave_measurement_duration / s_2_ms;
   const uint32_t imuBytes  = (uint32_t)kRowOdrHz * durationS * wave_imu_row_bytes_max;
   const uint32_t gpsBytes  = durationS * GPS_nav_rate_hz * wave_gps_row_bytes_max;
-  if (imuCsvActive_ && !imuFile_.preAllocate(imuBytes) && debug_serial) {
+  if (imuFile_ && !imuFile_.preAllocate(imuBytes) && debug_serial) {
     Serial.print("WaveManager: imu preAllocate failed, "); Serial.print(imuBytes);
     Serial.println(" B - sd-card may be full or fragmented");
   }
-  if (gpsCsvActive_ && !gpsFile_.preAllocate(gpsBytes) && debug_serial) {
+  if (gpsFile_ && !gpsFile_.preAllocate(gpsBytes) && debug_serial) {
     Serial.println("WaveManager: gps preAllocate failed");
   }
 
@@ -194,7 +192,7 @@ bool WaveManager::startSession(void) {
     }
   }
 
-  if (imuCsvActive_) { imuFile_.println(kImuCsvHeader); imuFile_.sync(); }
+  if (imuFile_) { imuFile_.println(kImuCsvHeader); imuFile_.sync(); }
 
   // Decoded SI units, one column per NAV-PVT channel the analysis uses - the format
   // postprocess.py and mapplot.py read as they stand. vUp is what the GPS elevation
@@ -204,7 +202,7 @@ bool WaveManager::startSession(void) {
   // No alt_msl/vN/vE: nothing reads them. The height is GPS height and says nothing
   // about the waves, and the horizontal velocity is already in gspeed. vUp is the one
   // velocity channel the analysis actually builds on.
-  if (gpsCsvActive_) {
+  if (gpsFile_) {
     gpsFile_.println("rel_ms,utc,lat,lon,gspeed,vUp,head,"
                      "sAccuracy,hAccuracy,vAccuracy,pdop,fix,sats");
     gpsFile_.sync();
@@ -534,14 +532,14 @@ void WaveManager::writeTimingBlock(void) {
 // - it is a second write, of the same fact, that can land or not land on its own.
 void WaveManager::stopSession(void) {
   if (sessionFile_) { sessionFile_.sync(); sessionFile_.close(); }
-  csvActive_ = false;
+  sessionActive_ = false;
 }
 
 // GPS drift track: drive the non-blocking poll and append one gps.csv row per fresh
 // fix. update() never blocks long enough to starve the IMU FIFO (see gps_manager).
 void WaveManager::serviceGps(uint32_t relMs) {
   gps_manager.update();
-  if (!csvActive_ || !gpsCsvActive_ || !gps_manager.freshFix()) return;
+  if (!sessionActive_ || !gpsFile_ || !gps_manager.freshFix()) return;
   const UBX_PVT &f = gps_manager.lastFix();
   // Scaled to SI here, in the writer, and not kept scaled in UBX_PVT: the module's
   // integers stay exact for everything else that reads lastFix() (the radio message

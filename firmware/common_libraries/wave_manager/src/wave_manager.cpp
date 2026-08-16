@@ -145,7 +145,7 @@ void WaveManager::onRow(const ImuRow &r) {
   analyzer_.ingest(r);  // the row arrives complete; the analyzer only consumes it
   rowCount_++;
 
-  if (!imuCsvActive_) return;   // Raw-only mode: the analyzer above still ran
+  if (!imuFile_) return;   // Raw-only mode: the analyzer above still ran
   appendImuCsvRow(r);           // see wave_session_log.cpp
 
   // Only a flag here: sync() is the one call in the csv path that is not a plain block
@@ -168,7 +168,7 @@ void WaveManager::onRow(const ImuRow &r) {
 void WaveManager::syncImuCsvIfPending(void) {
   if (!imuSyncPending_) return;
   imuSyncPending_ = false;
-  if (imuCsvActive_) imuFile_.sync();
+  if (imuFile_) imuFile_.sync();
 }
 
 
@@ -176,15 +176,14 @@ void WaveManager::syncImuCsvIfPending(void) {
 // Capture: stream the IMU FIFO for wave_measurement_duration.
 // -----------------------------------------------------------------------------
 uint8_t WaveManager::takeReading(void) {
+
+  // Return if IMU not working
   if (!imuOk_) return 1;
 
-  // Deliberately the FIRST thing after the IMU check: an abort must not consume a
-  // reading ID, create a session folder or reserve the clusters, so a run that never
-  // sees the sky leaves the sd-card exactly as it was. The wait runs whatever
-  // wave_measurement_require_gps says - the answer is logged as gps_fix_at_start
-  // either way, and only the ABORT is conditional. enable_GPS wins over the
-  // requirement: demanding a fix from a build with no receiver would abort forever.
+  // Wait for gps fix to set start location for measurements
   gpsFixAtStart_ = waitForGpsFix();
+
+  // In case we require GPS and no fix, we return
   if (!gpsFixAtStart_ && wave_measurement_require_gps && enable_GPS) {
     if (debug_serial) {
       Serial.println("WaveManager: capture skipped - wave_measurement_require_gps");
@@ -193,38 +192,31 @@ uint8_t WaveManager::takeReading(void) {
     return 2;
   }
 
-  seedReadingId();  // no-op once done; covers a card that was not up at begin()
+  // Get reading ID
+  seedReadingId();
   readingID_++;
+
+  // Initialize row counts
   rowCount_ = 0;
   gpsRowsWritten_ = 0;
+
   // Zeroed with the other per-capture counters, so the block in ses.csv describes THIS
   // capture and carries nothing over from the previous one.
   wave_timing.resetCapture();
   captureStart_ = now();
   captureStartPos_ = currentFixE7();
-  // The end position is only assigned if a fix is actually held then, so it has to be
-  // cleared here - otherwise a capture that ends without one would report the PREVIOUS
-  // capture's position as its own.
-  captureEndPos_ = FixE7{};
+  captureEndPos_ = FixE7{}; // Initialize end position as start, will be overwritten at the end if successful logging
   IWatchdog.reload();
 
+  // Start the analyzer (produces PSD and wave parameters)
   analyzer_.begin();
 
-  // Open the session directory BEFORE starting the FIFO stream: the mkdir, the file
-  // opens and the headers/anchor/config take tens of ms of SD activity, and a FIFO
-  // already streaming would overflow before the first drain. csvActive_ spans
-  // take+process: spec/ana are added and the session file closed in processReading ->
-  // stopSession.
-  csvActive_ = false;
-  // startSession sets these; a failed open must not leave them set.
-  imuCsvActive_ = false;
-  gpsCsvActive_ = false;
-  if (wave_log_csv && sd_writer.active) {
-    // Not a threat to the FIFO - the stream starts below - but it IS dead time inside the
-    // measurement window, and preAllocate of a reservation this size is the one call here
-    // that can run into hundreds of ms. Recorded as a single value: it happens once.
+  // Logging to the sd-card is optional
+  sessionActive_ = false;
+
+  if (wave_log_to_sd && sd_writer.active) {
     const uint32_t tStart = timeStart();
-    csvActive_ = startSession();
+    sessionActive_ = startSession();
     if (wave_timing_enabled) wave_timing.startSessionUs = micros() - tStart;
   }
 
@@ -242,11 +234,7 @@ uint8_t WaveManager::takeReading(void) {
   uint32_t start = millis();
   while (millis() - start < wave_measurement_duration) {
     const uint32_t elapsed = millis() - start;
-    // TIM_LOOP covers the body but NOT the delay below, so it measures work rather than
-    // the pause. It is the bucket that catches what the others do not: a drain that
-    // arrives late with the INT1 flag already set spent that time somewhere in here, and
-    // if TIM_LOOP's max exceeds the sum of the buckets inside it, the time went to
-    // something none of them measure.
+    // TIM_LOOP covers the body but NOT the delay below
     const uint32_t tLoop = timeStart();
     // The countdown rides along on the IMU report rather than printing on its own:
     // the two answer one question together - whether the capture is still running,
@@ -278,7 +266,7 @@ uint8_t WaveManager::takeReading(void) {
     delay(2);  // let the FIFO refill; keeps the drain loop from spinning hot
   }
 
-  if (csvActive_) {
+  if (sessionActive_) {
     // Timed per FILE, not as one total: handing back a reservation is the expensive part,
     // and the three files hold wildly different ones (the raw log reserves tens of MB, the
     // gps log a couple). A single number would say that shutdown was slow without saying
@@ -291,14 +279,14 @@ uint8_t WaveManager::takeReading(void) {
     // length. Without it every session folder would claim its full reservation and
     // the tail would read as garbage. Safe to call whether or not preAllocate
     // succeeded: with no reservation the position already is the end of the file.
-    if (imuCsvActive_) {
+    if (imuFile_) {
       const uint32_t t0 = timeStart();
       imuFile_.truncate();  IWatchdog.reload();
       imuFile_.sync();      IWatchdog.reload();
       imuFile_.close();     IWatchdog.reload();
       if (wave_timing_enabled) wave_timing.stopImuUs = micros() - t0;}
 
-    if (gpsCsvActive_) {
+    if (gpsFile_) {
       const uint32_t tStopGps = timeStart();
       gpsFile_.truncate();  IWatchdog.reload();
       gpsFile_.sync();      IWatchdog.reload();
@@ -332,19 +320,8 @@ uint8_t WaveManager::takeReading(void) {
   // what ses.csv and the 'W' message carry.
   captureEnd_ = now();
 
-  /*
-    The end position. With the loop polling, lastFix() is already fresh and this is a
-    read. Without it, lastFix() still holds the solution decoded BEFORE the capture -
-    and returning that would report a 30-minute drift of zero, which looks like a
-    measurement rather than a missing one. So re-poll.
-
-    waitForGpsFix is the right primitive rather than a bare gps_manager.update(): it
-    requires freshFix() && valid, so it cannot pass on the stale start fix, and it keeps
-    polling until one decodes - which matters because the receiver's DDC buffer has been
-    left unread for the whole capture. On failure the position stays 0,0, i.e. unknown.
-
-    No FIFO is at risk here: the drain loop has finished and nothing is left to lose.
-  */
+  /* The end position. If we used gps track in capture, then we already have fix,
+     otherwise we will wait */
   if (wave_gps_track_in_capture || waitForGpsFix()) {
     captureEndPos_ = currentFixE7();
   }
@@ -375,9 +352,9 @@ uint8_t WaveManager::processReading(void) {
   res.max_value = params.maxValue;
 
   // spec.csv + ana.csv into the same session directory as imu/gps/ses, then the
-  // session summary. Only when startSession succeeded (csvActive_). These files are
+  // session summary. Only when startSession succeeded (sessionActive_). These files are
   // what a reader checks to tell a finished capture from an interrupted one.
-  if (csvActive_ && sd_writer.active) {
+  if (sessionActive_ && sd_writer.active) {
     writeSpecCsv();
     writeAnaCsv(params);
     writeSessionSummary(ok, params);   // closes out the session file (anchor + summary)

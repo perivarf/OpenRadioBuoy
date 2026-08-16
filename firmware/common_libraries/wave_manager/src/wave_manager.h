@@ -138,10 +138,11 @@ class WaveManager {
   File     imuFile_;
   File     gpsFile_;
   File     sessionFile_;
-  File     rawFile_;               // <stamp>_raw.bin, only when wave_raw_log
-  bool     csvActive_ = false;     // session opened (ses/spec/ana), all log modes
-  bool     imuCsvActive_ = false;  // imu.csv specifically - false in WaveLogMode::Raw
-  bool     gpsCsvActive_ = false;  // gps.csv - false unless wave_gps_track_in_capture
+  File     rawFile_;               // <stamp>_raw.bin, only when wave_mode_imu_raw()
+  // Session directory opened: ses/spec/ana in every log mode, and raw.bin with them -
+  // hence not "csv". The per-file flags below say which of the OPTIONAL streams made it;
+  // this one says whether there is a session at all.
+  bool     sessionActive_ = false;
   uint16_t rowsSinceSync_ = 0;
   // Set by onRow when the sync cadence is due, acted on between drains. sync() is the
   // one call in the csv path that is not a plain block write - it seeks off to the FAT
