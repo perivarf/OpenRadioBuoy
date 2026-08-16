@@ -64,7 +64,20 @@ struct UBX_PVT{
   the project's config.h.
 */
 static constexpr uint8_t  GPS_I2C_ADDR                   {0x42};
-static constexpr uint32_t GPS_I2C_CLOCK                  {100000};  // DDC tolerates up to 400 kHz
+// Every GPS cost in this driver is bus time: one byte is 9 bit periods, so 90 us at
+// 100 kHz and 22.5 at 400. The capture loop's timing buckets put GPS at 285 ms/s - 28 %
+// of the CPU - at 100 kHz, measured 2026-08-15, and this is one of the two factors
+// behind that (the other is the NMEA traffic begin() now switches off).
+//
+// 400 kHz is what the SAM-M8Q's DDC port is rated for, and the module is alone on the
+// bus here: the temperature sensor is OneWire, and the only other Wire user in the repo
+// (common_libraries/gsm) is linked into orb_basestation only.
+//
+// The one thing this depends on that the code cannot see is the pull-up resistors - the
+// rise time at 400 kHz is four times tighter. If they are too weak the failure is loud
+// rather than silent: corrupt bytes fail the checksum in readPvtFrame, freshFix() stops
+// coming true, and begin()'s bus scan reports it at boot. Drop back to 100000 alone.
+static constexpr uint32_t GPS_I2C_CLOCK                  {400000};  // DDC max
 static constexpr uint16_t GPS_nav_rate_hz                {10};
 static constexpr uint16_t GPS_nav_period_ms              {1000 / GPS_nav_rate_hz};
 static constexpr uint16_t GPS_pvt_frame_size             {100};     // header 6 + payload 92 + checksum 2

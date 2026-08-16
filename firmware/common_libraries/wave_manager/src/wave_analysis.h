@@ -37,6 +37,14 @@ class StreamAnalyzer {
   void begin(void);              // reset all state for a new capture
   void ingest(const ImuRow &r);  // per row: decimate to kWelchInputOdrHz, accumulate Welch
 
+  // The Welch FFT, deferred out of the FIFO pop loop. ingest() only fills the ring and
+  // raises a flag; this is what actually runs accumSegment. Call it from the capture
+  // loop right after ImuSampler::update() returns - i.e. with the FIFO just drained,
+  // so the 88 ms has the whole depth in front of it instead of what a partly drained
+  // FIFO leaves. See the ring-slack section in wave_config.h. A no-op when no segment
+  // is pending, so calling it every iteration is free.
+  void processPendingSegment(void);
+
   // Finalise: average the PSD, derive wave parameters from the ELEVATION spectrum, and
   // fill the quantised spectrum bins (welch_bin_min..welch_bin_max) from the
   // ACCELERATION spectrum. Returns false if no usable segment.
@@ -54,6 +62,11 @@ class StreamAnalyzer {
   uint32_t     brakeRows() const { return nBrake_; }
   uint32_t     warmupRows() const { return nWarm_; }  // rows dropped before the AHRS settled
 
+  // Times the ring had no free slot and the FFT had to run inside the pop loop after
+  // all. Unreachable if kWelchRingSlack holds; non-zero means it does not, and the
+  // capture kept the deferral's numbers without its timing. Logged to ana.csv.
+  uint32_t     ringFullCount() const { return nRingFull_; }
+
  private:
   void pushWelch(float sample);  // push one 10 Hz sample into the segment
 
@@ -68,11 +81,20 @@ class StreamAnalyzer {
   // Counters.
   uint32_t n10_ = 0, nData_ = 0, nBrake_ = 0, nWarm_ = 0;
 
-  // Streaming Welch: one segment buffer + PSD accumulator.
-  float segBuf_[kWelchSegLen];
-  int   segFill_ = 0;
+  // Streaming Welch: one segment ring + PSD accumulator.
+  //
+  // A RING and not a plain buffer because accumSegment is deferred out of the pop loop:
+  // the samples that arrive while a full segment waits have to land somewhere, and the
+  // ring is kWelchRingSlack larger than a segment for exactly that. It also removes the
+  // memmove the old flat buffer needed - the read index moves instead of the data.
+  float ring_[kWelchRingLen];
+  uint16_t head_ = 0;      // where the next sample goes
+  uint16_t tail_ = 0;      // oldest sample = start of the segment being accumulated
+  uint16_t fill_ = 0;      // samples held, tail_ -> head_
+  bool     segPending_ = false;   // a full segment is waiting for processPendingSegment
   float psdAcc_[kWelchSegLen / 2 + 1];
   uint32_t nSeg_ = 0;
+  uint32_t nRingFull_ = 0;
 };
 
 #endif  // WAVE_ANALYSIS_H

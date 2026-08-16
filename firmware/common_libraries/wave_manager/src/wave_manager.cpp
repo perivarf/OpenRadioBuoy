@@ -338,6 +338,14 @@ uint8_t WaveManager::takeReading(void) {
     const uint32_t tSync = timeStart();
     syncImuCsvIfPending();          // deferred from onRow: never with the FIFO half full
     timeAdd(TIM_SYNCCSV, tSync);
+    // Third of the three deferrals, and the largest: ~88 ms of FFT once every 25.6 s.
+    // Same placement argument as the two above it and as the raw-log flush - update()
+    // has just returned, so the FIFO is empty and the whole depth is available. Inside
+    // the pop loop, where this used to run, it started with up to kFifoWatermark - 1
+    // words already standing. A no-op on the ~99.9% of iterations with nothing pending.
+    const uint32_t tWelch = timeStart();
+    analyzer_.processPendingSegment();
+    timeAdd(TIM_WELCH, tWelch);
     const uint32_t tGps = timeStart();
     serviceGps(elapsed);            // non-blocking GPS poll -> one gps.csv row per fix
     timeAdd(TIM_GPS, tGps);
@@ -382,7 +390,7 @@ uint8_t WaveManager::takeReading(void) {
       // sync-posten som beskriver den. Ingen drenering kan smyge seg inn mellom de to
       // linjene: INT1-rutinen setter bare et flagg, den tømmer ingenting.
       const uint32_t tStopRaw = timeStart();
-      imu_.flushRaw();          IWatchdog.reload();
+      imu_.flushRaw(true);      IWatchdog.reload();
       imu_.setRawSink(nullptr); IWatchdog.reload();
       rawFile_.truncate();      IWatchdog.reload();
       rawFile_.sync();          IWatchdog.reload();
@@ -576,7 +584,10 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("sflp_enabled,");       f.println(kEnableSflp ? 1 : 0);
   f.print("sflp_odr_hz,");        f.println(kSflpOdrHz, 1);
   f.print("sflp_rotation_tag,");  f.println(kSflpRotationTag);
-  f.print("imu_wake,");           f.println(kImuUseInt1 ? "int1_watermark" : "poll");
+  // "poll" meant something else before 2026-08-15: the drain ran on every loop iteration
+  // regardless of level. Both values now describe a watermark-paced drain, and the string
+  // is what lets a capture from either side of that change be told apart offline.
+  f.print("imu_wake,");           f.println(kImuUseInt1 ? "int1_watermark" : "poll_watermark");
   f.print("fifo_watermark,");     f.println(kFifoWatermark);
 
   // --- IMU.csv - windowing (raw ODR -> imu.csv rows) ---
@@ -729,7 +740,12 @@ void WaveManager::writeTimingBlock(void) {
   sessionFile_.print("tim_stop_total_us,");    sessionFile_.println(wave_timing.stopTotalUs);
 
   // The budget every number above is measured against, so the file can be read without
-  // the firmware that wrote it. See kFifoPollFallbackMs in wave_config.h.
+  // the firmware that wrote it. See kFifoFillMs in wave_config.h - this is that same
+  // quantity in microseconds, and kMaxDrainIntervalMs is the fraction of it the drain
+  // is allowed to use.
+  // Computed here in microseconds rather than as kFifoFillMs * 1000: the constant is
+  // integer milliseconds, so going through it would report 213000 where the budget is
+  // 213333, and this number exists to be measured against.
   sessionFile_.print("tim_fifo_budget_us,");
   sessionFile_.println((uint32_t)kFifoDepthWords * 1000000UL / kFifoWordsPerSec);
 }
@@ -863,6 +879,12 @@ uint8_t WaveManager::processReading(void) {
       af.print("raw_write_failures,"); af.println(imu_.rawWriteFailCount());
       af.print("welch_segments,");   af.println(analyzer_.segments());
       af.print("welch_seglen,");     af.println((int)kWelchSegLen);
+      // Times the deferred FFT had to run inside the pop loop after all, because the
+      // ring had no free slot. Unlike the two counters above this one does not condemn
+      // any data - the segments are identical either way - it says the capture kept the
+      // deferral's arithmetic without its timing, so tim_welch_us_max understates what
+      // the drain actually carried. Non-zero means kWelchRingSlack no longer holds.
+      af.print("welch_ring_full,");  af.println(analyzer_.ringFullCount());
       af.print("Hs,"); af.println(params.hs, 3);
       af.print("Tz,"); af.println(params.tz, 2);
       af.print("Tc,"); af.println(params.tc, 2);

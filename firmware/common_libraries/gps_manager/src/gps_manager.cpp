@@ -132,6 +132,39 @@ void GPS_Manager::begin(){
       sendUbx(0x06, 0x04, rstStart, 4);
       delay(50);
 
+      /*
+        Turn NMEA off on DDC. BEFORE the CFG-RATE below, so the sentences never get a
+        chance to come out at the raised rate.
+
+        The factory default on this port is GGA, GLL, GSA, GSV, RMC and VTG, emitted once
+        per navigation epoch - ten times a second once CFG-RATE has done its work. Nothing
+        in this repo reads NMEA, but readPvtFrame drains the WHOLE output buffer, so every
+        one of those bytes crosses the bus at the I2C byte cost before being discarded by
+        the 0xB5 sync test.
+
+        It was two thirds of the GPS bill: 285 ms/s measured 2026-08-15, which at 90 us per
+        byte (100 kHz) is ~3200 B/s where NAV-PVT itself needs ~1200.
+
+        The three-byte form of CFG-MSG sets the rate for the port the command ARRIVED on,
+        so this is scoped to DDC and leaves the module's UART configuration alone. The list
+        runs past the six that ship enabled: disabling a sentence that was already off
+        costs one message, and is cheaper than finding out later that it was on.
+
+        No CFG-CFG, so none of this reaches the module's flash - but shutdownGPS() ends with
+        Wire.end() and begin() runs again on every wake-up, so it is re-sent each cycle
+        anyway.
+      */
+      static const uint8_t kNmeaOff[] = {
+          0x00, 0x01, 0x02, 0x03, 0x04, 0x05,          // GGA GLL GSA GSV RMC VTG - on by default
+          0x06, 0x07, 0x08, 0x09, 0x0A, 0x0D, 0x0F};   // GRS GST ZDA GBS DTM GNS VLW
+      for (uint8_t i = 0; i < sizeof(kNmeaOff); i++){
+        uint8_t msg[3] = {0xF0, kNmeaOff[i], 0x00};    // class 0xF0 = NMEA, rate 0 = off
+        sendUbx(0x06, 0x01, msg, 3);
+        delay(10);
+        IWatchdog.reload();
+      }
+      flushDDC(availBytes());  // the ACKs, and whatever was already queued
+
       // UBX-CFG-RATE: measRate = GPS_nav_period_ms, navRate = 1, timeRef = GPS
       uint8_t rate[6] = {(uint8_t) (GPS_nav_period_ms & 0xFF),
                          (uint8_t) (GPS_nav_period_ms >> 8),

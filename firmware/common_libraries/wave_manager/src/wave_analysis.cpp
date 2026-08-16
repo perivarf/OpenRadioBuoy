@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "welch_window.h"  // kWelchWindowTable - generated, see the header for why
+
 /*
   Contains the wave chain (FFT / Welch / spectral moments) plus
   the second decimation stage for imu (ingest). 
@@ -45,29 +47,58 @@ static void fft(float *re, float *im, int n) {
   }
 }
 
-static inline float windowWeight(int i) {
-  const float N = (float)kWelchSegLen;
-  if (kWelchWindow == WindowType::Hamming) {
-    return 0.54f - 0.46f * cosf(2.0f * (float)M_PI * i / N);
-  } else {
-    float s = sinf((float)M_PI * i / N);  // Hann = sin^2(pi i / N)
-    return s * s;
-  }
-}
+/*
+  Sum of the squared window weights - the normalisation that gives a windowed estimate
+  the right absolute level (without it a Hann window alone would drop m0 by ~2.67).
 
+  Summed from kWelchWindowTable rather than generated alongside it, deliberately: it is
+  then consistent with the very weights it normalises by construction, and there is no
+  second place where Python and C could have computed the scale slightly differently.
+  One pass of kWelchSegLen multiply-adds, once per capture, and no transcendentals.
+*/
 static void ensureS2() {
   if (gS2Ready) return;
   double s2 = 0.0;
-  for (int i = 0; i < kWelchSegLen; i++) { float w = windowWeight(i); s2 += (double)w * w; }
+  for (int i = 0; i < kWelchSegLen; i++) {
+    const float w = kWelchWindowTable[i];
+    s2 += (double)w * w;
+  }
   gS2 = s2;
   gS2Ready = true;
 }
 
-// Window one segment, FFT, accumulate one-sided PSD into psdAcc[0..N/2].
-static void accumSegment(const float *seg, float *psdAcc) {
+/*
+  Window one segment, FFT, accumulate one-sided PSD into psdAcc[0..N/2].
+
+  Runs once every kWelchSegLen / kWelchOverlapDiv samples - 25.6 s at 10 Hz. It is the
+  longest uninterruptible stretch in the capture loop, so its cost is a FIFO question and
+  not only a CPU one: measured 117 ms on 2026-08-15, and 88 ms once the window became a
+  table lookup.
+
+  It is no longer called from pushWelch, i.e. no longer from inside the pop loop. Since
+  2026-08-15 pushWelch only raises segPending_ and processPendingSegment() - called from
+  the capture loop with the FIFO just drained - is what gets here. Same segments, same
+  order, same arithmetic; what changed is that the 88 ms now starts with the whole FIFO
+  depth in front of it (220 ms) rather than with up to kFifoWatermark - 1 words already
+  standing in it (165 ms). See the ring-slack section in wave_config.h.
+
+  The window multiply used to call sinf per sample. It is a table lookup since
+  2026-08-15 - see welch_window.h for why that is generated rather than computed, and
+  for why the result is not bit-identical to what sinf gave.
+
+  seg is the RING, not a flat segment, and start is where this segment begins in it. The
+  wrap is a compare-and-subtract rather than a modulo: kWelchRingLen is not a power of
+  two, so % would be a division per sample inside the hottest loop in the analyzer.
+*/
+static void accumSegment(const float *seg, uint16_t start, float *psdAcc) {
   ensureS2();
   const int N = kWelchSegLen;
-  for (int i = 0; i < N; i++) { gRe[i] = seg[i] * windowWeight(i); gIm[i] = 0.0f; }
+  uint16_t j = start;
+  for (int i = 0; i < N; i++) {
+    gRe[i] = seg[j] * kWelchWindowTable[i];
+    gIm[i] = 0.0f;
+    if (++j == kWelchRingLen) j = 0;
+  }
   fft(gRe, gIm, N);
   for (int k = 0; k <= N / 2; k++) {
     float mag2 = gRe[k] * gRe[k] + gIm[k] * gIm[k];
@@ -90,23 +121,52 @@ void StreamAnalyzer::begin(void) {
   fir2_.reset();
   curBucket_ = -1; bucketDone_ = false;
   n10_ = nData_ = nBrake_ = nWarm_ = 0;
-  segFill_ = 0; nSeg_ = 0;
+  head_ = tail_ = fill_ = 0; segPending_ = false;
+  nSeg_ = 0; nRingFull_ = 0;
   for (int k = 0; k <= kWelchSegLen / 2; k++) psdAcc_[k] = 0.0f;
   ensureS2();
 }
 
-// Push one sample into the segment; on a full segment FFT + accumulate PSD
-// and keep the last (N - step) samples (75% overlap).
+// Push one sample into the ring. NO FFT from here - this runs inside the FIFO pop loop,
+// and getting the 88 ms of accumSegment out of that loop is the whole point of the ring.
+// A full segment only raises the flag; processPendingSegment() below does the work.
 void StreamAnalyzer::pushWelch(float sample) {
-  segBuf_[segFill_++] = sample;
-  if (segFill_ >= kWelchSegLen) {
-    accumSegment(segBuf_, psdAcc_);
-    nSeg_++;
-    const int step = kWelchSegLen / kWelchOverlapDiv;
-    const int keep = kWelchSegLen - step;
-    memmove(segBuf_, segBuf_ + step, keep * sizeof(float));
-    segFill_ = keep;
+  // Nødventil, ikke normal vei. Ringen har kWelchRingSlack ledige slots utover et
+  // segment, og en drenering kan i verste fall levere 3 samples - så dette krever at
+  // det utsatte kallet er uteblitt helt, ikke bare kommet sent. Å kjøre FFT-en her er
+  // dårlig (den treffer en halvtømt FIFO), men å miste en sample er verre: segmentene
+  // ville ikke lenger ligge 256 samples fra hverandre, og PSD-en ville stille bli feil.
+  // static_assert-en ved kFifoWordsPerSec skal fange årsaken før den rekker hit.
+  if (fill_ == kWelchRingLen) {
+    nRingFull_++;
+    processPendingSegment();
   }
+
+  ring_[head_] = sample;
+  if (++head_ == kWelchRingLen) head_ = 0;
+  fill_++;
+  if (fill_ >= kWelchSegLen) segPending_ = true;
+}
+
+// The deferred half of pushWelch: FFT + accumulate PSD, then release one step of the
+// ring (75% overlap keeps the rest). Called from the capture loop with the FIFO just
+// drained - the same reasoning that moved the raw-log write and the imu.csv sync out of
+// the pop loop. Nothing here is timing-sensitive on its own; what matters is only WHERE
+// in the drain cycle it runs.
+//
+// The old flat buffer memmoved (kWelchSegLen - step) floats on every segment. The ring
+// moves tail_ instead, so those 3 kB of copying are gone as a side effect.
+void StreamAnalyzer::processPendingSegment(void) {
+  if (!segPending_) return;
+  segPending_ = false;
+
+  accumSegment(ring_, tail_, psdAcc_);
+  nSeg_++;
+
+  const uint16_t step = kWelchSegLen / kWelchOverlapDiv;
+  tail_ += step;
+  if (tail_ >= kWelchRingLen) tail_ -= kWelchRingLen;
+  fill_ -= step;
 }
 
 void StreamAnalyzer::ingest(const ImuRow &r) {
@@ -151,6 +211,13 @@ void StreamAnalyzer::ingest(const ImuRow &r) {
 }
 
 bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
+  // A segment that filled on the capture's LAST drain has no capture loop left to run
+  // it, so it is picked up here. This is the one choke point: psd() and segments() are
+  // only read after finalize() in processReading, so no caller can see a stale nSeg_.
+  // Same role as flushRaw(true) in the stop sequence - the deferral must not eat the
+  // tail. Costs 88 ms outside the capture window, where no FIFO is at risk.
+  processPendingSegment();
+
   // No partial bucket to flush any more: a decimated sample is either evaluated at
   // its bucket centre or not at all. At worst the final bucket is dropped - one
   // sample in ~18000, far below a Welch segment.

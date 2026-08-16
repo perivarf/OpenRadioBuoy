@@ -75,25 +75,55 @@ class ScopeUs {
 /*
   The buckets NEST, and reading them means knowing how:
 
-      loop  >  update  >  status + pop ( > spi, ahrs, fir, rowsink ) + flush + dbgprint
+      loop  >  status                                       (the gate read, every call)
+      loop  >  update  >  pop ( > spi, ahrs, fir, rowsink ) + flush + dbgprint + status
       loop  >  synccsv
+      loop  >  welch                                        (deferred out of rowsink)
       loop  >  gps
+
+  welch is a SIBLING of update and not inside it, and that is the whole point of it: the
+  FFT used to sit under rowsink, i.e. two levels inside the drain. Its 88 ms therefore
+  competed with the FIFO from a partly drained start. As a sibling it runs after update()
+  has returned, so it competes from an empty one. The number in the bucket does not
+  change when it moves - where it sits in this diagram is the change.
 
   So the columns do not sum to the capture - an inner bucket is counted again by every
   bucket around it. That is deliberate: the question is never "where did the second go"
   but "which of these could have held the drain past its budget", and for that each one
   has to be readable on its own.
+
+  status is the one bucket with call sites at TWO levels, and that is not an oversight.
+  The gate read at the top of update() runs on every call - it is what decides whether a
+  drain happens at all - so it sits under loop, outside TIM_UPDATE. The INT1 re-arm read
+  runs at the end of a drain and sits inside it. A build with kImuUseInt1 false has only
+  the first.
+
+  That split makes one ratio directly readable, which is why it is worth the irregularity:
+
+      status n / update n  =  polls per drain, i.e. the batching factor
+
+  and spi n / update n is the words per drain that produced it.
 */
 enum TimingBucket : uint8_t {
-  TIM_UPDATE = 0,  // one whole drain, INT1 gate excluded (a gated call is not a drain)
-  TIM_STATUS,      // readFifoStatus: the level/flags burst, and the re-arm read
+  TIM_UPDATE = 0,  // one whole drain; both gates excluded (a gated call is not a drain)
+  TIM_STATUS,      // readFifoStatus: the gate read on EVERY call, plus the re-arm read
   TIM_POP,         // the pop loop: SPI + AHRS + FIR + raw buffering for every word
   TIM_SPI,         // readFifoWord alone -> us per FIFO word
   TIM_AHRS,        // ahrs_.update alone -> us per orientation step
-  TIM_FIR,         // latchRowValues: 129 taps x 10 channels, once per row
-  TIM_ROWSINK,     // analyzer ingest + the imu.csv row, once per row
-  TIM_FLUSH,       // flushRaw -> the raw log's SD write. See flushBytes.
+  TIM_FIR,         // latchRowValues: 129 taps x 10 channels, once per row - but ONE
+                   // channel, not ten, when wave_log_mode drops imu.csv (FirRowBank::
+                   // eval). So this bucket is not comparable across log modes: a Raw
+                   // capture is ~1/10 of a Csv one because it does a tenth of the work.
+  TIM_ROWSINK,     // analyzer ingest + the imu.csv row, once per row. The Welch FFT was
+                   // the bulk of this bucket's max until 2026-08-15; it is TIM_WELCH now.
+  TIM_FLUSH,       // flushRaw -> the raw log's SD write. See flushBytes. Bare de
+                   // dreneringene som FAKTISK skrev telles: med kRawFlushThreshold
+                   // returnerer de fleste uten å røre kortet, og nuller i bøtta ville
+                   // gjort middelverdien ubrukelig som mål på hva en skriving koster.
   TIM_SYNCCSV,     // the periodic imu.csv sync(): FAT + directory, not just a block
+  TIM_WELCH,       // the deferred accumSegment: one FFT every 25.6 s, ~88 ms. n is the
+                   // segment count and must match welch_segments in ana.csv exactly -
+                   // a shortfall means segments are being dropped, not just delayed.
   TIM_GPS,         // serviceGps: the receiver poll and one gps.csv row
   TIM_LOOP,        // one capture-loop iteration, delay() excluded
   TIM_DBGPRINT,    // the serial report itself - 115200 baud is not free
@@ -104,7 +134,7 @@ enum TimingBucket : uint8_t {
 // either output looks up the same word in the enum above.
 inline constexpr const char *kTimingNames[TIM_COUNT] = {
     "update", "status", "pop", "spi", "ahrs", "fir",
-    "rowsink", "flush", "synccsv", "gps", "loop", "dbgprint"};
+    "rowsink", "flush", "synccsv", "welch", "gps", "loop", "dbgprint"};
 
 /*
   One global, in the same spirit as sd_writer and gps_manager: both ImuSampler and

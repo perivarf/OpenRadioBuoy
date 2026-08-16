@@ -124,11 +124,19 @@ class ImuSampler {
 
   // Raw log (wave_raw_log): the sink is handed whole blocks, never single records -
   // a 7-byte write per FIFO word would put ~1200 SdFat calls a second inside the
-  // drain. At kRawBlockBytes it is ~20 a second instead.
+  // drain. At kRawFlushThreshold it is ~8 a second instead.
   void setRawSink(RawBlockSink sink) { rawSink_ = sink; }
 
-  // Push the partial block. Call at end of capture, or the tail is lost.
-  void flushRaw(void);
+  // Skriv ut det som har samlet seg i rawBuf_, og returner antall bytes som faktisk
+  // gikk til sinken - 0 når ingenting ble skrevet.
+  //
+  // Normalveien (force = false) skriver BARE hele sektorer, og bare når minst
+  // kRawFlushThreshold har samlet seg; resten (< 512 B) blir liggende foran i
+  // bufferet til neste gang. Se skrivegrense-avsnittet i wave_config.h for hvorfor.
+  //
+  // force = true skriver ut alt, halen inkludert. Kreves ved slutten av en capture,
+  // ellers går siste delvise sektor tapt, og av nødventilen i rawAppend().
+  uint16_t flushRaw(bool force = false);
 
   // FIFO fills since the last debug print, which zeroes it on the way out.
   uint32_t overflowCount() const { return nOverflow_; }
@@ -154,7 +162,10 @@ class ImuSampler {
   static ImuSampler *s_self;
   static void isrTrampoline();
   volatile bool fifoFlag_ = false;
-  uint32_t lastDrainMs_ = 0;   // deadline for the INT1 gate; see kFifoPollFallbackMs
+  // When the last drain ENDED. Both gates in update() measure their deadline from here,
+  // not just the INT1 one - the trigger differs between the modes, the deadline does not.
+  // See kMaxDrainIntervalMs.
+  uint32_t lastDrainMs_ = 0;
 
   // FIFO_OVR_LATCHED picked up by the re-arm read at the END of a drain, carried to the
   // next one. That read is the only place an overrun DURING the pop loop is still

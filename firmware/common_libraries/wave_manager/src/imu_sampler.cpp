@@ -2,6 +2,7 @@
 #include "config.h"
 #include "rotation.h"
 #include <math.h>
+#include <string.h>   // memmove: flushRaw flytter halen fram etter en delvis skriving
 
 // -----------------------------------------------------------------------------
 // FirRowBank
@@ -24,19 +25,49 @@ void FirRowBank::push(float ax, float ay, float az,
 
 void FirRowBank::eval(ImuRow &r) const {
 
-  // Eval gives value at centre of tap, so the series are aligned 
+  // Eval gives value at centre of tap, so the series are aligned
   // for both filtered and unfiltered.
 
-  // Filtered
-  r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
-  r.axnSflp = nx_.eval(); r.aynSflp = ny_.eval(); r.aznSflp = nz_.eval();
-  r.gx = gx_.eval(); r.gy = gy_.eval(); r.gz = gz_.eval();
+  // vacc_ is the only channel the wave chain reads - StreamAnalyzer::ingest takes
+  // r.vaccFir from the row and nothing else that comes from this bank - so it is
+  // evaluated unconditionally, filtered and unfiltered alike.
   r.vaccFir = vacc_.eval();
-  r.vaccSflpFir = r.aznSflp * kMg2Ms2;
-  
-  // Unfiltered
-  r.vacc = vacc_.center();
-  r.vaccSflp = nz_.center() * kMg2Ms2;
+  r.vacc    = vacc_.center();
+
+  /*
+    The other nine are imu.csv columns and nothing else. Each of them has exactly one
+    reader: the print run in WaveManager::onRow, behind its early return on a closed
+    file. In WaveLogMode::Raw that file is never opened, and evaluating them anyway was
+    9/10 of TIM_FIR - 210 of 234 ms/s, the largest single per-second cost in the capture
+    loop - spent on nobody.
+
+    The gate is the COMPILE-TIME mode, not the runtime imuCsvActive_. That flag is also
+    false when the file merely failed to open, and a Csv capture must not quietly lose
+    nine columns because the sd-card had a bad day; it has to fail the way it does today.
+
+    Only the convolution is skipped. push() still runs for all ten (ImuSampler::update),
+    so every delay line stays warm and this remains a change to eval() alone - see
+    fir.h on why the two are separate and which of them carries the cost.
+  */
+  if constexpr (wave_mode_imu_csv()) {
+    // Filtered
+    r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
+    r.axnSflp = nx_.eval(); r.aynSflp = ny_.eval(); r.aznSflp = nz_.eval();
+    r.gx = gx_.eval(); r.gy = gy_.eval(); r.gz = gz_.eval();
+    r.vaccSflpFir = r.aznSflp * kMg2Ms2;
+
+    // Unfiltered
+    r.vaccSflp = nz_.center() * kMg2Ms2;
+  } else {
+    // Zeroed rather than left alone: pendingRow_ is reused across rows, so a field
+    // nothing writes would carry an indeterminate value under a real column name. No
+    // file can ever receive these - their only writer is gated on the same constant -
+    // but the row leaves here fully defined either way.
+    r.ax = r.ay = r.az = 0.0f;
+    r.axnSflp = r.aynSflp = r.aznSflp = 0.0f;
+    r.gx = r.gy = r.gz = 0.0f;
+    r.vaccSflpFir = r.vaccSflp = 0.0f;
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -216,8 +247,10 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
 // the centre of the current window
 void ImuSampler::latchRowValues() {
   // Timed here rather than at the two call sites: the normal one (a sample reaching the
-  // window centre) and the late one (closeWindow, after a FIFO gap) cost the same
-  // kFirNtap x 10 evaluation, and both run inside the pop loop.
+  // window centre) and the late one (closeWindow, after a FIFO gap) do the same work,
+  // and both run inside the pop loop. How much work that is depends on the log mode -
+  // kFirNtap taps across ten channels, or across one when imu.csv is not written. See
+  // FirRowBank::eval.
   WAVE_TIME(TIM_FIR);
   fir_.eval(pendingRow_);
   float mq[4], sq[4];
@@ -284,17 +317,24 @@ uint8_t ImuSampler::readFifoWord(uint8_t payload[6]) {
 
 // Raw log. Little-endian, layout documented at wave_raw_log in wave_config.h.
 //
-// APPEND ONLY - ingen skriving herfra. Bufferet rommer en hel drenering
-// (kRawBufBytes), og flushRaw() kalles av update() ETTER at pop-løkka har tømt
-// FIFO-en. Det er hele poenget: et sd-kort som stanser 800 ms skal treffe en tom
-// FIFO med 256 ledige nivåer, ikke en halvtømt med ~128. Se kRawBufBytes.
+// APPEND ONLY - ingen skriving herfra. Bufferet rommer resten under skrivegrensa
+// pluss en hel drenering (kRawBufBytes), og flushRaw() kalles av update() ETTER at
+// pop-løkka har tømt FIFO-en. Det er hele poenget: et sd-kort som stanser 800 ms skal
+// treffe en tom FIFO med 256 ledige nivåer, ikke en halvtømt med ~128.
+//
+// Kallet er uendret etter at kRawFlushThreshold kom inn 2026-08-15 - det er flushRaw()
+// selv som avgjør om denne dreneringen faktisk skal røre kortet. Plasseringen rett
+// etter en tømt FIFO er fortsatt den samme; stallen treffer bare sjeldnere.
+// Se kRawBufBytes og skrivegrense-avsnittet i wave_config.h.
 void ImuSampler::rawAppend(const uint8_t *p, uint8_t n) {
   if (!rawSink_) return;
-  // Nødventil, ikke normal vei: bufferet er dimensjonert for verste drenering, så
-  // dette kan bare skje om FIFO-en leverer mer enn kFifoDepthWords - altså om den
-  // konstanten er feil igjen. Da er en skriving midt i løkka bedre enn å skrive
-  // utenfor bufferet, og static_assert-en over er det som skal fange det først.
-  if (rawLen_ + n > kRawBufBytes) flushRaw();
+  // Nødventil, ikke normal vei: bufferet er dimensjonert for resten under
+  // skrivegrensa pluss en verste drenering, så dette kan bare skje om FIFO-en
+  // leverer mer enn kFifoDepthWords - altså om den konstanten er feil igjen. Da er
+  // en skriving midt i løkka bedre enn å skrive utenfor bufferet, og static_assert-en
+  // over er det som skal fange det først. force, ellers ville et kall som bare
+  // skriver hele sektorer kunne la det være igjen for lite plass til å hjelpe.
+  if (rawLen_ + n > kRawBufBytes) flushRaw(true);
   for (uint8_t i = 0; i < n; i++) rawBuf_[rawLen_++] = p[i];
 }
 
@@ -345,14 +385,33 @@ void ImuSampler::rawEmitSync(uint16_t nWords, uint16_t flags) {
   if (nRawWriteFail_ == failBefore) rawWriteFailPending_ = false;
 }
 
-void ImuSampler::flushRaw(void) {
-  if (rawSink_ && rawLen_ > 0) {
-    if (!rawSink_(rawBuf_, rawLen_)) {
-      nRawWriteFail_++;
-      rawWriteFailPending_ = true;
-    }
-    rawLen_ = 0;
+// Se skrivegrense-avsnittet i wave_config.h. Kort: normalveien skriver bare hele
+// sektorer, og bare når kRawFlushThreshold har samlet seg, slik at SdFat kan skyve
+// dem rett fra rawBuf_ til kortet uten å gå veien om sin ene 512-bytes cache.
+uint16_t ImuSampler::flushRaw(bool force) {
+  if (!rawSink_ || rawLen_ == 0) return 0;
+
+  // Grensa hører hjemme HER og ikke på kallstedet: kRawBufBytes er dimensjonert ut
+  // fra at det aldri ligger mer enn kRawFlushThreshold - 1 igjen når en drenering
+  // starter, og den invarianten holder bare hvis hvert kall respekterer den.
+  if (!force && rawLen_ < kRawFlushThreshold) return 0;
+
+  // force tar halen med; ellers ligger den igjen til neste drenering fyller opp en
+  // hel sektor rundt den. Restens plass er budsjettert i kRawBufBytes.
+  const uint16_t n = force ? rawLen_
+                           : (uint16_t)(rawLen_ / kRawBlockBytes) * kRawBlockBytes;
+  if (n == 0) return 0;
+
+  if (!rawSink_(rawBuf_, n)) {
+    nRawWriteFail_++;
+    rawWriteFailPending_ = true;
   }
+
+  // Resten flyttes fram. Opptil 511 B et par ganger i sekundet; forsvinnende mot
+  // skrivingen den nettopp ventet på.
+  rawLen_ -= n;
+  if (rawLen_ > 0) memmove(rawBuf_, rawBuf_ + n, rawLen_);
+  return n;
 }
 
 // Payload -> three int16 in LSB order. The driver truncates its own conversion to
@@ -436,27 +495,53 @@ void ImuSampler::closeWindow() {
 // advances exactly once per accel sample and they can never drift apart. Gyro and
 // SFLP words only latch their latest value for the accel branch to pair with.
 void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
-  // INT1 gate, with a deadline. The interrupt is a hint about WHEN to drain, never
-  // the authority on WHETHER to: a single lost edge would otherwise stop the capture
-  // permanently, which is exactly what was measured on 2026-08-04 (0 Hz, forever, no
-  // warning). Past kFifoPollFallbackMs the drain runs regardless and costs two
-  // register reads if there was genuinely nothing there.
-  if (kImuUseInt1 && !fifoFlag_ && (millis() - lastDrainMs_) < kFifoPollFallbackMs) {
+  // GATE 1, INT1 mode: the edge is the trigger. The interrupt is a hint about WHEN to
+  // drain, never the authority on WHETHER to - a single lost edge would otherwise stop
+  // the capture permanently, which is exactly what was measured on 2026-08-04 (0 Hz,
+  // forever, no warning). Past kMaxDrainIntervalMs the drain runs regardless and costs
+  // two register reads if there was genuinely nothing there.
+  if (kImuUseInt1 && !fifoFlag_ && (millis() - lastDrainMs_) < kMaxDrainIntervalMs) {
     // Still print, so a stalled interrupt shows up as frozen counters, not silence.
     debugPrintStatus(dbg, captureLeftMs);
     return;
   }
   fifoFlag_ = false;
 
-  // Below the gate, so TIM_UPDATE counts drains and not the far more numerous calls
-  // that only tested a flag - a mean over those would be meaningless.
-  WAVE_TIME(TIM_UPDATE);
-
   // Level and flags from one read, so the count and the flags describe the same
   // instant - see readFifoStatus for the register and why it is not the wrapper's.
+  //
+  // ABOVE the TIM_UPDATE scope, because in polling mode this read IS gate 2, and a
+  // gated call is not a drain. It is the same read either way, just moved.
   const uint32_t tStatus = timeStart();
   const FifoStatus st = readFifoStatus();
   timeAdd(TIM_STATUS, tStatus);
+
+  // GATE 2, polling mode: the LEVEL is the trigger, and it holds the drain back to the
+  // same batch size the watermark gives the INT1 path. The two modes share a deadline,
+  // not a trigger.
+  //
+  // Without this the drain ran on every loop iteration, because kImuUseInt1 being false
+  // short-circuits gate 1 out of the build entirely. That went unnoticed while the loop
+  // was slow; once the GPS work fell from 17 ms to 4.4 ms per iteration it became 169
+  // drains a second at 6.9 words each - and every drain costs a kRawSyncBytes record, so
+  // 2.9 kB/s of sync went into the raw log that its preAllocate never budgeted for. See
+  // kFifoWatermark: it is the STANDING LEVEL, and this is what makes it mean that again.
+  if (!kImuUseInt1 && st.level < kFifoWatermark &&
+      (millis() - lastDrainMs_) < kMaxDrainIntervalMs) {
+    // The read above RESETS FIFO_OVR_LATCHED - that is the whole reason readFifoStatus
+    // exists rather than the wrapper. A gated call therefore has to carry the bit
+    // forward or the loss it records dies with it, and at ~169 gated reads a second it
+    // would consume every overrun before a drain ever saw one. The failure would be
+    // silent in the worst way: not wrong numbers, just zero overruns, forever.
+    if (st.ovr || st.ovrLatched) pendingOvrLatched_ = true;
+    debugPrintStatus(dbg, captureLeftMs);
+    return;
+  }
+
+  // Below both gates, so TIM_UPDATE counts drains and not the far more numerous calls
+  // that only tested a flag or a level - a mean over those would be meaningless.
+  WAVE_TIME(TIM_UPDATE);
+
   const uint16_t nSamples = st.level;
 
   // Loss is OVR, not FULL. Counting FULL as loss over-reports - the brim can be reached
@@ -630,11 +715,18 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // TIM_FLUSH is the sd-card, seen from the one place that can threaten the FIFO. Its
   // max is the number to hold against the drain budget when a capture reports an
   // overrun; flushBytes turns it into us/kB so a slow card and a big write can be told
-  // apart. The byte count is read before flushRaw resets rawLen_.
-  wave_timing.addFlushBytes(rawLen_);
+  // apart.
+  //
+  // Bare bokført når det FAKTISK ble skrevet: etter at kRawFlushThreshold kom inn
+  // returnerer de fleste dreneringene uten å røre kortet, og å telle dem med ville
+  // fylle bøtta med nuller og gjøre middelverdien meningsløs nettopp som mål på hvor
+  // dyr en skriving er. n faller tilsvarende - ca. 8 i sekundet, ikke 18.
   const uint32_t tFlush = timeStart();
-  flushRaw();
-  timeAdd(TIM_FLUSH, tFlush);
+  const uint16_t wroteBytes = flushRaw();
+  if (wroteBytes > 0) {
+    timeAdd(TIM_FLUSH, tFlush);
+    wave_timing.addFlushBytes(wroteBytes);
+  }
 
   lastDrainMs_ = millis();
 
