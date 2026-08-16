@@ -25,8 +25,86 @@ WaveManager: logging session to waves/20260815_135144
       ahrs 9351x 199/211us  fir 2003x 2327/2413us  rowsink 2003x 19/251us  flush 1103x 2983/10911us  
       synccsv 1103x 2/3us  gps 1103x 5294/49846us  loop 1103x 16664/69492us  dbgprint 1x 31185/31185us  
       per word 28 us  per ahrs 199 us  raw 178.1 kB at 18.04 us/B
-[TIM] update 1075x 11575/53005us  status 1075x 33/48us  pop 1075x 8481/39625us  spi 23362x 28/31us  
-      ahrs 9345x 199/203us  fir 2002x 2325/2354us  rowsink 2002x 31/251us  flush 1075x 2997/11819us  
-      synccsv 1075x 2/3us  gps 1075x 5557/60814us  loop 1075x 17145/82903us  dbgprint 1x 35046/35046us  
-      per word 28 us  per ahrs 199 us  raw 177.5 kB at 17.72 us/B
-[IMU] 1599 s left  |  Accel: 467 Hz, Gyro: 467
+      
+      [TIM] update 919x 13944/622744us  status 919x 32/48us  pop 919x 9466/133544us  spi 21923x 28/31us  
+      ahrs 8770x 199/204us  fir 1886x 2320/2352us  rowsink 1887x 94/118063us  flush 919x 4386/522694us  
+      synccsv 919x 2/3us  gps 919x 6350/307533us  loop 919x 20308/808247us  dbgprint 1x 36761/36761us  
+      per word 28 us  per ahrs 199 us  raw 165.1 kB at 23.84 us/B
+[IMU] 739 s left  |  Accel: 467 Hz, Gyro: 467
+
+Etter NMEA / 400
+TIM] update 3381x 3747/18845us  status 3382x 22/47us  pop 3382x 2689/9483us  spi 23353x 28/32us  
+      ahrs 9340x 200/211us  fir 2003x 2334/2365us  rowsink 2003x 7/8us  flush 3382x 994/9795us  
+      synccsv 3381x 2/4us  gps 3381x 622/15025us  loop 3381x 4381/20047us  dbgprint 0x 0/0us  
+      per word 28 us  per ahrs 200 us  raw 215.8 kB at 15.22 us/B
+[IMU] 1760 s left  |  Accel: 467 Hz, Gyro: 467
+[TIM] update 3155x 4036/31482us  status 3155x 23/47us  pop 3155x 2888/21629us  spi 23345x 28/31us  
+      ahrs 9338x 200/204us  fir 2000x 2337/2361us  rowsink 2000x 19/249us  flush 3155x 1074/10137us  
+      synccsv 3155x 2/4us  gps 3155x 756/15228us  loop 3155x 4805/43463us  dbgprint 1x 30233/30233us  
+      per word 28 us  per ahrs 200 us  raw 212.0 kB at 15.62 us/B
+[IMU] 1740 s left  |  Accel: 467 Hz, Gyro: 467
+[TIM] update 3058x 4186/35299us  status 3058x 23/47us  pop 3058x 2987/17687us  spi 23330x 28/32us  
+      ahrs 9332x 200/213us  fir 1999x 2336/2388us  rowsink 1999x 31/249us  flush 3058x 1126/10082us  
+      synccsv 3058x 2/4us  gps 3058x 800/16024us  loop 3058x 5000/35538us  dbgprint 1x 33766/33766us  
+      per word 28 us  per ahrs 200 us  raw 210.3 kB at 16.00 us/B
+[TIM] update 3479x 3677/39157us  status 3479x 22/47us  pop 3479x 2630/24193us  spi 23339x 28/31us  
+      ahrs 9336x 201/205us  fir 2000x 2336/2359us  rowsink 2000x 31/250us  flush 3479x 974/9931us  
+      synccsv 3479x 2/4us  gps 3479x 517/16776us  loop 3479x 4208/52264us  dbgprint 1x 36212/36212us  
+      per word 28 us  per ahrs 201 us  raw 217.3 kB at 15.24 us/B
+[IMU] 1599 s left  |  Accel: 428 Hz, Gyro: 428  [WARN] FIFO overrun x5
+[TIM] update 2980x 4534/617493us  status 2980x 22/47us  pop 2980x 2869/119260us  spi 21418x 28/33us  
+      ahrs 8568x 201/226us  fir 1844x 2343/2369us  rowsink 1844x 95/117876us  flush 2980x 1596/516555us  
+      synccsv 2980x 2/3us  gps 2980x 624/252014us  loop 2980x 5171/858515us  dbgprint 1x 32476/32476us  
+      per word 28 us  per ahrs 201 us  raw 195.9 kB at 23.72 us/B
+
+Etter økning av fifo-drain (når ikke bruker interrupt)
+[IMU] 1699 s left  |  Accel: 465 Hz, Gyro: 465
+[TIM] update 353x 34022/65162us  status 3211x 19/51us  pop 353x 25902/31919us  spi 23275x 28/32us  
+      ahrs 9310x 200/208us  fir 2001x 2340/2366us  rowsink 2000x 31/250us  flush 353x 7991/12007us  
+      synccsv 3211x 2/3us  gps 3211x 698/15107us  loop 3211x 4473/65426us  dbgprint 1x 34118/34118us  
+      per word 28 us  per ahrs 200 us  raw 165.0 kB at 16.70 us/B
+[IMU] 1679 s left  |  Accel: 465 Hz, Gyro: 465
+[TIM] update 355x 33140/69615us  status 3719x 19/47us  pop 355x 25774/37306us  spi 23265x 28/31us  
+      ahrs 9306x 200/204us  fir 2000x 2344/2370us  rowsink 2000x 31/250us  flush 355x 7226/11843us  
+      synccsv 3719x 2/3us  gps 3719x 440/14687us  loop 3719x 3637/82168us  dbgprint 1x 36142/36142us  
+      per word 28 us  per ahrs 200 us  raw 164.9 kB at 15.19 us/B
+[TIM] update 352x 33894/154665us  status 3541x 19/51us  pop 352x 26324/144738us  spi 23243x 28/32us  
+      ahrs 9297x 200/212us  fir 1998x 2349/2374us  rowsink 1999x 90/117349us  flush 352x 7447/12248us  
+      synccsv 3541x 2/3us  gps 3541x 499/15096us  loop 3541x 3902/154946us  dbgprint 1x 33429/33429us  
+      per word 28 us  per ahrs 200 us  raw 164.7 kB at 15.54 us/B
+[IMU] 1639 s left  |  Accel: 464 Hz, Gyro: 464
+[TIM] update 350x 34721/148123us  status 3131x 19/47us  pop 350x 26485/141429us  spi 23233x 28/31us  
+      ahrs 9293x 200/204us  fir 1998x 2350/2370us  rowsink 1998x 90/117401us  flush 350x 8079/13609us  
+      synccsv 3131x 2/3us  gps 3131x 710/15481us  loop 3131x 4625/155759us  dbgprint 1x 35794/35794us  
+      per word 28 us  per ahrs 200 us  raw 164.6 kB at 16.77 us/B
+[IMU] 1619 s left  |  Accel: 464 Hz, Gyro: 464
+
+Etter welch-precomputed
+IMU] 1599 s left  |  Accel: 467 Hz, Gyro: 467
+[TIM] update 350x 34648/118085us  status 3116x 19/47us  pop 351x 26361/111326us  spi 23353x 28/32us  
+      ahrs 9341x 201/212us  fir 2004x 2336/2450us  rowsink 2004x 74/87301us  flush 351x 8245/77598us  
+      synccsv 3116x 2/4us  gps 3116x 714/14829us  loop 3116x 4650/127966us  dbgprint 1x 32313/32313us  
+      per word 28 us  per ahrs 201 us  raw 165.5 kB at 17.08 us/B
+[IMU] 1579 s left  |  Accel: 466 Hz, Gyro: 466
+[TIM] update 354x 33720/125127us  status 3507x 19/50us  pop 354x 26112/114968us  spi 23343x 28/32us  
+      ahrs 9337x 201/209us  fir 2003x 2336/2364us  rowsink 2003x 74/87264us  flush 354x 7486/10470us  
+      synccsv 3507x 2/3us  gps 3507x 527/14771us  loop 3507x 3964/125455us  dbgprint 1x 34736/34736us  
+      per word 28 us  per ahrs 201 us  raw 165.4 kB at 15.64 us/B
+Fikk en overrun nå, gir det mening? 
+[TIM] update 353x 33987/120323us  status 3437x 19/47us  pop 353x 26261/113558us  spi 23330x 28/31us  
+      ahrs 9332x 201/205us  fir 2001x 2350/2373us  rowsink 2002x 74/87096us  flush 353x 7570/11889us  
+      synccsv 3437x 2/3us  gps 3437x 553/14814us  loop 3437x 4077/128110us  dbgprint 1x 35798/35798us  
+      per word 28 us  per ahrs 201 us  raw 165.3 kB at 15.78 us/B
+[IMU] 1439 s left  |  Accel: 426 Hz, Gyro: 426  [WARN] FIFO overrun x4
+[TIM] update 309x 41049/746860us  status 3036x 19/47us  pop 309x 27279/101030us  spi 21344x 28/31us  
+      ahrs 8537x 201/205us  fir 1839x 2353/2373us  rowsink 1838x 31/250us  flush 309x 13635/646166us  
+      synccsv 3036x 2/3us  gps 3036x 645/251898us  loop 3036x 4857/766637us  dbgprint 1x 32316/32316us  
+      per word 28 us  per ahrs 201 us  raw 151.0 kB at 27.24 us/B
+
+      Etter block read
+      [TIM] update 180x 36531/54122us  status 362x 37/49us  pop 181x 25972/28542us  spi 23395x 19/554us  
+      ahrs 9357x 199/204us  fir 2017x 250/254us  rowsink 2017x 7/9us  flush 144x 13095/27956us  
+      synccsv 6112x 2/3us  welch 6112x 2/3us  gps 6112x 383/19171us  loop 6112x 1476/59974us  
+      dbgprint 0x 0/0us  
+      per word 19 us  per ahrs 199 us  raw 162.0 kB at 11.37 us/B
+      burst badtag 0  repeat 0  (begge skal vaere 0, wordsPerBurst 32)
