@@ -40,12 +40,14 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
 // row being assembled. Everything here should referr to the same point in time instant:
 // the centre of the current window
 void ImuSampler::latchRowValues() {
+
   // Timed here rather than at the two call sites: the normal one (a sample reaching the
   // window centre) and the late one (closeWindow, after a FIFO gap) do the same work,
   // and both run inside the pop loop. How much work that is depends on the log mode -
   // kFirNtap taps across ten channels, or across one when imu.csv is not written. See
   // FirRowBank::eval.
   WAVE_TIME(TIM_FIR);
+  
   fir_.eval(pendingRow_);
   float mq[4], sq[4];
   qDelay_.read(mq, sq);
@@ -62,7 +64,9 @@ void ImuSampler::latchRowValues() {
 
 // Close the current window -> finish the ImuRow and hand it to the row sink.
 void ImuSampler::closeWindow() {
+  
   if (winNAcc_ == 0) return;
+  
   // No raw sample reached the window centre - a FIFO gap. Read the filters at the
   // window edge instead of dropping the row: the filtered value is still valid, it
   // is just centred up to kRowPeriodMs late. Counted so a capture can be judged.
@@ -75,6 +79,7 @@ void ImuSampler::closeWindow() {
   pendingRow_.braking = winBraking_ ? 1 : 0;
   pendingRow_.sflpNan = winSflpNan_ ? 1 : 0;
   pendingRow_.fifoOvf = winFifoOvf_ ? 1 : 0;
+
   if (rowSink_) {
     // The sink is the analyzer plus - in a Csv build - the imu.csv row. Both sit inside
     // the pop loop, so this is one of the two ways a row can hold up the drain; the
@@ -91,49 +96,27 @@ void ImuSampler::closeWindow() {
 // they can never drift apart. Gyro and quaternion words only latch their latest value
 // for the accel branch to pair with.
 void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
-  /*
-    WTM: the interrupt edge is the trigger, and the ONLY one - there is no deadline
-    behind it. See the INT1 section in wave_config.h before adding one back.
-
-    The price is a lost edge. The interrupt is level driven but wired to RISING, so if a
-    drain ends with the FIFO still above the watermark the line never falls, no new edge
-    arrives, and the stream dies silently. The re-arm at the end of this function is the
-    only thing that recovers it, and it is load bearing rather than belt-and-braces: it
-    covers the case that happens in practice (the aftermath of an sd-stall, where the
-    level IS above the watermark). It does not cover an edge lost while the level is
-    BELOW it - that capture is over until the next reset.
-  */
+  
+  // Watermark: If not triggered, return
   if (kImuUseInt1 && !dev_.fifoReady()) {
     // Still print, so a stalled interrupt shows up as frozen counters, not silence.
     debugPrintStatus(dbg, captureLeftMs);
     return;
   }
 
-  /*
-    DRAIN, the other mode: elapsed time is the trigger, and the only one here. WTM and
-    DRAIN are a CHOICE, not a pair - each empties the whole buffer when it fires.
-
-    kDrainIntervalMs carries the batching alone. With no gate at all the drain ran on
-    every loop iteration: at 4.4 ms per iteration that is 169 drains a second at 6.9
-    words each, and every drain costs a kRawSyncBytes record - 2.9 kB/s of sync into a
-    raw log whose preAllocate never budgeted for it. At 127 ms it is ~8 drains a second,
-    and the batch is whatever accumulated rather than a fixed word count.
-  */
+  // If not using watermark, check the drain deadline. If not reached, return.
   if (!kImuUseInt1 && (millis() - lastDrainMs_) < kDrainIntervalMs) {
     debugPrintStatus(dbg, captureLeftMs);
     return;
   }
+
+  // Draining everything, so reset fifo flag
   dev_.clearFifoReady();
 
-  // Level and flags from one read, so the count and the flags describe the same instant.
-  //
-  // BELOW both gates, which is not just one read saved: this read RESETS
-  // FIFO_OVR_LATCHED, so running it on gated calls consumed overruns nobody would ever
-  // see and forced the gate to carry the bit forward by hand. With no read between
-  // drains the latch survives until the drain that reports it, and pendingOvrLatched_
-  // is left with its one remaining producer - the re-arm read at the end of this
-  // function.
+  // For timing purposes, setting start of drain
   const uint32_t tStatus = timeStart();
+
+  // Level and flags from one read, so the count and the flags describe the same instant.
   const ImuFifoStatus st = dev_.status();
   timeAdd(TIM_STATUS, tStatus);
 
@@ -141,6 +124,7 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // that only tested a flag or a clock - a mean over those would be meaningless.
   WAVE_TIME(TIM_UPDATE);
 
+  // Number of samples to pop from IMU FIFO
   const uint16_t nSamples = st.level;
 
   // Loss is OVR, not FULL. Counting FULL as loss over-reports - the brim can be reached
@@ -158,7 +142,7 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
     winFifoOvf_ = true; // flag the window that was open when it happened (fifo_ovf in imu.csv)
   }
 
-  // Sync record first, so the words that follow it are the ones it describes.
+  // Add sync record to rawlog (timestamp for when we synced), so the words that follow it are the ones it describes.
   if (rawLog_) {
     rawLog_->emitSync((uint32_t)(sampleTms_ * 1000.0), accelIdx_,
                       nSamples, lost ? kRawFlagFifoOvf : 0);
@@ -167,30 +151,35 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // TIM_POP spans the whole loop; TIM_SPI inside it isolates the bus from the work done
   // on the words, and the difference between them is what the maths costs.
   const uint32_t tPop = timeStart();
+
   dev_.resetBurst();   // nothing carries over between drains
+  
   for (uint16_t i = 0; i < nSamples; i++) {
+
     // TIM_SPI wraps the WHOLE per-word cost, burst refill and decoding included, so n
     // stays the word count and the mean stays comparable across builds. Its max is a
     // whole burst (~320 us at 32 words), not one word.
     ImuFifoWord w;
     const uint32_t tSpi = timeStart();
+    
+    // Pop one word. popWord() automatically burst reads.
     dev_.popWord(w, (uint16_t)(nSamples - i));
+
+    // Time SPI read and extraction
     timeAdd(TIM_SPI, tSpi);
 
-    // EVERY word, including kinds this code does not consume: the raw log is a record
-    // of what the sensor produced, not of what the wave chain happens to read.
+    // Everything is written to the raw log
     if (rawLog_) rawLog_->emitWord(w.tag, w.payload);
 
+    // If acceleration: Decode word and feed to AHRS toghether with the latest gyro word
     if (w.kind == ImuSampleKind::Accel) {  // mg
       const float *a = w.v;
-      nAccDbg_++;   // counted, not summed: the RATE is the loss signal, |a| was not
-      // Windowing: samples arrive in FIFO bursts but represent evenly spaced points
-      // in time. A running, monotonic clock (sampleTms_ += samplePeriodMs_) gives a
-      // steady kRowPeriodMs binning; samplePeriodMs_ self-calibrates below so the axis
-      // tracks the wall clock without drift.
+      nAccDbg_++;   // debug print counter
       uint32_t tms = (uint32_t)sampleTms_;
       int32_t widx = (int32_t)(tms / kRowPeriodMs);
+
       if (!logStarted_) { logStarted_ = true; curWinIdx_ = widx; }
+      
       if (widx != curWinIdx_) {
         closeWindow();
         curWinIdx_ = widx;
@@ -200,43 +189,43 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
         winFifoOvf_ = false;
         winFirDone_ = false;
       }
+
       winNAcc_++;
+
+      // Extracting from array
       const float ax = (float)a[0], ay = (float)a[1], az = (float)a[2];
 
       // ---- AHRS on the raw stream ----
       // Accel and gyro arrive as separate FIFO tags, so the update is paired with
-      // the freshest gyro word: at most one sample of skew (1.04 ms @ 960 Hz).
-      // The AHRS takes SI units - KalmanAhrs' adaptive R weighs |a| against gravity,
-      // so in mg every sample would look like a 100 g slam. Madgwick normalises and
-      // does not care, which is why this stays filter-agnostic.
+      // the freshest gyro word: at most one sample of skew
+
+      // TODO: Possible to match them?
+
       const float axS = ax * kMg2Ms2, ayS = ay * kMg2Ms2, azS = az * kMg2Ms2;
       const float sflpQ[4] = {latestQw_, latestQx_, latestQy_, latestQz_};
+
+      // AHRS is initialized from gravity on the first accel sample.
       if (!ahrsSeeded_) {
         ahrs_.initFromAccel(axS, ayS, azS);
         ahrsSeeded_ = true;
         qDelay_.reset(ahrs_.quaternion(), sflpQ);
       } else {
-        // One update per raw sample - no divider. dt comes from samplePeriodMs_,
-        // which self-calibrates against the wall clock, so a slow drain shows up as
-        // a longer dt rather than as a silently wrong integration rate.
+        
+        // One update per raw sample. dt comes from samplePeriodMs_,
+        // which self-calibrates against the wall clock
         const uint32_t tAhrs = timeStart();
+
         ahrs_.update(latestGx_ * kMdps2Rads, latestGy_ * kMdps2Rads, latestGz_ * kMdps2Rads,
                      axS, ayS, azS, (float)samplePeriodMs_ * 1.0e-3f);
         timeAdd(TIM_AHRS, tAhrs);
+
         // The attitude is not filtered, but it is carried back by the same group
         // delay the FIR imposes on ax..gz, so the whole row describes one instant.
         // At one step per sample that delay is kFirHalf pushes exactly.
         qDelay_.push(ahrs_.quaternion(), sflpQ);
       }
 
-      // World-frame linear accel from the SFLP quaternion, gravity removed. These are
-      // the ax_ned_sflp / vacc_sflp columns and nothing else - the wave chain reads
-      // them only when wave_use_sflp is set.
-      //
-      // Left at zero when the fusion block is off. The delay lines start zeroed and
-      // nothing but this pushes them, so zeros here make every _sflp column read zero
-      // rather than body-frame values wearing a world-frame name. cfg.csv's
-      // sflp_enabled is what tells the two zeros apart afterwards.
+      // Gravity frame linear accel from the SFLP quaternion, gravity removed. 
       float wX = 0.0f, wY = 0.0f, wZ = 0.0f;
       if (kEnableSflp) {
         float w[3];
@@ -244,24 +233,19 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
         wX = w[0]; wY = w[1]; wZ = w[2] - 1000.0f;   // remove 1 g, mg units
       }
 
-      // Brake flag with debounce: LINEAR accel (gravity removed) must stay over
+      // Brake flag: LINEAR accel (gravity removed) must stay over
       // threshold for kBrakeMinSamples in a row.
-      //
-      // Rotated with the orientation the build actually trusts, not with SFLP
-      // unconditionally: a NaN or an unconverged SFLP must not poison a quality flag on
-      // a build whose measurement comes from Madgwick. The flag and the measurement
-      // stand or fall together.
-      //
-      // Placed after the AHRS update so it sees this sample's attitude rather than the
-      // previous one, and so the very first sample uses the seeded attitude from
-      // initFromAccel instead of an uninitialised default.
+      
       float bX = wX, bY = wY, bZ = wZ;
       if (!wave_use_sflp) {
         float b[3];
         rotateBodyToWorld(ahrs_.quaternion(), ax, ay, az, b);
         bX = b[0]; bY = b[1]; bZ = b[2] - 1000.0f;
       }
+
       const double aMag2 = (double)bX * bX + (double)bY * bY + (double)bZ * bZ;
+
+      // If linear accel magnitude exceeds threshold for kBrakeMinSamples in a row, the window is flagged as braking.
       if (aMag2 > kBrakeThresholdMg2) {
         if (brakeRun_ < 0xFFFF) brakeRun_++;
         if (brakeRun_ >= kBrakeMinSamples) winBraking_ = true;
@@ -269,19 +253,20 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
         brakeRun_ = 0;
       }
 
-      // The vertical accel is recomputed on EVERY raw sample from the latest
-      // quaternion: the attitude is slow, but the acceleration is the signal that
-      // has to keep its full bandwidth going into the antialias filter.
+      // The vertical accel is recomputed on every raw sample from the latest
+      // quaternion
       const float vacc = wave_use_sflp
                              ? (wZ * kMg2Ms2)
                              : verticalAccel(ahrs_.quaternion(), axS, ayS, azS, kGravity);
+
+      // Adding acceleration (ax, ay, az - sensor frame), acceleration (wZ, wY, wZ - SFLP gravity frame), 
+      // gyro (latestGx... - sensor frame) and vertical accel (vacc - gravity frame) to the FIR decimation filters.
       fir_.push(ax, ay, az, wX, wY, wZ,
                 latestGx_, latestGy_, latestGz_, vacc);
 
-      // Output sample: the first raw sample to reach the window centre. Same
-      // convention as fir.py's dec//2 - the value sits in the middle of the window
-      // it represents. 960/100 = 9.6 is not an integer decimation, so the output
-      // grid stays time-driven and the residual jitter is at most half a raw period.
+      // Output sample: the first raw sample to reach the window centre. 
+      // The value sits in the middle of the window it represents. 
+      // 960/100 = 9.6 is not an integer decimation, the residual jitter is at most half a raw period.
       if (!winFirDone_ && tms >= (uint32_t)curWinIdx_ * kRowPeriodMs + kFirS1CenterMs) {
         latchRowValues();
       }
@@ -294,6 +279,7 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
       latestGx_ = g[0]; latestGy_ = g[1]; latestGz_ = g[2];
     } else if (w.kind == ImuSampleKind::Quat) {  // [x,y,z,w]
       const float *q = w.v;
+
       // NaN guard: a corrupt FIFO word decodes to an invalid half-float and the
       // w = sqrt(1 - sumsq) reconstruction yields NaN; one NaN poisons az_ned_sflp and the
       // whole SFLP spectrum. Keep the last valid quaternion instead.
@@ -307,6 +293,8 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
       lastUnknownTag_ = w.tag;
     }
   }
+
+  // Time the whole drain
   timeAdd(TIM_POP, tPop);
 
 
@@ -323,14 +311,21 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // FIFO just been emptied, so flushing the raw log where it is least likely
   // to overflow the FIFO buffer
   if (rawLog_) {
+
+    // Timer start
     const uint32_t tFlush = timeStart();
     const uint16_t wroteBytes = rawLog_->flush();
     if (wroteBytes > 0) {
+
+      // Timer end
       timeAdd(TIM_FLUSH, tFlush);
+
+      // Add number of bytes written to the wave_timing stats.
       wave_timing.addFlushBytes(wroteBytes);
     }
   }
 
+  // Debug print status
   debugPrintStatus(dbg, captureLeftMs);
 }
 
