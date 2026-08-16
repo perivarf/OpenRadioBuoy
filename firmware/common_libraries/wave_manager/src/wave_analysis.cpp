@@ -156,8 +156,8 @@ void StreamAnalyzer::pushWelch(float sample) {
 //
 // The old flat buffer memmoved (kWelchSegLen - step) floats on every segment. The ring
 // moves tail_ instead, so those 3 kB of copying are gone as a side effect.
-void StreamAnalyzer::processPendingSegment(void) {
-  if (!segPending_) return;
+bool StreamAnalyzer::processPendingSegment(void) {
+  if (!segPending_) return false;
   segPending_ = false;
 
   accumSegment(ring_, tail_, psdAcc_);
@@ -167,6 +167,7 @@ void StreamAnalyzer::processPendingSegment(void) {
   tail_ += step;
   if (tail_ >= kWelchRingLen) tail_ -= kWelchRingLen;
   fill_ -= step;
+  return true;
 }
 
 void StreamAnalyzer::ingest(const ImuRow &r) {

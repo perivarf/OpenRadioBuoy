@@ -285,7 +285,7 @@ void ImuSampler::latchRowValues() {
 //
 // tx_buf = nullptr clocks out 0xFF rather than the 0x00 the old loop sent. MOSI is
 // don't-care for the duration of a read, so the sensor cannot tell the two apart.
-void ImuSampler::imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len) {
+void ImuSampler::imuBurstRead(uint8_t startReg, uint8_t *buf, uint16_t len) {
   SPI.beginTransaction(SPISettings(kImuSpiHz, MSBFIRST, SPI_MODE3));
   digitalWrite(SPI_CS_IMU_PIN, LOW);
   SPI.transfer(startReg | 0x80);    // 0x80 = READ bit
@@ -304,15 +304,19 @@ void ImuSampler::imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len) {
 //
 // Returns tag_sensor, the top 5 bits of the tag byte (FIFO_DATA_OUT_TAG: bit 0 unused,
 // bits 2:1 tag_cnt, bits 7:3 tag_sensor).
-uint8_t ImuSampler::readFifoWord(uint8_t payload[6]) {
-  uint8_t w[7];
-  imuBurstRead(kFifoDataOutTagReg, w, 7);
-  
-  // place payload bytes into the caller's buffer
-  for (uint8_t i = 0; i < 6; i++) payload[i] = w[i + 1];
-  
-  // return tag (top 5 bits)
-  return (uint8_t)(w[0] >> 3);
+// Pull up to kFifoBurstWords words in ONE transfer. Reading 0x7E is what advances the
+// FIFO, so a continuous read past it rolls the address back to the tag register and the
+// next word follows in the same CS-low transaction - that is the property this rests on,
+// and the one to check in the datasheet if the tags ever come out wrong.
+//
+// n is what the caller still has left to pop, and it is a CEILING and not a request:
+// reading past the level the status word reported would return words the FIFO does not
+// hold. kFifoBurstWords = 1 makes this exactly the old one-word-per-transaction read.
+void ImuSampler::fillFifoBurst(uint16_t n) {
+  burstFill_ = n < kFifoBurstWords ? n : kFifoBurstWords;
+  burstIdx_  = 0;
+  imuBurstRead(kFifoDataOutTagReg, burstBuf_,
+               (uint16_t)(burstFill_ * kRawWordBytes));
 }
 
 // Raw log. Little-endian, layout documented at wave_raw_log in wave_config.h.
@@ -573,10 +577,18 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // TIM_POP spans the whole loop; TIM_SPI inside it isolates the bus from the work done
   // on the words, and the difference between them is what the maths costs.
   const uint32_t tPop = timeStart();
+  burstFill_ = burstIdx_ = 0;   // nothing carries over between drains
   for (uint16_t i = 0; i < nSamples; i++) {
     uint8_t payload[6];
+    // TIM_SPI still wraps the WHOLE per-word cost, refill included, so n stays the word
+    // count and the mean stays directly comparable to the 28 us this replaced. What
+    // changed is max: it is now a whole burst (~320 us at 32 words), not one word.
     const uint32_t tSpi = timeStart();
-    const uint8_t tag = readFifoWord(payload);   // tag + data, one transfer
+    if (burstIdx_ == burstFill_) fillFifoBurst((uint16_t)(nSamples - i));
+    const uint8_t *w = burstBuf_ + burstIdx_ * kRawWordBytes;
+    burstIdx_++;
+    const uint8_t tag = (uint8_t)(w[0] >> 3);          // tag_sensor, top 5 bits
+    for (uint8_t k = 0; k < 6; k++) payload[k] = w[k + 1];
     timeAdd(TIM_SPI, tSpi);
     // EVERY word, including tags this code does not decode: the raw log is a record
     // of what the sensor produced, not of what the wave chain happens to consume.

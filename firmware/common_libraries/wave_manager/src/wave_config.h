@@ -318,6 +318,36 @@ static constexpr uint8_t kFifoStatus1Reg = 0x1B;
 // tag and payload out together, which is what makes the pairing atomic.
 static constexpr uint8_t kFifoDataOutTagReg = 0x78;
 
+// -----------------------------------------------------------------------------
+// BLOKKLESING: hvor mange FIFO-ord som hentes i én SPI-transaksjon
+// -----------------------------------------------------------------------------
+// Fram til 2026-08-16 leste pop-løkka ETT ord per transaksjon, målt til 28 us. Bare
+// ~11 av dem er buss - 8 byte ved 6 MHz, som er der spi_init faktisk lander (se
+// imuBurstRead). De øvrige ~17 er transaksjonsoverhead: beginTransaction, to
+// digitalWrite på CS, adressebyten som entrer spi_transfer for seg, endTransaction.
+// Den overheaden betales én gang per BURST i stedet for én gang per ord.
+//
+//   32 ord -> 17/32 = 0.5 us overhead per ord, altså ~9.8 us mot 28. Gulvet er 9.3
+//   (ren busstid for 7 byte ved 6 MHz), så 32 henter nesten hele gevinsten. 64 ville
+//   gitt 9.6 - 0.2 us per ord for dobbelt så mye RAM.
+//
+// FORUTSETNINGEN: at adressen ruller fra 0x7E tilbake til 0x78, slik at én
+// sammenhengende lesing gir PÅFØLGENDE FIFO-ord og ikke det samme ordet om igjen.
+//
+// VERIFISERT PÅ MASKINVARE 2026-08-16, ikke bare mot databladet. En midlertidig selvtest
+// talte to ting over en hel capture og fikk 0 på begge: ord med tag_sensor utenfor
+// {1, 2, 0x13} etter posisjon 0 i en burst (som ville fanget at adressen stopper på 0x7E
+// og gjentar en databyte), og burst der alle ord var byte-identiske med det første (som
+// ville fanget en rullering uten at FIFO-en avanserer). Testen er fjernet igjen; dette
+// avsnittet er det som er igjen av den, og det er grunn nok til å ikke gjenta øvelsen.
+//
+// Sett kFifoBurstWords = 1 for å gå tilbake til ett ord per transaksjon. Koden håndterer
+// det uten andre endringer, og det er den riktige første testen hvis noen senere mistenker
+// FIFO-lesingen for å levere feil data.
+static constexpr uint16_t kFifoBurstWords = 32;
+static_assert(kFifoBurstWords > 0 && kFifoBurstWords <= kFifoDepthWords,
+              "a burst cannot be empty, nor larger than the FIFO it reads from");
+
 static constexpr uint16_t kAccelOdrHz = kImuOdrHz;
 
 // -----------------------------------------------------------------------------

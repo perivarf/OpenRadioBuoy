@@ -343,9 +343,12 @@ uint8_t WaveManager::takeReading(void) {
     // has just returned, so the FIFO is empty and the whole depth is available. Inside
     // the pop loop, where this used to run, it started with up to kFifoWatermark - 1
     // words already standing. A no-op on the ~99.9% of iterations with nothing pending.
+    // Timed only when it RAN. The call itself is a flag test on ~99.9% of iterations,
+    // and charging those to the bucket made tim_welch report 6112 calls at 2 us instead
+    // of the one 88 ms segment it exists to show. n is the segment count, and it must
+    // equal welch_segments in ana.csv.
     const uint32_t tWelch = timeStart();
-    analyzer_.processPendingSegment();
-    timeAdd(TIM_WELCH, tWelch);
+    if (analyzer_.processPendingSegment()) timeAdd(TIM_WELCH, tWelch);
     const uint32_t tGps = timeStart();
     serviceGps(elapsed);            // non-blocking GPS poll -> one gps.csv row per fix
     timeAdd(TIM_GPS, tGps);

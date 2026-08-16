@@ -178,7 +178,11 @@ class ImuSampler {
 
   // Raw auto-incrementing register burst on the shared SPI bus
   //  One CS-low transfer for len consecutive registers.
-  void imuBurstRead(uint8_t startReg, uint8_t *buf, uint8_t len);
+  //
+  // len is uint16_t and not uint8_t because the FIFO burst reads kFifoBurstWords * 7
+  // bytes - 224 at 32 words, and past 36 words it would no longer fit a byte. Nothing
+  // should have to think about that when tuning the constant.
+  void imuBurstRead(uint8_t startReg, uint8_t *buf, uint16_t len);
 
   // One decoded read of FIFO_STATUS1/2.
   struct FifoStatus {
@@ -218,9 +222,16 @@ class ImuSampler {
         (sb[1] & 0x08u) != 0};
   }
 
-  // Pop one FIFO word atomically: tag + 6 payload bytes in a single transfer.
-  // Returns tag_sensor
-  uint8_t readFifoWord(uint8_t payload[6]);
+  // Pop kFifoBurstWords FIFO words - or n, whichever is smaller - into burstBuf_ in ONE
+  // CS-low transfer. The pop loop then takes them out of RAM. See kFifoBurstWords in
+  // wave_config.h for the arithmetic and for the datasheet assumption it rests on.
+  void fillFifoBurst(uint16_t n);
+
+  // Words held by fillFifoBurst and how far the pop loop has got through them. Both are
+  // reset per burst, not per drain: a drain longer than kFifoBurstWords refills.
+  uint8_t  burstBuf_[kFifoBurstWords * kRawWordBytes];
+  uint16_t burstFill_ = 0;
+  uint16_t burstIdx_  = 0;
 
   void closeWindow();
 

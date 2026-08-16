@@ -43,7 +43,12 @@ class StreamAnalyzer {
   // so the 88 ms has the whole depth in front of it instead of what a partly drained
   // FIFO leaves. See the ring-slack section in wave_config.h. A no-op when no segment
   // is pending, so calling it every iteration is free.
-  void processPendingSegment(void);
+  //
+  // Returns whether a segment was actually accumulated. The caller needs that to time it:
+  // this is called every loop iteration and runs once per 25.6 s, so charging TIM_WELCH
+  // on every call fills the bucket with ~2 us no-ops and buries the 88 ms that matters.
+  // Same reasoning as flushRaw returning its byte count.
+  bool processPendingSegment(void);
 
   // Finalise: average the PSD, derive wave parameters from the ELEVATION spectrum, and
   // fill the quantised spectrum bins (welch_bin_min..welch_bin_max) from the
