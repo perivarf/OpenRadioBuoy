@@ -39,15 +39,15 @@ class StreamAnalyzer {
 
   // The Welch FFT, deferred out of the FIFO pop loop. ingest() only fills the ring and
   // raises a flag; this is what actually runs accumSegment. Call it from the capture
-  // loop right after ImuSampler::update() returns - i.e. with the FIFO just drained,
-  // so the 88 ms has the whole depth in front of it instead of what a partly drained
-  // FIFO leaves. See the ring-slack section in wave_config.h. A no-op when no segment
-  // is pending, so calling it every iteration is free.
+  // loop right after ImuSampler::update() returns - i.e. with the FIFO just drained, so
+  // the 88 ms has the whole depth in front of it instead of what a partly drained FIFO
+  // leaves. See the ring-slack section in analysis_config.h. A no-op when no segment is
+  // pending, so calling it every iteration is free.
   //
-  // Returns whether a segment was actually accumulated. The caller needs that to time it:
-  // this is called every loop iteration and runs once per 25.6 s, so charging TIM_WELCH
-  // on every call fills the bucket with ~2 us no-ops and buries the 88 ms that matters.
-  // Same reasoning as flushRaw returning its byte count.
+  // Returns whether a segment was actually accumulated. The caller needs that to time
+  // it: this is called every loop iteration but runs once per 25.6 s, so charging
+  // TIM_WELCH on every call would fill the bucket with ~2 us no-ops and bury the 88 ms
+  // that matters. Same reasoning as RawLogWriter::flush returning its byte count.
   bool processPendingSegment(void);
 
   // Finalise: average the PSD, derive wave parameters from the ELEVATION spectrum, and

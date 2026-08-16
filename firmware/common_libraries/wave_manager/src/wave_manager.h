@@ -103,19 +103,22 @@ class WaveManager {
   static void rowSinkTrampoline(const ImuRow &r);
   void onRow(const ImuRow &r);
   void syncImuCsvIfPending(void);   // the imu.csv sync, deferred out of the pop loop
-  // bool: false means the block did not reach the sd-card in full, which the sampler
+  // bool: false means the block did not reach the sd-card in full, which RawLogWriter
   // turns into kRawFlagWriteFail on the next sync record. See onRawBlock.
   static bool rawSinkTrampoline(const uint8_t *data, uint16_t len);
   bool onRawBlock(const uint8_t *data, uint16_t len);
-  void writeRawHeader(void);        // kRawHeaderBytes: magic, rates, sensitivities
 
   // Session logging (ORB_test Logger style): one timestamped directory per capture.
+  // All of it lives in wave_session_log.cpp - this file keeps the capture loop.
   bool startSession(void);          // build stamp, mkdir, open imu/gps/ses, headers
   void stopSession(void);           // close ses (the summary in it marks the capture done)
   void writeSessionAnchor(void);    // reading ID + start UTC (crash-safe, written up front)
   void writeSessionConfig(File &f); // cfg.csv: every constant the capture depends on
   void writeSessionSummary(bool ok, const WaveParams &params);  // stop UTC, duration, rows, params
   void writeTimingBlock(void);      // wave_timing buckets; empty unless wave_timing_enabled
+  void appendImuCsvRow(const ImuRow &r);        // one imu.csv line; called from onRow
+  void writeSpecCsv(void);                      // spec.csv: the PSD, bin by bin
+  void writeAnaCsv(const WaveParams &params);   // ana.csv: counters + wave parameters
   void serviceGps(uint32_t relMs);  // drive gps_manager.update(); log a gps.csv row per fix
   bool waitForGpsFix(void);         // block up to wave_gps_fix_timeout for a valid PVT
 
@@ -125,6 +128,11 @@ class WaveManager {
 
   ImuSampler imu_;
   StreamAnalyzer analyzer_;
+
+  // The raw log's byte format. Owned here rather than by the sampler because this is
+  // what opens, headers and closes rawFile_; the sampler is only handed a pointer for
+  // the duration of the capture and emits into it from inside the drain.
+  RawLogWriter rawLog_;
 
   // CSV logging state. imu.csv is streamed row-by-row via the row sink; gps/ses are
   // held open across the session. sessionDir_ is the "<stamp>" path so

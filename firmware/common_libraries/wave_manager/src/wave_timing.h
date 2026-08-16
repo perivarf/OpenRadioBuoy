@@ -67,62 +67,52 @@ class ScopeUs {
 };
 
 /*
-  The buckets, as an ARRAY with named indices rather than as twelve named members. The
-  resets and the ses.csv writer then walk them in a loop against kTimingNames, so adding
-  a bucket is one enum entry and one string - not a thirteenth line in four places, three
+  The buckets, as an ARRAY with named indices rather than as thirteen named members. The
+  resets and the ses.csv writer walk them in a loop against kTimingNames, so adding a
+  bucket is one enum entry and one string - not a fourteenth line in four places, three
   of which get forgotten.
-*/
-/*
-  The buckets NEST, and reading them means knowing how:
+
+  They NEST, and reading them means knowing how:
 
       loop  >  update  >  pop ( > spi, ahrs, fir, rowsink ) + flush + dbgprint + status
       loop  >  synccsv
       loop  >  welch                                        (deferred out of rowsink)
       loop  >  gps
 
-  welch is a SIBLING of update and not inside it, and that is the whole point of it: the
-  FFT used to sit under rowsink, i.e. two levels inside the drain. Its 88 ms therefore
-  competed with the FIFO from a partly drained start. As a sibling it runs after update()
-  has returned, so it competes from an empty one. The number in the bucket does not
-  change when it moves - where it sits in this diagram is the change.
+  welch is a SIBLING of update, not inside it, and that is the whole point of the
+  deferral: it runs after update() has returned, so its 88 ms competes with an EMPTY
+  FIFO rather than a partly drained one. The number in the bucket is the same either
+  way - where it sits in this diagram is what changed.
 
-  So the columns do not sum to the capture - an inner bucket is counted again by every
-  bucket around it. That is deliberate: the question is never "where did the second go"
+  So the columns do not sum to the capture: an inner bucket is counted again by every
+  bucket around it. That is deliberate. The question is never "where did the second go"
   but "which of these could have held the drain past its budget", and for that each one
   has to be readable on its own.
 
-  status had a THIRD call site under loop until 2026-08-16 - the gate read, which ran on
-  every call because the level it returned was what decided whether to drain. Neither
-  gate needs it now (WTM tests the flag, DRAIN tests the clock), so it moved below both
-  and runs only on drains. Two consequences for reading the numbers:
+  Two ratios are worth knowing:
 
-      status n / update n   used to be polls per drain, i.e. the batching factor. It is
-                            now ~2 in a WTM build (the drain's read plus the re-arm) and
-                            ~1 in a DRAIN one, and says nothing about batching.
-      spi n / update n      still the words per drain, and now the ONLY place the batch
-                            size is visible. Read that one instead.
-
-  The two remaining sites are the drain's own read - above WAVE_TIME, so TIM_UPDATE
-  measures the drain and not the read that sized it - and the INT1 re-arm at the end,
-  which is inside. A DRAIN build has only the first.
+      spi n / update n      words per drain - the batch size, and the only place it is
+                            visible.
+      status n / update n   ~2 in a WTM build (the drain's read plus the re-arm), ~1 in
+                            a DRAIN one. Says nothing about batching: the status read
+                            sits BELOW both gates, so it runs only on actual drains.
 */
 enum TimingBucket : uint8_t {
   TIM_UPDATE = 0,  // one whole drain; both gates excluded (a gated call is not a drain)
-  TIM_STATUS,      // readFifoStatus: the drain's own read, plus the INT1 re-arm read.
-                   // Was the gate read on EVERY call until 2026-08-16 - see below
+  TIM_STATUS,      // ImuDevice::status(): the drain's own read, plus the INT1 re-arm
   TIM_POP,         // the pop loop: SPI + AHRS + FIR + raw buffering for every word
-  TIM_SPI,         // readFifoWord alone -> us per FIFO word
+  TIM_SPI,         // popWord alone -> us per FIFO word
   TIM_AHRS,        // ahrs_.update alone -> us per orientation step
   TIM_FIR,         // latchRowValues: 129 taps x 10 channels, once per row - but ONE
                    // channel, not ten, when wave_log_mode drops imu.csv (FirRowBank::
                    // eval). So this bucket is not comparable across log modes: a Raw
                    // capture is ~1/10 of a Csv one because it does a tenth of the work.
-  TIM_ROWSINK,     // analyzer ingest + the imu.csv row, once per row. The Welch FFT was
-                   // the bulk of this bucket's max until 2026-08-15; it is TIM_WELCH now.
-  TIM_FLUSH,       // flushRaw -> the raw log's SD write. See flushBytes. Bare de
-                   // dreneringene som FAKTISK skrev telles: med kRawFlushThreshold
-                   // returnerer de fleste uten å røre kortet, og nuller i bøtta ville
-                   // gjort middelverdien ubrukelig som mål på hva en skriving koster.
+  TIM_ROWSINK,     // analyzer ingest + the imu.csv row, once per row
+  TIM_FLUSH,       // RawLogWriter::flush -> the raw log's SD write. See flushBytes.
+                   // Counts ONLY the drains that actually wrote: with
+                   // kRawFlushThreshold most return without touching the card, and
+                   // zeros in the bucket would make the mean useless as a measure of
+                   // what a write costs.
   TIM_SYNCCSV,     // the periodic imu.csv sync(): FAT + directory, not just a block
   TIM_WELCH,       // the deferred accumSegment: one FFT every 25.6 s, ~88 ms. n is the
                    // segment count and must match welch_segments in ana.csv exactly -

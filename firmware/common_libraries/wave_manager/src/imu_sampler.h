@@ -2,13 +2,14 @@
 #define IMU_SAMPLER_H
 
 #include <Arduino.h>
-#include <SPI.h>
-#include <LSM6DSV16XSensor.h>
 #include "wave_config.h"
 #include "wave_timing.h"  // wave_timing buckets; compiles away with wave_timing_enabled
 #include "fir.h"
 #include "fir_coeffs.h"   // kFirCoeffsStage1 - generated, see tools/gen_fir_table.py
 #include "quat_delay.h"
+#include "imu_device.h"   // ImuDevice, ImuFifoWord - the sensor, and the only place
+                          // that knows which one it is
+#include "raw_log.h"      // RawLogWriter - the <stamp>_raw.bin byte format
 
 /*
   One row per kRowPeriodMs. Every field describes the SAME instant - the window centre,
@@ -36,11 +37,6 @@ struct ImuRow {
 
 // Called when a window closes. The row leaves ImuSampler complete, hence const.
 using ImuRowSink = void (*)(const ImuRow &);
-
-// One filled block of <stamp>_raw.bin (layout: wave_raw_log in wave_config.h).
-// Return false on a short write: it desynchronises every byte after it, so the next
-// sync record carries kRawFlagWriteFail and the decoder knows where to stop trusting.
-using RawBlockSink = bool (*)(const uint8_t *data, uint16_t len);
 
 /*
   The ten series decimated per row - everything imu.csv logs, all through the same
@@ -77,40 +73,37 @@ class FirRowBank {
 };
 
 /*
-  LSM6DSV driver. Shares the global Arduino SPI object (sd_writer brings up SPI1) rather
-  than owning a bus, and drains the FIFO on the INT1 watermark (kImuUseInt1).
+  The sampling pipeline: drain the FIFO, run the AHRS on every raw sample, decimate
+  through the FIR bank, and emit one ImuRow per window.
+
+  Device-neutral - everything sensor-specific is behind ImuDevice (imu_device.h). The
+  five lifecycle calls below forward to it and exist so callers have one object to talk
+  to; the pipeline itself deals only in ImuFifoWord.
 
   Owns the AHRS: the raw samples exist nowhere else, and running the orientation filter
   on window means would integrate the gyro at a rate it was never measured at.
 */
 class ImuSampler {
  public:
-  ImuSampler();
-
-  // Init sensor: ODR/FS/filter, FIFO + SFLP batching, ISR. Does NOT start the FIFO
-  // stream (see startStreaming). Assumes the shared SPI bus is already begun.
-  //
+  // Bring the sensor up. Does NOT start the FIFO stream (see startStreaming).
   // Called at boot and again from WaveManager::wake() before each capture, so the
   // return value answers "is the IMU alive now", not "was it at boot".
-  bool begin(Print &dbg);
+  bool begin(Print &dbg) { return dev_.begin(dbg); }
 
-  // Put the FIFO into STREAM/continuous mode so it starts filling, and drop any
-  // pending watermark flag
-  void startStreaming();
+  // Start the FIFO filling, and drop any pending watermark flag.
+  void startStreaming() { dev_.startStreaming(); }
 
-  // Flush the hardware FIFO (BYPASS) and clear pending state. Leaves the FIFO IDLE -
-  void resetFifo();
+  // Flush the hardware FIFO and clear pending state, leaving it idle. The latched
+  // overrun goes with the words being thrown away - carrying it across would pin a
+  // previous capture's overrun on the first window of the next one.
+  void resetFifo() { dev_.bypassFifo(); pendingOvrLatched_ = false; }
 
   // Park the sensor between captures; begin() is the other half, as with the GPS.
-  // Only the ODR fields move - everything else begin() wrote stays in its register,
-  // which is what makes begin() cheap enough to be the way back up.
-  void shutdownIMU();
+  void shutdownIMU() { dev_.shutdown(); }
 
   // Boot liveness check: begin() only proves the part ANSWERS, so a dead or stuck
-  // converter passes it. Brings the sensor up, waits for data-ready, reads one sample
-  // and shuts it down again. A direct register read, not a FIFO drain - at boot there
-  // is no capture open. False only if the sensor cannot be read.
-  bool checkImu(Print &dbg);
+  // converter passes it. False only if the sensor cannot be read.
+  bool checkImu(Print &dbg) { return dev_.checkAlive(dbg); }
 
   // Drain all pending FIFO words once (call repeatedly during a capture).
   // captureLeftMs is passed straight to the debug line - the sampler does not time
@@ -122,21 +115,10 @@ class ImuSampler {
 
   void setRowSink(ImuRowSink sink) { rowSink_ = sink; }
 
-  // Raw log (wave_raw_log): the sink is handed whole blocks, never single records -
-  // a 7-byte write per FIFO word would put ~1200 SdFat calls a second inside the
-  // drain. At kRawFlushThreshold it is ~8 a second instead.
-  void setRawSink(RawBlockSink sink) { rawSink_ = sink; }
-
-  // Skriv ut det som har samlet seg i rawBuf_, og returner antall bytes som faktisk
-  // gikk til sinken - 0 når ingenting ble skrevet.
-  //
-  // Normalveien (force = false) skriver BARE hele sektorer, og bare når minst
-  // kRawFlushThreshold har samlet seg; resten (< 512 B) blir liggende foran i
-  // bufferet til neste gang. Se skrivegrense-avsnittet i wave_config.h for hvorfor.
-  //
-  // force = true skriver ut alt, halen inkludert. Kreves ved slutten av en capture,
-  // ellers går siste delvise sektor tapt, og av nødventilen i rawAppend().
-  uint16_t flushRaw(bool force = false);
+  // The raw log to feed, or nullptr for none. Owned by the caller (WaveManager owns
+  // the file), because opening, headering and closing it are all its business - the
+  // sampler only emits into it, from inside the drain.
+  void setRawLog(RawLogWriter *log) { rawLog_ = log; }
 
   // FIFO fills since the last debug print, which zeroes it on the way out.
   uint32_t overflowCount() const { return nOverflow_; }
@@ -149,24 +131,10 @@ class ImuSampler {
   // the window edge instead. Non-zero means FIFO gaps; logged to ana.csv.
   uint32_t firLateEvalCount() const { return nFirLateEval_; }
 
-  // Blocks the raw sink failed to write in full. Non-zero means raw.bin is
-  // desynchronised past the first failure, however clean the sensor was.
-  uint32_t rawWriteFailCount() const { return nRawWriteFail_; }
-
  private:
-  // Every register setting that comes from wave_config.h
-  void applyConfig();
-
-  // INT1 watermark plumbing. attachInterrupt takes a plain function, so the ISR is a
-  // static trampoline that reaches the instance through s_self. It only sets the flag.
-  static ImuSampler *s_self;
-  static void isrTrampoline();
-  volatile bool fifoFlag_ = false;
-  // When the last drain ENDED. The polling gate in update() measures kDrainIntervalMs
-  // from here. The INT1 gate had the same deadline until 2026-08-16 and no longer does,
-  // so this is now read by one gate rather than both - see the INT1 section in
-  // wave_config.h for that decision. Still reset on every drain either way, because the
-  // re-arm and the polling gate both depend on it.
+  // When the last drain ENDED. The DRAIN gate in update() measures kDrainIntervalMs
+  // from here; the WTM gate does not, but this is still reset on every drain because
+  // the re-arm depends on it.
   uint32_t lastDrainMs_ = 0;
 
   // FIFO_OVR_LATCHED picked up by the re-arm read at the END of a drain, carried to the
@@ -175,63 +143,6 @@ class ImuSampler {
   // level is back under the brim and FIFO_OVR_IA reads zero again. Since the register is
   // reset by the very read that reports it, the bit has to be remembered here or lost.
   bool pendingOvrLatched_ = false;
-
-  // Raw auto-incrementing register burst on the shared SPI bus
-  //  One CS-low transfer for len consecutive registers.
-  //
-  // len is uint16_t and not uint8_t because the FIFO burst reads kFifoBurstWords * 7
-  // bytes - 224 at 32 words, and past 36 words it would no longer fit a byte. Nothing
-  // should have to think about that when tuning the constant.
-  void imuBurstRead(uint8_t startReg, uint8_t *buf, uint16_t len);
-
-  // One decoded read of FIFO_STATUS1/2.
-  struct FifoStatus {
-    uint16_t level;      // 9-bit DIFF_FIFO: words waiting
-    bool     ovr;        // words already overwritten - the DATA LOST flag
-    bool     full;       // at the brim, nothing lost yet
-    bool     ovrLatched; // overran at some point since the previous read
-  };
-
-  /*
-    Level AND every status flag from ONE 2-byte burst of FIFO_STATUS1/2 (0x1B, 0x1C),
-    replacing FIFO_Get_Full_Status + FIFO_Get_Num_Samples - two transactions over
-    overlapping registers, read at two different instants.
-
-    Datasheet DS13476 table 78 and section 6.10.3 (continuous mode), verbatim:
-      FIFO_WTM_IA      bit 7  filling >= WTM
-      FIFO_OVR_IA      bit 6  "FIFO is completely filled"; 6.10.3 adds that on an
-                              overrun "at least one of the oldest samples in FIFO has
-                              been overwritten" - this is the DATA LOST flag
-      FIFO_FULL_IA     bit 5  "FIFO will be full at the next ODR" - the brim WARNING,
-                              which by definition asserts one ODR BEFORE OVR does
-      FIFO_OVR_LATCHED bit 3  latched overrun, "reset when this register is read"
-      DIFF_FIFO_8      bit 0  high bit of the 9-bit level in FIFO_STATUS1
-
-    A raw read for a reason the wrapper cannot give us: lsm6dsv16x_fifo_status_get reads
-    this register, discards FIFO_OVR_LATCHED and clears it in the same breath. Every
-    caller must go through here, or that bit is consumed and thrown away - which is why
-    this exists as one function rather than as two decodings at the two call sites.
-  */
-  inline FifoStatus readFifoStatus() {
-    uint8_t sb[2] = {0, 0};
-    imuBurstRead(kFifoStatus1Reg, sb, 2);
-    return FifoStatus{
-        (uint16_t)(((uint16_t)(sb[1] & 0x01u) << 8) | sb[0]),
-        (sb[1] & 0x40u) != 0,
-        (sb[1] & 0x20u) != 0,
-        (sb[1] & 0x08u) != 0};
-  }
-
-  // Pop kFifoBurstWords FIFO words - or n, whichever is smaller - into burstBuf_ in ONE
-  // CS-low transfer. The pop loop then takes them out of RAM. See kFifoBurstWords in
-  // wave_config.h for the arithmetic and for the datasheet assumption it rests on.
-  void fillFifoBurst(uint16_t n);
-
-  // Words held by fillFifoBurst and how far the pop loop has got through them. Both are
-  // reset per burst, not per drain: a drain longer than kFifoBurstWords refills.
-  uint8_t  burstBuf_[kFifoBurstWords * kRawWordBytes];
-  uint16_t burstFill_ = 0;
-  uint16_t burstIdx_  = 0;
 
   void closeWindow();
 
@@ -243,23 +154,9 @@ class ImuSampler {
   // led by how much of the capture is left.
   void debugPrintStatus(Print &dbg, uint32_t captureLeftMs);
 
-  // Raw log helpers. rawAppend flushes whenever the block is full, so a record may
-  // straddle a block boundary - the file is a byte stream, not an array of blocks.
-  void rawAppend(const uint8_t *p, uint8_t n);
-  void rawEmitWord(uint8_t tag, const uint8_t payload[6]);
-  void rawEmitSync(uint16_t nWords, uint16_t flags);
-
-  LSM6DSV16XSensor imu_;
-  ImuRowSink rowSink_ = nullptr;
-  RawBlockSink rawSink_ = nullptr;
-  uint8_t  rawBuf_[kRawBufBytes];
-  uint16_t rawLen_ = 0;
-  uint32_t nRawWriteFail_ = 0;
-  
-  // Sticky: set the moment a block is lost, cleared only once a sync record has
-  // actually carried it into the file. Without the stickiness the report could itself
-  // be the write that fails, and the loss would go unrecorded in the stream.
-  bool     rawWriteFailPending_ = false;
+  ImuDevice     dev_;
+  ImuRowSink    rowSink_ = nullptr;
+  RawLogWriter *rawLog_  = nullptr;
 
   uint32_t nOverflow_ = 0;
   uint32_t nOverflowTotal_ = 0;

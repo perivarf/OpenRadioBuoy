@@ -2,7 +2,6 @@
 #include "config.h"
 #include "rotation.h"
 #include <math.h>
-#include <string.h>   // memmove: flushRaw flytter halen fram etter en delvis skriving
 
 // -----------------------------------------------------------------------------
 // FirRowBank
@@ -73,150 +72,11 @@ void FirRowBank::eval(ImuRow &r) const {
 // -----------------------------------------------------------------------------
 // ImuSampler
 // -----------------------------------------------------------------------------
-ImuSampler *ImuSampler::s_self = nullptr;
-
-// Runs in interrupt context: Interrupt service routine sets the flag and returns. 
-// Reading the FIFO from here would be a bad idea
-void ImuSampler::isrTrampoline() {
-  if (s_self) s_self->fifoFlag_ = true;
-}
-
-ImuSampler::ImuSampler()
-    : imu_(&SPI, (int)SPI_CS_IMU_PIN, kImuSpiHz) { s_self = this; }
-
-bool ImuSampler::begin(Print &dbg) {
-
-  // Keep CS high before any bus activity
-  pinMode(SPI_CS_IMU_PIN, OUTPUT);
-  digitalWrite(SPI_CS_IMU_PIN, HIGH);
-
-  if (imu_.begin() != LSM6DSV16X_OK) {
-    dbg.println("LSM6DSV: begin() failed - check SPI wiring/CS");
-    return false;
-  }
-  dbg.println("LSM6DSV: begin() OK");
-
-  applyConfig();
-
-  if (kImuUseInt1) {
-    
-    // Need to set pinMode() before attachInterrupt() or the ISR never fires.
-    pinMode(INT1_IMU_PIN, INPUT);
-
-    // The sensor drives INT1 push-pull, active high -> trigger on the rising edge.
-    attachInterrupt(digitalPinToInterrupt(INT1_IMU_PIN), isrTrampoline, RISING);
-  }
-
-  return true;
-}
-
-// All sensor config
-void ImuSampler::applyConfig() {
-
-  // Enable accelerometer and gyroscope
-  imu_.Enable_X();      // accelerometer
-  imu_.Enable_G();      // gyroscope
-
-  // Set ranges, ODR and mode (high accuracy, low power etc) from wave_config.h
-  imu_.Set_X_FS((int32_t)kAccelFS);   // full-scale from wave_config (kAccelFS)
-  imu_.Set_G_FS((int32_t)kGyroFS);    // full-scale from wave_config (kGyroFS)
-  imu_.Set_X_ODR((float)kImuOdrHz, kImuAccMode);
-  imu_.Set_G_ODR((float)kImuOdrHz, kImuGyrMode);
-
-  // Accelerometer low-pass filter
-  if (kUseLpf2) {
-    imu_.Set_X_Filter_Mode(0, kLpf2Bw);  // 0 => low-pass mode, arg2 = bandwidth
-  }
-
-  // Batch accel + gyro into the FIFO at the chosen ODR; SFLP rotation vector
-  // (quaternion) is batched alongside them. Stream mode is started separately.
-  imu_.FIFO_Set_X_BDR((float)kImuOdrHz);
-  imu_.FIFO_Set_G_BDR((float)kImuOdrHz);
-
-  // SFLP fusion is AHRS filter built into the LSM6DSV16X.
-  // It is a quaternion that rotates the sensor frame into the
-  // gravitation frame
-  //
-  // SFLP can return estimated gyro bias
-  // Can inject gyro bias at start (if known) to improve convergence
-  // Set_SFLP_GBIAS(float x, float y, float z)  // rad/s
-  if (kEnableSflp) {
-    imu_.Enable_Rotation_Vector();
-    imu_.Set_SFLP_ODR(kSflpOdrHz);
-    imu_.Set_SFLP_Batch(true, false, false);  // (Rotation, Gravity, gBias) -> FIFO
-  } else {
-    imu_.Disable_Rotation_Vector();
-    imu_.Set_SFLP_Batch(false, false, false);
-  }
-
-  // Interrupt watermark
-  if (kImuUseInt1) {
-    // Let INT1 go high once the FIFO holds kFifoWatermark words, so the drain runs
-    // on the sensor's cadence rather than the main loop's. INT1_CTRL has no setter
-    // in the wrapper, hence the raw register write (see wave_config.h).
-    imu_.FIFO_Set_Watermark_Level((uint8_t)kFifoWatermark);
-    imu_.Write_Reg(kInt1CtrlReg, kInt1FifoTh);
-  }
-}
-
-// Start streaming using STREAM_MODE. Both STREAM_MODE and FIFO_MODE use the same FIFO buffer
-// but they differ when it fills. STREAM overwrites the oldest
-// word and keeps running. FIFO stops until a BYPASS trip restarts it
-// STREAM_MODE is more stable as it allows for some missing reads, but it continues
-// to fill the FIFO
-void ImuSampler::startStreaming() {
-  fifoFlag_ = false;
-  imu_.FIFO_Set_Mode(LSM6DSV16X_STREAM_MODE);
-}
-
-
-void ImuSampler::shutdownIMU() {
-  imu_.Disable_G();
-  imu_.Disable_X();
-}
-
-// Check if acceleration sensor 
-bool ImuSampler::checkImu(Print &dbg) {
-
-  uint8_t drdy = 0;
-  const uint32_t deadline = millis() + 100;
-  while (millis() < deadline) {
-    if (imu_.Get_X_DRDY_Status(&drdy) == LSM6DSV16X_OK && drdy) break;
-  }
-
-  // Read one accel sample, then put back to sleep
-  int32_t a[3] = {0, 0, 0};
-  const bool read_ok = (imu_.Get_X_Axes(a) == LSM6DSV16X_OK);
-
-  // Shutdown IMU after read, so it is left OFF until next capture.
-  shutdownIMU();
-
-  if (!drdy) {
-    dbg.println("LSM6DSV: no data-ready within 100 ms - sensor is not converting");
-    return false;
-  }
-  if (!read_ok) {
-    dbg.println("LSM6DSV: sample read failed");
-    return false;
-  }
-
-  return true;
-}
-
-// Flush the hardware FIFO and leave it OFF. Streaming is startStreaming's job
-void ImuSampler::resetFifo() {
-  imu_.FIFO_Set_Mode(LSM6DSV16X_BYPASS_MODE);  // flush hardware FIFO, stay idle
-  fifoFlag_ = false;
-  // Belongs to the FIFO contents being thrown away here, so carrying it across would
-  // pin a previous capture's overrun on the first window of the next one.
-  pendingOvrLatched_ = false;
-}
-
 void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   sessionStartMs_ = captureStartMs;
   nOverflowTotal_ = 0;       // per-capture, reported in ana.csv
   nOverflow_ = 0;
-  lastDrainMs_ = captureStartMs;  // measure the INT1 deadline from t=0, not from boot
+  lastDrainMs_ = captureStartMs;  // measure the drain deadline from t=0, not from boot
   logStarted_ = false;
   accelIdx_ = 0;
   sampleTms_ = 0.0;
@@ -266,208 +126,6 @@ void ImuSampler::latchRowValues() {
   winFirDone_ = true;
 }
 
-// Raw multi-byte burst read on the shared SPI bus. With IF_INC = 1 (the default) the
-// sensor auto-increments the address, so consecutive registers arrive in ONE CS-low
-// transfer.
-// Settings must match what the driver uses for its own reads or the two would
-// disagree about the bus: MODE3, MSB first, 0x80 as the read bit.
-//
-// The payload goes out as ONE block transfer, not a byte-at-a-time loop. Both forms
-// clock the same bits down the same CS-low transaction - the difference is how often
-// the core is entered: SPI.transfer(uint8_t) runs the whole of spi_transfer() per byte,
-// so a 7-byte FIFO word paid that entry eight times. Measured 2026-08-15 at 37 us per
-// word, of which only ~11 is the bus (see below); the rest was the eight entries.
-//
-// NB: the bus does NOT run at kImuSpiHz. spi_init picks the fastest prescaler that does
-// not exceed the request, so 8 MHz against a 48 MHz PCLK2 lands on /8 = 6 MHz. /4 would
-// be 12 MHz, past the sensor's 10 MHz rating, so 6 MHz is the ceiling here and raising
-// kImuSpiHz buys nothing.
-//
-// tx_buf = nullptr clocks out 0xFF rather than the 0x00 the old loop sent. MOSI is
-// don't-care for the duration of a read, so the sensor cannot tell the two apart.
-void ImuSampler::imuBurstRead(uint8_t startReg, uint8_t *buf, uint16_t len) {
-  SPI.beginTransaction(SPISettings(kImuSpiHz, MSBFIRST, SPI_MODE3));
-  digitalWrite(SPI_CS_IMU_PIN, LOW);
-  SPI.transfer(startReg | 0x80);    // 0x80 = READ bit
-  SPI.transfer(nullptr, buf, len);  // len dummy bytes out, the answer straight into buf
-  digitalWrite(SPI_CS_IMU_PIN, HIGH);
-  SPI.endTransaction();
-}
-
-// Pop one FIFO word: the tag byte at 0x78 and its six payload bytes at 0x79..0x7E,
-// in a single transaction. Reading 0x7E is what advances the FIFO, so the whole word
-// leaves the sensor atomically.
-//
-//   w[0..6] = tag | x_lo x_hi | y_lo y_hi | z_lo z_hi     (three LE int16, tag >> 3 = sensor)
-//
-// One burst rather than the wrapper's FIFO_Get_Tag + FIFO_Get_X_Axes
-//
-// Returns tag_sensor, the top 5 bits of the tag byte (FIFO_DATA_OUT_TAG: bit 0 unused,
-// bits 2:1 tag_cnt, bits 7:3 tag_sensor).
-// Pull up to kFifoBurstWords words in ONE transfer. Reading 0x7E is what advances the
-// FIFO, so a continuous read past it rolls the address back to the tag register and the
-// next word follows in the same CS-low transaction - that is the property this rests on,
-// and the one to check in the datasheet if the tags ever come out wrong.
-//
-// n is what the caller still has left to pop, and it is a CEILING and not a request:
-// reading past the level the status word reported would return words the FIFO does not
-// hold. kFifoBurstWords = 1 makes this exactly the old one-word-per-transaction read.
-void ImuSampler::fillFifoBurst(uint16_t n) {
-  burstFill_ = n < kFifoBurstWords ? n : kFifoBurstWords;
-  burstIdx_  = 0;
-  imuBurstRead(kFifoDataOutTagReg, burstBuf_,
-               (uint16_t)(burstFill_ * kRawWordBytes));
-}
-
-// Raw log. Little-endian, layout documented at wave_raw_log in wave_config.h.
-//
-// APPEND ONLY - ingen skriving herfra. Bufferet rommer resten under skrivegrensa
-// pluss en hel drenering (kRawBufBytes), og flushRaw() kalles av update() ETTER at
-// pop-løkka har tømt FIFO-en. Det er hele poenget: et sd-kort som stanser 800 ms skal
-// treffe en tom FIFO med 256 ledige nivåer, ikke en halvtømt med ~128.
-//
-// Kallet er uendret etter at kRawFlushThreshold kom inn 2026-08-15 - det er flushRaw()
-// selv som avgjør om denne dreneringen faktisk skal røre kortet. Plasseringen rett
-// etter en tømt FIFO er fortsatt den samme; stallen treffer bare sjeldnere.
-// Se kRawBufBytes og skrivegrense-avsnittet i wave_config.h.
-void ImuSampler::rawAppend(const uint8_t *p, uint8_t n) {
-  if (!rawSink_) return;
-  // Nødventil, ikke normal vei: bufferet er dimensjonert for resten under
-  // skrivegrensa pluss en verste drenering, så dette kan bare skje om FIFO-en
-  // leverer mer enn kFifoDepthWords - altså om den konstanten er feil igjen. Da er
-  // en skriving midt i løkka bedre enn å skrive utenfor bufferet, og static_assert-en
-  // over er det som skal fange det først. force, ellers ville et kall som bare
-  // skriver hele sektorer kunne la det være igjen for lite plass til å hjelpe.
-  if (rawLen_ + n > kRawBufBytes) flushRaw(true);
-  for (uint8_t i = 0; i < n; i++) rawBuf_[rawLen_++] = p[i];
-}
-
-// The FIFO word exactly as it came off the bus. The
-void ImuSampler::rawEmitWord(uint8_t tag, const uint8_t payload[6]) {
-  if (!rawSink_) return;
-  uint8_t rec[kRawWordBytes];
-  rec[0] = tag;
-  for (uint8_t i = 0; i < 6; i++) rec[i + 1] = payload[i];
-  rawAppend(rec, kRawWordBytes);
-}
-
-// One per drain, written BEFORE that drain's words. Pins the sample axis to the
-// clock: t_us is the fractional sample time (sampleTms_ is a self-calibrating
-// double), accel_n is the cumulative accel count so a gap is arithmetic rather than
-// guesswork, and millis is when the drain actually ran - which is the measurement
-// that says whether SD stalls are threatening the FIFO.
-void ImuSampler::rawEmitSync(uint16_t nWords, uint16_t flags) {
-  if (!rawSink_) return;
-  uint8_t rec[kRawSyncBytes];
-  uint8_t o = 0;
-  rec[o++] = kRawSyncTag;
-  const uint32_t tUs = (uint32_t)(sampleTms_ * 1000.0);
-  const uint32_t ms  = millis();
-  const uint32_t vals[3] = {tUs, accelIdx_, ms};
-  for (uint8_t v = 0; v < 3; v++) {
-    rec[o++] = (uint8_t)(vals[v]);
-    rec[o++] = (uint8_t)(vals[v] >> 8);
-    rec[o++] = (uint8_t)(vals[v] >> 16);
-    rec[o++] = (uint8_t)(vals[v] >> 24);
-  }
-  // Fold in any block lost since the last sync. This is the only place the loss can
-  // be reported IN the stream, and it must be reported there: ana.csv can say a
-  // capture lost blocks, but not WHERE - and where is the whole question, because
-  // everything after the first loss is misaligned.
-  if (rawWriteFailPending_) flags |= kRawFlagWriteFail;
-  const uint16_t vals16[2] = {nWords, flags};
-  for (uint8_t v = 0; v < 2; v++) {
-    rec[o++] = (uint8_t)(vals16[v]);
-    rec[o++] = (uint8_t)(vals16[v] >> 8);
-  }
-  const uint32_t failBefore = nRawWriteFail_;
-  rawAppend(rec, kRawSyncBytes);
-  // Clear only if appending the report did not itself lose a block. When it did, the
-  // flag stays pending and the NEXT sync carries it - one record late in the file, but
-  // never silently dropped. Late-but-present is the right way round: the decoder's job
-  // is to stop trusting the tail, and it still does.
-  if (nRawWriteFail_ == failBefore) rawWriteFailPending_ = false;
-}
-
-// Se skrivegrense-avsnittet i wave_config.h. Kort: normalveien skriver bare hele
-// sektorer, og bare når kRawFlushThreshold har samlet seg, slik at SdFat kan skyve
-// dem rett fra rawBuf_ til kortet uten å gå veien om sin ene 512-bytes cache.
-uint16_t ImuSampler::flushRaw(bool force) {
-  if (!rawSink_ || rawLen_ == 0) return 0;
-
-  // Grensa hører hjemme HER og ikke på kallstedet: kRawBufBytes er dimensjonert ut
-  // fra at det aldri ligger mer enn kRawFlushThreshold - 1 igjen når en drenering
-  // starter, og den invarianten holder bare hvis hvert kall respekterer den.
-  if (!force && rawLen_ < kRawFlushThreshold) return 0;
-
-  // force tar halen med; ellers ligger den igjen til neste drenering fyller opp en
-  // hel sektor rundt den. Restens plass er budsjettert i kRawBufBytes.
-  const uint16_t n = force ? rawLen_
-                           : (uint16_t)(rawLen_ / kRawBlockBytes) * kRawBlockBytes;
-  if (n == 0) return 0;
-
-  if (!rawSink_(rawBuf_, n)) {
-    nRawWriteFail_++;
-    rawWriteFailPending_ = true;
-  }
-
-  // Resten flyttes fram. Opptil 511 B et par ganger i sekundet; forsvinnende mot
-  // skrivingen den nettopp ventet på.
-  rawLen_ -= n;
-  if (rawLen_ > 0) memmove(rawBuf_, rawBuf_ + n, rawLen_);
-  return n;
-}
-
-// Payload -> three int16 in LSB order. The driver truncates its own conversion to
-// int32 (FIFO_Get_X_Axes returns whole mg), which throws away the sub-LSB range the
-// sensitivity actually provides; decoding here keeps it in float.
-static inline void payloadToAxes(const uint8_t p[6], float sens, float out[3]) {
-  for (uint8_t i = 0; i < 3; i++) {
-    int16_t raw = (int16_t)((uint16_t)p[2 * i] | ((uint16_t)p[2 * i + 1] << 8));
-    out[i] = (float)raw * sens;
-  }
-}
-
-// IEEE half -> float, bit for bit as the driver's npy_halfbits_to_floatbits does.
-// The SFLP words are three halves; the driver's own decoder is private, so it is
-// mirrored rather than called.
-static inline float halfToFloat(uint16_t h) {
-  union { float f; uint32_t b; } c;
-  const uint32_t sgn = ((uint32_t)h & 0x8000u) << 16;
-  const uint16_t exp = h & 0x7c00u;
-  if (exp == 0x0000u) {            // zero or subnormal
-    uint16_t sig = h & 0x03ffu;
-    if (sig == 0) { c.b = sgn; return c.f; }
-    uint16_t e = 0;
-    sig <<= 1;
-    while ((sig & 0x0400u) == 0) { sig <<= 1; e++; }
-    c.b = sgn + (((uint32_t)(127 - 15 - e)) << 23) + (((uint32_t)(sig & 0x03ffu)) << 13);
-  } else if (exp == 0x7c00u) {     // inf or NaN
-    c.b = sgn + 0x7f800000u + (((uint32_t)(h & 0x03ffu)) << 13);
-  } else {                         // normalised
-    c.b = sgn + ((((uint32_t)(h & 0x7fffu)) + 0x1c000u) << 13);
-  }
-  return c.f;
-}
-
-// SFLP rotation vector: x,y,z as halves, w reconstructed from the unit norm.
-// Same reconstruction as the driver's sflp2q, including the renormalisation guard
-// for a sum of squares that rounds above 1. Output is [x,y,z,w] to match the
-// wrapper's FIFO_Get_Rotation_Vector, which is what the caller already expects.
-static inline void payloadToQuat(const uint8_t p[6], float q[4]) {
-  float sumsq = 0.0f;
-  for (uint8_t i = 0; i < 3; i++) {
-    q[i] = halfToFloat((uint16_t)p[2 * i] | ((uint16_t)p[2 * i + 1] << 8));
-    sumsq += q[i] * q[i];
-  }
-  if (sumsq > 1.0f) {
-    const float n = sqrtf(sumsq);
-    q[0] /= n; q[1] /= n; q[2] /= n;
-    sumsq = 1.0f;
-  }
-  q[3] = sqrtf(1.0f - sumsq);
-}
-
 // Close the current window -> finish the ImuRow and hand it to the row sink.
 void ImuSampler::closeWindow() {
   if (winNAcc_ == 0) return;
@@ -493,61 +151,56 @@ void ImuSampler::closeWindow() {
   }
 }
 
-// Drain all pending FIFO words. Three tags are batched together: accel (2), gyro
-// (1) and SFLP rotation / quaternion (0x13). The accel tag is the clock: it
-// drives windowing, the AHRS, and all ten decimation filters, so every delay line
-// advances exactly once per accel sample and they can never drift apart. Gyro and
-// SFLP words only latch their latest value for the accel branch to pair with.
+// Drain all pending FIFO words. Accel, gyro and the rotation quaternion arrive
+// interleaved; the accel sample is the clock, driving windowing, the AHRS and all ten
+// decimation filters, so every delay line advances exactly once per accel sample and
+// they can never drift apart. Gyro and quaternion words only latch their latest value
+// for the accel branch to pair with.
 void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
-  // GATE 1, INT1 mode: the edge is the trigger, and since 2026-08-16 it is the ONLY
-  // trigger - the deadline (kDrainIntervalMs, then still named kMaxDrainIntervalMs) was
-  // taken out of this gate deliberately. Read that decision and its price in the INT1
-  // section of wave_config.h before restoring it.
-  //
-  // What the deadline used to do here was break the state the 2026-08-04 measurement
-  // found: one lost edge, and the capture sat at 0 Hz forever with no warning. What
-  // remains against that is the re-arm at the end of this function, and it is now load
-  // bearing rather than belt-and-braces: it recovers the case where a drain ends with
-  // the FIFO still above the watermark - the aftermath of an sd-stall, i.e. the one
-  // that happens in practice - but nothing recovers an edge lost while the level is
-  // BELOW the watermark. That capture is over until the next reset.
-  if (kImuUseInt1 && !fifoFlag_) {
+  /*
+    WTM: the interrupt edge is the trigger, and the ONLY one - there is no deadline
+    behind it. See the INT1 section in wave_config.h before adding one back.
+
+    The price is a lost edge. The interrupt is level driven but wired to RISING, so if a
+    drain ends with the FIFO still above the watermark the line never falls, no new edge
+    arrives, and the stream dies silently. The re-arm at the end of this function is the
+    only thing that recovers it, and it is load bearing rather than belt-and-braces: it
+    covers the case that happens in practice (the aftermath of an sd-stall, where the
+    level IS above the watermark). It does not cover an edge lost while the level is
+    BELOW it - that capture is over until the next reset.
+  */
+  if (kImuUseInt1 && !dev_.fifoReady()) {
     // Still print, so a stalled interrupt shows up as frozen counters, not silence.
     debugPrintStatus(dbg, captureLeftMs);
     return;
   }
 
-  // DRAIN, the other mode: elapsed time is the trigger, and since 2026-08-16 it is the
-  // only one here. It used to be "level >= kFifoWatermark OR the deadline", i.e. the
-  // watermark emulated in software with the deadline behind it. The two are now a
-  // CHOICE and not a pair: WTM drains on the flag, DRAIN drains on the clock, and each
-  // one empties the whole buffer when it fires.
-  //
-  // What the level test bought was batching. Without any gate at all the drain ran on
-  // every loop iteration: once the GPS work fell from 17 ms to 4.4 ms per iteration it
-  // became 169 drains a second at 6.9 words each, and every drain costs a kRawSyncBytes
-  // record - 2.9 kB/s of sync into a raw log whose preAllocate never budgeted for it.
-  // kDrainIntervalMs has to carry that batching alone now: at 127 ms it is ~8 drains a
-  // second, and the batch is whatever accumulated rather than a fixed word count.
+  /*
+    DRAIN, the other mode: elapsed time is the trigger, and the only one here. WTM and
+    DRAIN are a CHOICE, not a pair - each empties the whole buffer when it fires.
+
+    kDrainIntervalMs carries the batching alone. With no gate at all the drain ran on
+    every loop iteration: at 4.4 ms per iteration that is 169 drains a second at 6.9
+    words each, and every drain costs a kRawSyncBytes record - 2.9 kB/s of sync into a
+    raw log whose preAllocate never budgeted for it. At 127 ms it is ~8 drains a second,
+    and the batch is whatever accumulated rather than a fixed word count.
+  */
   if (!kImuUseInt1 && (millis() - lastDrainMs_) < kDrainIntervalMs) {
     debugPrintStatus(dbg, captureLeftMs);
     return;
   }
-  fifoFlag_ = false;
+  dev_.clearFifoReady();
 
-  // Level and flags from one read, so the count and the flags describe the same
-  // instant - see readFifoStatus for the register and why it is not the wrapper's.
+  // Level and flags from one read, so the count and the flags describe the same instant.
   //
-  // BELOW both gates since 2026-08-16. It used to sit above them because the level it
-  // returned WAS the polling gate; now neither gate needs it, so it runs only on calls
-  // that actually drain. That also retires a hazard rather than just saving a read:
-  // this read RESETS FIFO_OVR_LATCHED, so while it ran on gated calls it consumed
-  // overruns nobody would ever see, and the gate had to carry the bit forward by hand.
-  // With no read between drains the latch simply survives until the drain that reports
-  // it, and pendingOvrLatched_ is left with the one producer that still makes sense -
-  // the re-arm read at the end of this function.
+  // BELOW both gates, which is not just one read saved: this read RESETS
+  // FIFO_OVR_LATCHED, so running it on gated calls consumed overruns nobody would ever
+  // see and forced the gate to carry the bit forward by hand. With no read between
+  // drains the latch survives until the drain that reports it, and pendingOvrLatched_
+  // is left with its one remaining producer - the re-arm read at the end of this
+  // function.
   const uint32_t tStatus = timeStart();
-  const FifoStatus st = readFifoStatus();
+  const ImuFifoStatus st = dev_.status();
   timeAdd(TIM_STATUS, tStatus);
 
   // Below both gates, so TIM_UPDATE counts drains and not the far more numerous calls
@@ -572,30 +225,30 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   }
 
   // Sync record first, so the words that follow it are the ones it describes.
-  rawEmitSync(nSamples, lost ? kRawFlagFifoOvf : 0);
+  if (rawLog_) {
+    rawLog_->emitSync((uint32_t)(sampleTms_ * 1000.0), accelIdx_,
+                      nSamples, lost ? kRawFlagFifoOvf : 0);
+  }
 
   // TIM_POP spans the whole loop; TIM_SPI inside it isolates the bus from the work done
   // on the words, and the difference between them is what the maths costs.
   const uint32_t tPop = timeStart();
-  burstFill_ = burstIdx_ = 0;   // nothing carries over between drains
+  dev_.resetBurst();   // nothing carries over between drains
   for (uint16_t i = 0; i < nSamples; i++) {
-    uint8_t payload[6];
-    // TIM_SPI still wraps the WHOLE per-word cost, refill included, so n stays the word
-    // count and the mean stays directly comparable to the 28 us this replaced. What
-    // changed is max: it is now a whole burst (~320 us at 32 words), not one word.
+    // TIM_SPI wraps the WHOLE per-word cost, burst refill and decoding included, so n
+    // stays the word count and the mean stays comparable across builds. Its max is a
+    // whole burst (~320 us at 32 words), not one word.
+    ImuFifoWord w;
     const uint32_t tSpi = timeStart();
-    if (burstIdx_ == burstFill_) fillFifoBurst((uint16_t)(nSamples - i));
-    const uint8_t *w = burstBuf_ + burstIdx_ * kRawWordBytes;
-    burstIdx_++;
-    const uint8_t tag = (uint8_t)(w[0] >> 3);          // tag_sensor, top 5 bits
-    for (uint8_t k = 0; k < 6; k++) payload[k] = w[k + 1];
+    dev_.popWord(w, (uint16_t)(nSamples - i));
     timeAdd(TIM_SPI, tSpi);
-    // EVERY word, including tags this code does not decode: the raw log is a record
-    // of what the sensor produced, not of what the wave chain happens to consume.
-    rawEmitWord(tag, payload);
-    if (tag == 2) {  // accel (mg)
-      float a[3];
-      payloadToAxes(payload, kAccSensMgPerLsb, a);
+
+    // EVERY word, including kinds this code does not consume: the raw log is a record
+    // of what the sensor produced, not of what the wave chain happens to read.
+    if (rawLog_) rawLog_->emitWord(w.tag, w.payload);
+
+    if (w.kind == ImuSampleKind::Accel) {  // mg
+      const float *a = w.v;
       nAccDbg_++;   // counted, not summed: the RATE is the loss signal, |a| was not
       // Windowing: samples arrive in FIFO bursts but represent evenly spaced points
       // in time. A running, monotonic clock (sampleTms_ += samplePeriodMs_) gives a
@@ -661,9 +314,9 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
       // threshold for kBrakeMinSamples in a row.
       //
       // Rotated with the orientation the build actually trusts, not with SFLP
-      // unconditionally. It used to be the latter, which let a NaN or an unconverged
-      // SFLP poison a quality flag on a build whose measurement came from Madgwick -
-      // the flag and the measurement now stand or fall together.
+      // unconditionally: a NaN or an unconverged SFLP must not poison a quality flag on
+      // a build whose measurement comes from Madgwick. The flag and the measurement
+      // stand or fall together.
       //
       // Placed after the AHRS update so it sees this sample's attitude rather than the
       // previous one, and so the very first sample uses the seeded attitude from
@@ -701,14 +354,12 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
 
       sampleTms_ += samplePeriodMs_;
       accelIdx_++;
-    } else if (tag == 1) {  // gyro (mdps)
-      float g[3];
-      payloadToAxes(payload, kGyrSensMdpsPerLsb, g);
+    } else if (w.kind == ImuSampleKind::Gyro) {  // mdps
+      const float *g = w.v;
       nGyrDbg_++;
       latestGx_ = g[0]; latestGy_ = g[1]; latestGz_ = g[2];
-    } else if (tag == kSflpRotationTag) {  // quaternion [x,y,z,w]
-      float q[4];
-      payloadToQuat(payload, q);
+    } else if (w.kind == ImuSampleKind::Quat) {  // [x,y,z,w]
+      const float *q = w.v;
       // NaN guard: a corrupt FIFO word decodes to an invalid half-float and the
       // w = sqrt(1 - sumsq) reconstruction yields NaN; one NaN poisons az_ned_sflp and the
       // whole SFLP spectrum. Keep the last valid quaternion instead.
@@ -719,55 +370,52 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
       }
     } else {
       nUnknownDbg_++;
-      lastUnknownTag_ = tag;
+      lastUnknownTag_ = w.tag;
     }
   }
   timeAdd(TIM_POP, tPop);
 
-  // HER, og bare her, skrives dreneringen til kortet. FIFO-en er nettopp tømt, så
-  // dette er det ene punktet i runden der et sd-stall møter fullt overskrivnings-
-  // budsjett. Lå skrivingen inne i løkka over - som den gjorde til 2026-08-14 - startet
-  // stallen med FIFO-en halvfull og halve budsjettet allerede brukt.
+  // HERE, and only here, does the drain reach the card. The FIFO has just been
+  // emptied, so this is the one point in the round where an sd-stall meets the full
+  // overwrite budget: 256 free levels rather than the ~128 a mid-loop write left.
   //
-  // Rekkefølgen mot readFifoStatus() under er ikke tilfeldig: den lesingen skal skje
-  // ETTER skrivingen, for det er under skrivingen en overflow nå oppstår, og
-  // FIFO_OVR_LATCHED er det eneste sporet den etterlater seg.
-  // TIM_FLUSH is the sd-card, seen from the one place that can threaten the FIFO. Its
+  // The order against the re-arm read below matters: that read must come AFTER the
+  // write, because the write is where an overflow now happens and FIFO_OVR_LATCHED is
+  // the only trace it leaves.
+  //
+  // TIM_FLUSH is the sd-card seen from the one place that can threaten the FIFO. Its
   // max is the number to hold against the drain budget when a capture reports an
-  // overrun; flushBytes turns it into us/kB so a slow card and a big write can be told
-  // apart.
-  //
-  // Bare bokført når det FAKTISK ble skrevet: etter at kRawFlushThreshold kom inn
-  // returnerer de fleste dreneringene uten å røre kortet, og å telle dem med ville
-  // fylle bøtta med nuller og gjøre middelverdien meningsløs nettopp som mål på hvor
-  // dyr en skriving er. n faller tilsvarende - ca. 8 i sekundet, ikke 18.
-  const uint32_t tFlush = timeStart();
-  const uint16_t wroteBytes = flushRaw();
-  if (wroteBytes > 0) {
-    timeAdd(TIM_FLUSH, tFlush);
-    wave_timing.addFlushBytes(wroteBytes);
+  // overrun; flushBytes turns it into us/kB, which separates a slow card from a big
+  // write. Booked only when bytes were ACTUALLY written - most drains return without
+  // touching the card (kRawFlushThreshold), and counting those would fill the bucket
+  // with zeros and make the mean useless as a measure of what a write costs.
+  if (rawLog_) {
+    const uint32_t tFlush = timeStart();
+    const uint16_t wroteBytes = rawLog_->flush();
+    if (wroteBytes > 0) {
+      timeAdd(TIM_FLUSH, tFlush);
+      wave_timing.addFlushBytes(wroteBytes);
+    }
   }
 
   lastDrainMs_ = millis();
 
   if (kImuUseInt1) {
-    // Robustness against a lost rising edge. The watermark interrupt is LEVEL
-    // driven: if this drain ended with the FIFO still above the watermark - after a
-    // blocking SD flush, say - the line never falls, no new RISING edge ever
-    // arrives, fifoFlag_ is never set again and the stream dies silently. Re-arm
-    // ourselves whenever a backlog remains. ORB_test found this the hard way; it is
-    // not defensive padding.
+    // Recovery from a lost rising edge, and the only one there is. The watermark
+    // interrupt is LEVEL driven: if this drain ended with the FIFO still above the
+    // watermark - after a blocking SD flush, say - the line never falls, no new RISING
+    // edge arrives, and the stream dies silently. Re-arm whenever a backlog remains.
     //
-    // readFifoStatus rather than FIFO_Get_Num_Samples: same single transaction, but it
-    // is also the only read positioned to catch FIFO_OVR_LATCHED from the pop loop
-    // above. A card stall mid-loop can fill the FIFO and overwrite words, and the rest
-    // of the loop then drains the level back under the brim - so the next drain's
-    // FIFO_OVR_IA reads zero and the loss would leave no trace anywhere else.
+    // This read has a second job: it is the only one positioned to catch
+    // FIFO_OVR_LATCHED from the pop loop above. A card stall mid-loop can fill the FIFO
+    // and overwrite words, and the rest of the loop then drains the level back under
+    // the brim - so the next drain's FIFO_OVR_IA reads zero and the loss would leave no
+    // trace anywhere else.
     const uint32_t tRearm = timeStart();
-    const FifoStatus after = readFifoStatus();
+    const ImuFifoStatus after = dev_.status();
     timeAdd(TIM_STATUS, tRearm);
     if (after.ovrLatched) pendingOvrLatched_ = true;
-    if (after.level >= kFifoWatermark) fifoFlag_ = true;
+    if (after.level >= kFifoWatermark) dev_.setFifoReady();
   }
 
   // Calibrate the accel sample period from real elapsed time / total samples, so
