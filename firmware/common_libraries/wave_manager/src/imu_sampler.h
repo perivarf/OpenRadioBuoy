@@ -162,9 +162,11 @@ class ImuSampler {
   static ImuSampler *s_self;
   static void isrTrampoline();
   volatile bool fifoFlag_ = false;
-  // When the last drain ENDED. Both gates in update() measure their deadline from here,
-  // not just the INT1 one - the trigger differs between the modes, the deadline does not.
-  // See kMaxDrainIntervalMs.
+  // When the last drain ENDED. The polling gate in update() measures kDrainIntervalMs
+  // from here. The INT1 gate had the same deadline until 2026-08-16 and no longer does,
+  // so this is now read by one gate rather than both - see the INT1 section in
+  // wave_config.h for that decision. Still reset on every drain either way, because the
+  // re-arm and the polling gate both depend on it.
   uint32_t lastDrainMs_ = 0;
 
   // FIFO_OVR_LATCHED picked up by the re-arm read at the END of a drain, carried to the

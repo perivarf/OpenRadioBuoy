@@ -741,8 +741,8 @@ void WaveManager::writeTimingBlock(void) {
 
   // The budget every number above is measured against, so the file can be read without
   // the firmware that wrote it. See kFifoFillMs in wave_config.h - this is that same
-  // quantity in microseconds, and kMaxDrainIntervalMs is the fraction of it the drain
-  // is allowed to use.
+  // quantity in microseconds, and kDrainIntervalMs is the fraction of it the drain is
+  // allowed to use.
   // Computed here in microseconds rather than as kFifoFillMs * 1000: the constant is
   // integer milliseconds, so going through it would report 213000 where the budget is
   // 213333, and this number exists to be measured against.

@@ -495,13 +495,37 @@ void ImuSampler::closeWindow() {
 // advances exactly once per accel sample and they can never drift apart. Gyro and
 // SFLP words only latch their latest value for the accel branch to pair with.
 void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
-  // GATE 1, INT1 mode: the edge is the trigger. The interrupt is a hint about WHEN to
-  // drain, never the authority on WHETHER to - a single lost edge would otherwise stop
-  // the capture permanently, which is exactly what was measured on 2026-08-04 (0 Hz,
-  // forever, no warning). Past kMaxDrainIntervalMs the drain runs regardless and costs
-  // two register reads if there was genuinely nothing there.
-  if (kImuUseInt1 && !fifoFlag_ && (millis() - lastDrainMs_) < kMaxDrainIntervalMs) {
+  // GATE 1, INT1 mode: the edge is the trigger, and since 2026-08-16 it is the ONLY
+  // trigger - the deadline (kDrainIntervalMs, then still named kMaxDrainIntervalMs) was
+  // taken out of this gate deliberately. Read that decision and its price in the INT1
+  // section of wave_config.h before restoring it.
+  //
+  // What the deadline used to do here was break the state the 2026-08-04 measurement
+  // found: one lost edge, and the capture sat at 0 Hz forever with no warning. What
+  // remains against that is the re-arm at the end of this function, and it is now load
+  // bearing rather than belt-and-braces: it recovers the case where a drain ends with
+  // the FIFO still above the watermark - the aftermath of an sd-stall, i.e. the one
+  // that happens in practice - but nothing recovers an edge lost while the level is
+  // BELOW the watermark. That capture is over until the next reset.
+  if (kImuUseInt1 && !fifoFlag_) {
     // Still print, so a stalled interrupt shows up as frozen counters, not silence.
+    debugPrintStatus(dbg, captureLeftMs);
+    return;
+  }
+
+  // DRAIN, the other mode: elapsed time is the trigger, and since 2026-08-16 it is the
+  // only one here. It used to be "level >= kFifoWatermark OR the deadline", i.e. the
+  // watermark emulated in software with the deadline behind it. The two are now a
+  // CHOICE and not a pair: WTM drains on the flag, DRAIN drains on the clock, and each
+  // one empties the whole buffer when it fires.
+  //
+  // What the level test bought was batching. Without any gate at all the drain ran on
+  // every loop iteration: once the GPS work fell from 17 ms to 4.4 ms per iteration it
+  // became 169 drains a second at 6.9 words each, and every drain costs a kRawSyncBytes
+  // record - 2.9 kB/s of sync into a raw log whose preAllocate never budgeted for it.
+  // kDrainIntervalMs has to carry that batching alone now: at 127 ms it is ~8 drains a
+  // second, and the batch is whatever accumulated rather than a fixed word count.
+  if (!kImuUseInt1 && (millis() - lastDrainMs_) < kDrainIntervalMs) {
     debugPrintStatus(dbg, captureLeftMs);
     return;
   }
@@ -510,36 +534,20 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   // Level and flags from one read, so the count and the flags describe the same
   // instant - see readFifoStatus for the register and why it is not the wrapper's.
   //
-  // ABOVE the TIM_UPDATE scope, because in polling mode this read IS gate 2, and a
-  // gated call is not a drain. It is the same read either way, just moved.
+  // BELOW both gates since 2026-08-16. It used to sit above them because the level it
+  // returned WAS the polling gate; now neither gate needs it, so it runs only on calls
+  // that actually drain. That also retires a hazard rather than just saving a read:
+  // this read RESETS FIFO_OVR_LATCHED, so while it ran on gated calls it consumed
+  // overruns nobody would ever see, and the gate had to carry the bit forward by hand.
+  // With no read between drains the latch simply survives until the drain that reports
+  // it, and pendingOvrLatched_ is left with the one producer that still makes sense -
+  // the re-arm read at the end of this function.
   const uint32_t tStatus = timeStart();
   const FifoStatus st = readFifoStatus();
   timeAdd(TIM_STATUS, tStatus);
 
-  // GATE 2, polling mode: the LEVEL is the trigger, and it holds the drain back to the
-  // same batch size the watermark gives the INT1 path. The two modes share a deadline,
-  // not a trigger.
-  //
-  // Without this the drain ran on every loop iteration, because kImuUseInt1 being false
-  // short-circuits gate 1 out of the build entirely. That went unnoticed while the loop
-  // was slow; once the GPS work fell from 17 ms to 4.4 ms per iteration it became 169
-  // drains a second at 6.9 words each - and every drain costs a kRawSyncBytes record, so
-  // 2.9 kB/s of sync went into the raw log that its preAllocate never budgeted for. See
-  // kFifoWatermark: it is the STANDING LEVEL, and this is what makes it mean that again.
-  if (!kImuUseInt1 && st.level < kFifoWatermark &&
-      (millis() - lastDrainMs_) < kMaxDrainIntervalMs) {
-    // The read above RESETS FIFO_OVR_LATCHED - that is the whole reason readFifoStatus
-    // exists rather than the wrapper. A gated call therefore has to carry the bit
-    // forward or the loss it records dies with it, and at ~169 gated reads a second it
-    // would consume every overrun before a drain ever saw one. The failure would be
-    // silent in the worst way: not wrong numbers, just zero overruns, forever.
-    if (st.ovr || st.ovrLatched) pendingOvrLatched_ = true;
-    debugPrintStatus(dbg, captureLeftMs);
-    return;
-  }
-
   // Below both gates, so TIM_UPDATE counts drains and not the far more numerous calls
-  // that only tested a flag or a level - a mean over those would be meaningless.
+  // that only tested a flag or a clock - a mean over those would be meaningless.
   WAVE_TIME(TIM_UPDATE);
 
   const uint16_t nSamples = st.level;

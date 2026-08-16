@@ -208,9 +208,32 @@ static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 // runde, ble det 169 dreneringer i sekundet med 6.9 ord hver: 2.9 kB/s sync-poster i
 // råloggen som preAllocate aldri budsjetterte for. Batchingen må komme fra vaktmerket,
 // ikke fra at løkka tilfeldigvis er treg nok.
+//
+// SATT TIL true 2026-08-16, og fristen er samtidig tatt ut av INT1-porten i update().
+// Det er et bevisst valg, og prisen skal stå her:
+//
+//   * Gevinsten er statuslesingen på de kallene som ikke drenerer - ~0.55 % CPU målt
+//     over et 20 s vindu (7371 lesinger a 15 us). Overrun-latchingen blir også renere:
+//     FIFO_OVR_LATCHED leses kun ved drenering, så pendingOvrLatched_-viderebæringen i
+//     port 2 er ikke lenger i bruk.
+//   * Prisen er TAPT FLANKE. Avbruddet er nivåstyrt men koblet på RISING: ender en
+//     drenering med FIFO-en fortsatt over vaktmerket, faller aldri linja, ingen ny
+//     flanke kommer, og strømmen dør stille. Målt 2026-08-04: 0 Hz, forever, no warning.
+//   * Med fristen ute er re-armingen i update() (etter dreneringen, `if (after.level >=
+//     kFifoWatermark) fifoFlag_ = true`) DET ENESTE som henter en tapt flanke tilbake.
+//     Den dekker tilfellet som betyr noe i praksis - etterspillet av en sd-stall, der
+//     nivået ER over vaktmerket. Den dekker IKKE en flanke som forsvinner mens nivået
+//     ligger under: elektrisk glipp, eller en ISR som ikke fyrer. Da er capturen tapt
+//     til neste reset, og det er den tilstanden fristen fantes for å bryte.
+//
+// INT1 gir for øvrig ikke begrenset responstid, og bør ikke leses som om den gjør det:
+// ISR-en setter kun fifoFlag_. Selve dreneringen kjører fortsatt fra capture-løkka, bak
+// den samme sd-skrivingen og den samme Welch-FFT-en. Avbruddet endrer NÅR man får vite
+// at FIFO-en er klar, ikke når man får handle på det - og derfor er dette ikke et
+// argument for å heve kFifoWatermark.
 // -----------------------------------------------------------------------------
 
-static constexpr bool kImuUseInt1 = false;
+static constexpr bool kImuUseInt1 = true;
 
 // FIFO-dybden i ord. IKKE 512, som denne fila hevdet fram til 2026-08-14:
 //
@@ -247,6 +270,26 @@ static constexpr uint16_t kFifoDepthWords = 256;
 static constexpr uint16_t kFifoWatermark = 128;
 static_assert(kFifoWatermark > 0 && kFifoWatermark < 256,
               "FIFO_CTRL1.WTM is 8 bits - a larger watermark would be truncated");
+
+// Den øvre grensen på det stående nivået, og fra 2026-08-16 den ENESTE grensen som
+// gjelder i den aktive stien. Den sto tidligere nede ved kMaxDrainIntervalMs og var
+// utledet av hva en tapt frist koster; med INT1 og ingen frist i porten finnes ikke
+// den størrelsen lenger, og en utledning som later som den gjør er verre enn ingen.
+//
+// Derfor en ren brøk av dybden i stedet. Den sier det eneste som fortsatt er sant på
+// kompileringstidspunktet: vaktmerket er det stående nivået, og det som blir igjen -
+// kFifoDepthWords minus kFifoWatermark - er alt dreneringen har på seg. Brøken er et
+// VALG om hvor mye av bufferet som skal være reserve, ikke en måling.
+//
+// 80 % gir 204 som tak. Ved dagens 128 står 128 ord igjen, altså 107 ms ved 1200 ord/s.
+// Til sammenlikning er Welch-FFT-en 88 ms av dem og en sd-stall er målt til 516.
+// Kompilatoren kan ikke se noen av de to tallene - de finnes bare som tim_welch_us_max
+// og tim_flush_us_max i ses.csv, og det er der denne grensen faktisk kontrolleres.
+static constexpr uint16_t kFifoWatermarkMaxPct = 80;
+static_assert(100u * (uint32_t)kFifoWatermark
+                  < kFifoWatermarkMaxPct * (uint32_t)kFifoDepthWords,
+              "the watermark is the STANDING level - leaving under 20% of the FIFO free "
+              "gives the drain no room for an sd-stall or the Welch FFT to land in");
 
 // INT1_CTRL (0x0D): which events the sensor drives out on the INT1 pin. Raw register
 // values because the Arduino wrapper exposes no setter for them, only Write_Reg.
@@ -793,29 +836,51 @@ static constexpr uint32_t kFifoFillMs =
 
 static constexpr uint32_t kMaxDrainIntervalMs = 3u * kFifoFillMs / 5u;  // 127 ms @ 480 Hz
 
-// A missed trigger costs kMaxDrainIntervalMs of undrained FIFO on top of whatever was
+// Den VALGTE fristen, som andel av den maksimale over. Skillet er verdt de to linjene:
+// kMaxDrainIntervalMs er utledet av FIFO-dybden og er en egenskap ved maskinvaren, mens
+// dette er et valg om hvor mye av den marginen man vil bruke. Å senke prosenten strammer
+// fristen uten å røre brøken over, som er den man må resonnere om på nytt hver gang.
+static constexpr uint32_t kDrainIntervalPct = 100;
+static constexpr uint32_t kDrainIntervalMs  = kDrainIntervalPct * kMaxDrainIntervalMs / 100u;
+
+// Trivielt sann for enhver prosent under 100, og det er hele poenget: den vokter knappen,
+// ikke utledningen. Settes kDrainIntervalPct over 100 er det en frist som er lengre enn
+// FIFO-en overlever, og da skal builden stoppe i stedet for å la tallet se lovlig ut.
+static_assert(kDrainIntervalMs <= kMaxDrainIntervalMs,
+              "the chosen drain deadline exceeds what the FIFO depth allows - "
+              "kDrainIntervalPct must not go above 100");
+
+// kMaxDrainIntervalMs FORLATER IKKE DENNE FILA fra 2026-08-16. Den er taket, ikke
+// fristen: koden leser kDrainIntervalMs, og det eneste stedet maksverdien opptrer er i
+// utledningen av den og i assert-en over. Den skal heller ikke brukes direkte - da er
+// prosentknappen omgått.
+//
+// Selve fristen er samtidig tatt ut av INT1-porten i update(), så kDrainIntervalMs leses
+// nå bare av port 2, som kImuUseInt1 kompilerer bort. Se INT1-avsnittet lenger oppe for
+// hvorfor og hva det koster. Begge konstantene er beholdt fordi pollingstien trenger dem
+// den dagen noen slår den på igjen.
+//
+// De to static_assert-ene som sto her er FJERNET, ikke deaktivert. De utledet en øvre
+// grense på vaktmerket fra hva en tapt frist koster, og uten frist finnes ikke den
+// størrelsen - en tapt flanke koster ubegrenset etterfylling, ikke 152 ord. Grensen som
+// erstattet dem er en ren brøk av dybden og står ved kFifoWatermark, der den hører
+// hjemme: den handler om det stående nivået og trenger verken frist eller ordrate.
+
+// A missed trigger costs kDrainIntervalMs of undrained FIFO on top of whatever was
 // already there, and that alone must not fill the buffer - what is left over is the
 // margin the sd-card writes have to fit inside.
 //
-// De to leddene er begge nødvendige, og det er den lærdommen denne assert-en bærer:
-//   * grensa er kFifoDepthWords (256), ikke 512 - forrige utgave godtok dobbelt så mye
-//     som bufferet rommer, og ville sluppet gjennom nettopp det den skulle fange.
-//   * kFifoWatermark må være med. Uten det leddet var 960 Hz med WTM 128 lovlig, mens
-//     regnestykket er 128 + 173 = 301 ord i en FIFO som rommer 256: én tapt flanke
-//     garanterte tap. Vaktmerket ER det stående nivået, ikke bare en dreneringstakt.
-static_assert(kFifoWatermark + kMaxDrainIntervalMs * kFifoWordsPerSec / 1000u
-                  < (uint32_t)kFifoDepthWords,
-              "watermark + a missed drain trigger would by itself overrun the FIFO - "
-              "lower kFifoWatermark or kMaxDrainIntervalMs, or batch fewer words per "
-              "second");
-
-// kMaxDrainIntervalMs har også en NEDRE grense, som ikke er åpenbar: faller den under
-// vaktmerkets egen takt, slutter den å være en reserve og blir den normale utløseren.
-// Da dreneres det på tid i stedet for på fyllingsgrad, og hver drenering koster en
-// sync-post i råloggen uansett hvor få ord den hentet.
-static_assert(kMaxDrainIntervalMs * kFifoWordsPerSec / 1000u > kFifoWatermark,
-              "kMaxDrainIntervalMs fires before the watermark does - it would become "
-              "the normal drain trigger instead of the deadline it is meant to be");
+// Lærdommene de fjernede assert-ene bar, bevart fordi de gjelder igjen den dagen
+// pollingen slås på:
+//   * grensa er kFifoDepthWords (256), ikke 512 - en tidlig utgave godtok dobbelt så
+//     mye som bufferet rommer, og ville sluppet gjennom nettopp det den skulle fange.
+//   * kFifoWatermark måtte være med i summen. Uten det leddet var 960 Hz med WTM 128
+//     lovlig, mens regnestykket er 128 + 173 = 301 ord i en FIFO som rommer 256: én
+//     tapt flanke garanterte tap.
+//   * fristen har også en NEDRE grense: faller den under vaktmerkets egen takt, slutter
+//     den å være en reserve og blir den normale utløseren. Da dreneres det på tid i
+//     stedet for på fyllingsgrad, og hver drenering koster en sync-post i råloggen
+//     uansett hvor få ord den hentet.
 
 // Just a test that if we are to use SFLP as basis for PSD, then we need to have SFLP enabled.
 static_assert(kEnableSflp || !wave_use_sflp,

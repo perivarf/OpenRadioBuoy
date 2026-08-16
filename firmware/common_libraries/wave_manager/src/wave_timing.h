@@ -75,7 +75,6 @@ class ScopeUs {
 /*
   The buckets NEST, and reading them means knowing how:
 
-      loop  >  status                                       (the gate read, every call)
       loop  >  update  >  pop ( > spi, ahrs, fir, rowsink ) + flush + dbgprint + status
       loop  >  synccsv
       loop  >  welch                                        (deferred out of rowsink)
@@ -92,21 +91,25 @@ class ScopeUs {
   but "which of these could have held the drain past its budget", and for that each one
   has to be readable on its own.
 
-  status is the one bucket with call sites at TWO levels, and that is not an oversight.
-  The gate read at the top of update() runs on every call - it is what decides whether a
-  drain happens at all - so it sits under loop, outside TIM_UPDATE. The INT1 re-arm read
-  runs at the end of a drain and sits inside it. A build with kImuUseInt1 false has only
-  the first.
+  status had a THIRD call site under loop until 2026-08-16 - the gate read, which ran on
+  every call because the level it returned was what decided whether to drain. Neither
+  gate needs it now (WTM tests the flag, DRAIN tests the clock), so it moved below both
+  and runs only on drains. Two consequences for reading the numbers:
 
-  That split makes one ratio directly readable, which is why it is worth the irregularity:
+      status n / update n   used to be polls per drain, i.e. the batching factor. It is
+                            now ~2 in a WTM build (the drain's read plus the re-arm) and
+                            ~1 in a DRAIN one, and says nothing about batching.
+      spi n / update n      still the words per drain, and now the ONLY place the batch
+                            size is visible. Read that one instead.
 
-      status n / update n  =  polls per drain, i.e. the batching factor
-
-  and spi n / update n is the words per drain that produced it.
+  The two remaining sites are the drain's own read - above WAVE_TIME, so TIM_UPDATE
+  measures the drain and not the read that sized it - and the INT1 re-arm at the end,
+  which is inside. A DRAIN build has only the first.
 */
 enum TimingBucket : uint8_t {
   TIM_UPDATE = 0,  // one whole drain; both gates excluded (a gated call is not a drain)
-  TIM_STATUS,      // readFifoStatus: the gate read on EVERY call, plus the re-arm read
+  TIM_STATUS,      // readFifoStatus: the drain's own read, plus the INT1 re-arm read.
+                   // Was the gate read on EVERY call until 2026-08-16 - see below
   TIM_POP,         // the pop loop: SPI + AHRS + FIR + raw buffering for every word
   TIM_SPI,         // readFifoWord alone -> us per FIFO word
   TIM_AHRS,        // ahrs_.update alone -> us per orientation step
