@@ -300,7 +300,7 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
 
   // Calibrate the accel sample period from real elapsed time / total samples, so
   // the time axis tracks the wall clock and the last sample lands on real elapsed time.
-  // TODO -> burde ikke denne vært fra forrige FIFO-drain?
+  // TODO -> burde ikke denne vært fra forrige FIFO-drain? (hvis vi tømte helt) dividert på antall samples nå?
   if (accelIdx_ > 0) {
     samplePeriodMs_ = (double)(millis() - sessionStartMs_) / (double)accelIdx_;
   }

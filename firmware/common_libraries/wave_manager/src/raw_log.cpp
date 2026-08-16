@@ -93,17 +93,15 @@ void RawLogWriter::emitSync(uint32_t tUs, uint32_t accelN, uint16_t nWords,
 uint16_t RawLogWriter::flush(bool force) {
   if (!sink_ || len_ == 0) return 0;
 
-  // The threshold belongs HERE and not at the call site: kRawBufBytes is sized on the
-  // assumption that no more than kRawFlushThreshold - 1 is ever left when a drain
-  // starts, and that only holds if every call respects it.
+  // If below threshhold, delay write unless forced.
   if (!force && len_ < kRawFlushThreshold) return 0;
 
-  // force takes the tail; otherwise it waits for the next drain to fill a whole sector
-  // around it. The remainder's space is budgeted in kRawBufBytes.
+  // Force: Write all, otherwise write whole sector only
   const uint16_t n = force ? len_
                            : (uint16_t)(len_ / kRawBlockBytes) * kRawBlockBytes;
   if (n == 0) return 0;
 
+  // Write
   if (!sink_(buf_, n)) {
     nWriteFail_++;
     writeFailPending_ = true;
