@@ -14,7 +14,7 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   logStarted_ = false;
   accelIdx_ = 0;
   sampleTms_ = 0.0;
-  samplePeriodMs_ = 1000.0 / kAccelOdrHz;
+  samplePeriodMs_ = 1000.0 / kImuOdrHz;
   curWinIdx_ = -1;
   winNAcc_ = 0;
   winBraking_ = false;

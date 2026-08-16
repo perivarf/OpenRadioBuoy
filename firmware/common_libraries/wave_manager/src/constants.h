@@ -3,7 +3,7 @@
 
 #include <math.h>
 // -----------------------------------------------------------------------------
-// Units. Here because the sensitivities below are what they convert.
+// Units
 // -----------------------------------------------------------------------------
 static constexpr float kGravity    = 9.80665f;
 static constexpr float kMg2Ms2     = kGravity / 1000.0f;             // mg -> m/s^2

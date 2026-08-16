@@ -147,8 +147,8 @@ static constexpr double kBrakeThresholdMg2 =
     (double)(kBrakeGThreshold * 1000.0) * (kBrakeGThreshold * 1000.0);
 static constexpr uint16_t kBrakeMinMs = 5;
 static constexpr uint16_t kBrakeMinSamples =
-    ((kBrakeMinMs * kAccelOdrHz + 999) / 1000) < 1 ? 1
-    : (uint16_t)((kBrakeMinMs * kAccelOdrHz + 999) / 1000);
+    ((kBrakeMinMs * kImuOdrHz + 999) / 1000) < 1 ? 1
+    : (uint16_t)((kBrakeMinMs * kImuOdrHz + 999) / 1000);
 
 // -----------------------------------------------------------------------------
 // Welch spectrum -> wave parameters

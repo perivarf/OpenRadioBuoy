@@ -119,7 +119,7 @@ class ImuSampler {
   bool     logStarted_ = false;
   uint32_t accelIdx_ = 0;
   double   sampleTms_ = 0.0;
-  double   samplePeriodMs_ = 1000.0 / kAccelOdrHz;
+  double   samplePeriodMs_ = 1000.0 / kImuOdrHz;
   int32_t  curWinIdx_ = -1;
   uint16_t winNAcc_ = 0;
   bool     winBraking_ = false;

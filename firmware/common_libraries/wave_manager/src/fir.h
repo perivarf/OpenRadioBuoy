@@ -25,7 +25,7 @@
   into a single filter() call.
 */
 
-static constexpr uint16_t kFirNtap = 129;              // matches fir.py's NTAP
+static constexpr uint16_t kFirNtap = 129; // Need to run gen_fir_table.py to change this value. 129 is the default value for the drifter.
 static constexpr uint16_t kFirHalf = (kFirNtap - 1) / 2;  // group delay, in samples
 
 static_assert(kFirNtap % 2 == 1,
@@ -46,9 +46,8 @@ class FirDecimator {
   // One INPUT sample: a store and an index bump, nothing else.
   void push(float x);
 
-  // One OUTPUT sample: 65 multiplies + 128 adds, symmetry-folded. Const - reading
-  // the filter does not advance it, so a caller may evaluate the same state twice
-  // (the late-eval path in ImuSampler relies on that being harmless).
+  // One OUTPUT sample. Does not advance the delay line, so can be called multiple
+  // times after a single push() to get the same output sample
   float eval(void) const;
 
   // The UNFILTERED input sample that eval() is centred on, i.e. the one kFirHalf

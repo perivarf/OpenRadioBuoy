@@ -1,6 +1,7 @@
 #include "fir_row_bank.h"
 
-#include "wave_config.h"  // kMg2Ms2 (imu_config.h), wave_mode_imu_csv() (log_config.h)
+#include "constants.h"
+#include "wave_config.h"
 
 void FirRowBank::reset(void) {
   ax_.reset(); ay_.reset(); az_.reset();

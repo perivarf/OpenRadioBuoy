@@ -266,7 +266,7 @@ void WaveManager::writeSessionConfig(File &f) {
 
   // --- IMU front end ---
   f.print("imu_odr_hz,");         f.println(kImuOdrHz);
-  f.print("accel_odr_hz,");       f.println(kAccelOdrHz);
+  f.print("accel_odr_hz,");       f.println(kImuOdrHz);
   f.print("imu_low_power,");      f.println(kImuLowPower);
   f.print("imu_acc_mode,");       f.println((int)kImuAccMode);
   f.print("imu_gyr_mode,");       f.println((int)kImuGyrMode);

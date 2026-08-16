@@ -8,13 +8,10 @@
   The ten series decimated per row - everything imu.csv logs, all through the same
   filter, so an offline AHRS sees the antialiasing the on-device one saw.
 
-  Cost is paid at the OUTPUT rate: push() is a store at kImuOdrHz, eval() the real work
-  at kRowOdrHz. Lowering kImuOdrHz makes them cheaper; lowering the row rate barely does.
-
-  Separate from fir.h on purpose: this is the row pipeline, wired to ImuRow's channels
-  and units and (in the .cpp) to the log mode, while fir.h stays free of Arduino, sensor
-  and wave_config.h dependencies so FirDecimator can be checked on a host against
-  tools/fir.py. FirDecimator has a second, unrelated user in wave_analysis.h.
+  ax,ay,az: accel in mg, body frame
+  nx,ny,nz: linear accel in mg, gravity frame, gravity removed, rotated by the SFLP quaternion
+  gx,gy,gz: gyro in mdps, body frame
+  vacc: vertical linear accel in m/s^2, gravity frame, gravity removed, rotated
 */
 class FirRowBank {
  public:

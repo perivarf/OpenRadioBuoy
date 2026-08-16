@@ -13,9 +13,10 @@ void FirDecimator::push(float x) {
 float FirDecimator::eval(void) const {
   // y[n] = sum_k c[k] * x[n-k]. A linear-phase FIR has c[k] == c[N-1-k], so the two
   // samples that share a coefficient can be added before the multiply: 65 multiplies
-  // instead of 129. That is ~25 % of the cost of this function, and this function is
-  // the dominant new load in the FIFO drain loop - so folding is the implementation,
-  // not a fallback if it turns out too slow.
+  // instead of 129. 
+
+  //TODO -> forenkle i,j?
+
   uint16_t i = idx_ ? (uint16_t)(idx_ - 1) : (uint16_t)(kFirNtap - 1);  // newest, x[n]
   uint16_t j = idx_;                                                    // oldest, x[n-(N-1)]
   float acc = 0.0f;
