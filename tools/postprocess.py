@@ -1930,10 +1930,12 @@ def main():
 
     ses = read_kv(os.path.join(directory, f"{stamp}_ses.csv"))
     if ses:
-        # Vis kun nøkler som faktisk finnes (en avbrutt _tmp-økt mangler
-        # imu_rows/duration_ms, som skrives først ved stopSession).
+        # Vis kun nøkler som faktisk finnes (en avbrutt økt mangler
+        # duration_ms/gps_rows, som skrives først ved stopSession).
+        # imu_rows står ikke her lenger: firmware flyttet analysetellerne til
+        # _ana.csv, og radantallet skrives uansett av read_imu_rows nedenfor.
         shown = [f"{k}={ses[k]}" for k in
-                 ("start_utc_iso", "imu_rows", "gps_rows", "duration_ms")
+                 ("start_utc_iso", "gps_rows", "duration_ms")
                  if k in ses]
         if shown:
             print("  ses:   " + "  ".join(shown))

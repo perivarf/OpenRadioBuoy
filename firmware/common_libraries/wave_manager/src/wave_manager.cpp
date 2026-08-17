@@ -356,8 +356,8 @@ uint8_t WaveManager::processReading(void) {
   // what a reader checks to tell a finished capture from an interrupted one.
   if (sessionActive_ && sd_writer.active) {
     writeSpecCsv();
-    writeAnaCsv(params);
-    writeSessionSummary(ok, params);   // closes out the session file (anchor + summary)
+    writeAnaCsv(ok, params);
+    writeSessionSummary();
     stopSession();
   }
 

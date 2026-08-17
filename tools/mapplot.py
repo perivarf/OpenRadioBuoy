@@ -616,8 +616,12 @@ def build_blocks(cfg, ses, ana, stats):
         ("GPS quality",
          f"hAcc {stats['hacc']:.2f} m · {stats.get('sats', 0):.0f} sats"
          if "hacc" in stats else DASH),
+        # imu_rows hører til analysen og ligger i _ana.csv (og i _ana_python.csv,
+        # som er den ana-dicten her) fra og med raw_write-firmwaren. Eldre økter
+        # har den i ses.csv, så den leses derfra når den finnes.
         ("Rows IMU / GPS",
-         joined([fmt_val(ses, "imu_rows"), fmt_val(ses, "gps_rows")], "{} / {}")),
+         joined([fmt_val(ses if "imu_rows" in ses else ana, "imu_rows"),
+                 fmt_val(ses, "gps_rows")], "{} / {}")),
     ]
 
     build = fmt_val(cfg, "build_seq")

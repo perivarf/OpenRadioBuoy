@@ -108,13 +108,13 @@ class WaveManager {
   // All of it lives in wave_session_log.cpp - this file keeps the capture loop.
   bool startSession(void);          // build stamp, mkdir, open imu/gps/ses, headers
   void stopSession(void);           // close ses (the summary in it marks the capture done)
-  void writeSessionAnchor(void);    // reading ID + start UTC (crash-safe, written up front)
+  void writeSessionAnchor(void);    // reading ID + start UTC/pos
   void writeSessionConfig(File &f); // cfg.csv: every constant the capture depends on
-  void writeSessionSummary(bool ok, const WaveParams &params);  // stop UTC, duration, rows, params
+  void writeSessionSummary(void);   // stop UTC, duration, gps rows, timing - no analysis
   void writeTimingBlock(void);      // wave_timing buckets; empty unless wave_timing_enabled
   void appendImuCsvRow(const ImuRow &r);        // one imu.csv line; called from onRow
   void writeSpecCsv(void);                      // spec.csv: the PSD, bin by bin
-  void writeAnaCsv(const WaveParams &params);   // ana.csv: counters + wave parameters
+  void writeAnaCsv(bool ok, const WaveParams &params);  // Wave analysis + misc counters
   void serviceGps(uint32_t relMs);  // poll the receiver, log a gps.csv row per fresh fix.
                                     // Only called when wave_gps_track_in_capture is set
   bool waitForGpsFix(void);         // block up to wave_gps_fix_timeout for a FRESH valid
@@ -182,6 +182,11 @@ class WaveManager {
   // The current solution as 1e-7 deg, or 0,0 when there is no valid fix to give.
   // Zero is the agreed "unknown" here; see readings.h.
   FixE7 currentFixE7(void) const;
+
+  // One position pair into ses.csv as lat_<when>,lon_<when>. Declared here rather than
+  // with the other writers: a parameter type must be complete at the DECLARATION, and
+  // FixE7 is only complete from the line above.
+  void writePosition(const char *when, const FixE7 &p);
   bool     imuOk_ = false;
 };
 

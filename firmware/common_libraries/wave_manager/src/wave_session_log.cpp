@@ -227,9 +227,18 @@ bool WaveManager::startSession(void) {
   return true;
 }
 
-// The session file (build + start time) is written up front so it survives on disk even
-// if the capture is interrupted before stopSession. imu/gps use a relative time
-// base (ms from start), so these keys alone tie t=0 to real UTC.
+// One end of the capture, in degrees at the same six decimals gps.csv uses. 0,0 is the
+// "no fix" value currentFixE7 returns, not a position.
+void WaveManager::writePosition(const char *when, const FixE7 &p) {
+  sessionFile_.print("lat_"); sessionFile_.print(when); sessionFile_.print(',');
+  sessionFile_.println(p.lat * 1e-7, 6);
+  sessionFile_.print("lon_"); sessionFile_.print(when); sessionFile_.print(',');
+  sessionFile_.println(p.lng * 1e-7, 6);
+}
+
+// The session file (build + start time + start position) is written up front so it
+// survives on disk even if the capture is interrupted before stopSession. imu/gps use a
+// relative time base (ms from start), so these keys alone tie t=0 to real UTC.
 void WaveManager::writeSessionAnchor(void) {
   if (!sessionFile_) return;
   char iso[24];
@@ -241,6 +250,7 @@ void WaveManager::writeSessionAnchor(void) {
   sessionFile_.print("gps_fix_at_start,"); sessionFile_.println(gpsFixAtStart_ ? 1 : 0);
   sessionFile_.print("start_utc_epoch,"); sessionFile_.println((uint32_t)captureStart_);
   sessionFile_.print("start_utc_iso,");   sessionFile_.println(iso);
+  writePosition("start", captureStartPos_);
   sessionFile_.sync();  // do not close: summary is appended at stop
 }
 
@@ -409,8 +419,8 @@ void WaveManager::writeSpecCsv(void) {
   sf.sync(); sf.close();
 }
 
-// ana.csv: the counters a capture is judged by, plus the wave parameters.
-void WaveManager::writeAnaCsv(const WaveParams &params) {
+// ana.csv: the wave parameters
+void WaveManager::writeAnaCsv(bool ok, const WaveParams &params) {
   char name[64];
   snprintf(name, sizeof(name), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_ANA_PREFIX);
   File af = sd_writer.card().open(name, O_RDWR | O_CREAT | O_TRUNC);
@@ -449,6 +459,12 @@ void WaveManager::writeAnaCsv(const WaveParams &params) {
   // actually carried. Non-zero means kWelchRingSlack no longer holds.
   af.print("welch_ring_full,");  af.println(analyzer_.ringFullCount());
 
+  // 0 means finalize() found too few Welch segments to build a spectrum from. The four
+  // parameters below are then the -1 sentinels finalize() left in place, written out
+  // rather than omitted: a reader that keys off the value sees the failure, where a
+  // missing key is indistinguishable from an older firmware that never wrote it.
+  af.print("usable_spectrum,"); af.println(ok ? 1 : 0);
+
   af.print("Hs,"); af.println(params.hs, 3);
   af.print("Tz,"); af.println(params.tz, 2);
   af.print("Tc,"); af.println(params.tc, 2);
@@ -457,20 +473,19 @@ void WaveManager::writeAnaCsv(const WaveParams &params) {
 }
 
 // Append the summary (known only at capture end) to the still-open session file.
-void WaveManager::writeSessionSummary(bool ok, const WaveParams &params) {
+//
+// The ANALYSIS belongs to ana.csv and is not repeated here: what the capture ran to,
+// how much of it reached the card, and what the loop cost. stop_utc_epoch keeps its
+// second job as the completion marker - it is written from the same call as ana.csv,
+// so the pair is still what separates a finished capture from an interrupted one.
+void WaveManager::writeSessionSummary(void) {
   if (!sessionFile_) return;
   sessionFile_.print("stop_utc_epoch,"); sessionFile_.println((uint32_t)captureEnd_);
+  writePosition("stop", captureEndPos_);
   sessionFile_.print("duration_ms,");    sessionFile_.println(wave_measurement_duration);
-  sessionFile_.print("imu_rows,");       sessionFile_.println(analyzer_.rows());
+  // Rows in gps.csv, not an analysis count - the on-board chain never reads the drift
+  // track, so this says what was LOGGED and stays on the session side.
   sessionFile_.print("gps_rows,");       sessionFile_.println(gpsRowsWritten_);
-  sessionFile_.print("welch_segments,"); sessionFile_.println(analyzer_.segments());
-  sessionFile_.print("usable_spectrum,");sessionFile_.println(ok ? 1 : 0);
-  if (ok) {
-    sessionFile_.print("Hs,"); sessionFile_.println(params.hs, 3);
-    sessionFile_.print("Tz,"); sessionFile_.println(params.tz, 2);
-    sessionFile_.print("Tc,"); sessionFile_.println(params.tc, 2);
-    sessionFile_.print("Tp,"); sessionFile_.println(params.tp, 2);
-  }
   writeTimingBlock();
   sessionFile_.sync();
 }
