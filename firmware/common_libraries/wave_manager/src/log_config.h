@@ -18,26 +18,19 @@
   That follows from the write order and needs no separate marker to stay in sync with it.
 */
 
-// Master switch for sd-logging. Off means startSession() is never called, so no session
-// directory is created and NONE of the seven files exist - raw.bin included, despite it
-// not being a csv. The capture itself is unaffected: the IMU is sampled, the wave chain
-// runs and the radio message goes out either way. wave_log_mode below is a different
-// question entirely - it picks the IMU FORMAT, and only once this is true.
+// Master switch for sd-logging
 static constexpr bool     wave_log_to_sd     {true};
 static constexpr uint16_t wave_csv_sync_rows {1024};  // File.sync() cadence
 
-// Row widths for preAllocate(). Without it, too much time goes to allocating clusters
-// mid-capture, which can overrun the FIFO. It must run before the first byte is
-// written, and the file stays oversized until truncate() at close - so the widths are
-// worst case, chosen before the hot path and reclaimed after it.
+// Row widths for preAllocate(). 
+// Too low, and time is spent on increasing file size during measurements, may lead to 
+// missing samples. Too high and the file might take longer to allocate, but will be 
+// truncated after successful logging. Err on side of caution here, and do a test with
+// timing on before deploying.
 static constexpr uint16_t wave_imu_row_bytes_max {256};
 
-// The decoded 16-column gps.csv is ~95 B on a real fix and 139 in the worst case every
-// field can print (signed lat/lon at 6 decimals, four velocities at 4, three accuracies
-// as uint32 millimetres). The old 96 B budget - sized for a compact integer format -
-// was therefore outgrown MID-CAPTURE, which is the one failure preAllocate cannot
-// absorb: see the extent comment in startSession.
-static constexpr uint16_t wave_gps_row_bytes_max {160};
+// Measured on created GPS-file. Change if file definition is changed.
+static constexpr uint16_t wave_gps_row_bytes_max {192};
 
 static constexpr char wave_log_dir[] = "waves";  // parent dir for session folders
 #define WAVE_IMU_PREFIX      "imu"
@@ -49,50 +42,18 @@ static constexpr char wave_log_dir[] = "waves";  // parent dir for session folde
 #define WAVE_RAW_PREFIX      "raw"
 
 // How often update() prints the effective accel/gyro rate to the serial monitor, in ms.
-// Only emitted when debug_serial is set; 0 disables it. The line also carries the time
-// left of the capture, so one interval governs both "is the drain healthy" and "is this
-// thing still counting down".
+// 0 disables it
 static constexpr uint32_t imu_debug_print_period = {20 * s_2_ms};  // 20 s
 
-/*
-  Hot-path timing (wave_timing.h). A DIAGNOSTIC, not an operational log: turn it off
-  again before a deployment meant to last, so the measurement is not part of the numbers
-  it was meant to explain.
-
-  What it answers: a capture loses words when more than kFifoFillMs passes without a
-  drain. The raw log shows THAT such gaps exist - each sync record stamps its drain with
-  millis - but not what the time went to. The buckets measure each part of the loop
-  against the same budget: SPI per word, AHRS per sample, FIR per row, the raw-log
-  write, the periodic sync, the GPS row, the Welch FFT and the whole iteration.
-
-  THE PRICE, to be read before the numbers are used: two micros() calls per FIFO word
-  and two per accel sample, so 300-400 calls on a 128-word drain. micros() is a SysTick
-  read at ~0.5-1 us, adding ~0.3 ms to a ~5 ms drain - about 6 %. TIM_SPI and TIM_AHRS
-  are therefore systematically a little high and TIM_POP carries both. Good enough to
-  find a stall of hundreds of ms; not good enough to quote 19 us/word as exact.
-
-  Reported in two places: a [TIM] line on the serial monitor every
-  imu_debug_print_period, and an aggregate block in ses.csv at capture end (which
-  survives a field run with nobody watching). The ses.csv block is written from
-  processReading, so an interrupted capture gets none - the same caveat as the rest of
-  the summary.
-
-  Both report n, MEAN and MAX. Max is the one that matters for overruns: a stall is a
-  tail event by definition, and a mean over thousands of drains divides a 300 ms outlier
-  into the noise. The mean says what the loop normally costs; the max says whether
-  anything in it could have emptied the budget.
-
-  Turning it off returns the flash but leaves the ~312 B the wave_timing global puts in
-  .bss - a global with external linkage is not dropped just because nobody reads it.
-*/
+// Hot-path timing (wave_timing.h). A diagnostic log: turn it off before deployment.
+// Prints to serial, but also to ses.csv
 static constexpr bool wave_timing_enabled {true};
 
 // -----------------------------------------------------------------------------
 // Which IMU log a capture writes. Independent files, not two formats of one thing.
-//   Csv  - 15.7 kB/s, what the offline chain reads today.
-//   Raw  - 8.6 kB/s, needs raw_to_csv.py before the usual tools work.
-//   Both - the only mode where the reconstruction can be checked against imu.csv, but
-//          Madgwick 480 + SFLP 240 + Both overflows.
+//   Csv  - Human readable
+//   Raw  - Binary file for speed. Use raw_to_csv.py to convert to csv
+//   Both - Both above. May not be possible depending on IMU ODR / GPS etc. Test before deploying.
 // -----------------------------------------------------------------------------
 enum class WaveLogMode : uint8_t { Csv = 0, Raw = 1, Both = 2 };
 static constexpr WaveLogMode wave_log_mode = WaveLogMode::Raw;
@@ -111,7 +72,9 @@ static constexpr bool wave_mode_imu_raw(void) {
 static constexpr uint32_t kRawMagic         = 0x4257524FUL;  // "ORWB" little-endian
 static constexpr uint8_t  kRawFormatVersion = 2;
 static constexpr uint8_t  kRawSyncTag       = 0xFF;
-static constexpr uint8_t  kRawWordBytes     = 7;
+// The raw record IS the FIFO word, byte for byte - so this is the device's geometry and
+// not a number of the log format's own. See kImuFifoWordBytes in imu_device.h.
+static constexpr uint8_t  kRawWordBytes     = kImuFifoWordBytes;
 static constexpr uint8_t  kRawSyncBytes     = 17;
 static constexpr uint8_t  kRawHeaderBytes   = 32;
 static constexpr uint16_t kRawBlockBytes    = 512;   // SD block; buffered, not per word

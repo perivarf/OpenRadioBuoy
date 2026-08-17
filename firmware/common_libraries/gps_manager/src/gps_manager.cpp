@@ -364,14 +364,11 @@ void GPS_Manager::decodePVT(const uint8_t * p){
     pvt.lng_e7     = ubxI4(p + 24);
     pvt.lat_e7     = ubxI4(p + 28);
     // The channels gps.csv logs, in the module's own integer units, and no more:
-    // hMSL, velN and velE are decoded by nobody and so are not decoded here.
-    // What is left is there for one reason - gps.csv is the wave chain's only
-    // INDEPENDENT reference. postprocess.py builds an elevation spectrum from
-    // vUp (= -velD) alone, and sAcc/vAcc/pDOP are what say whether that reference
-    // is trustworthy where it matters. Offsets are the NAV-PVT layout (protocol
-    // 18), the same ones ORB_test/src/Gps.cpp decoded.
+    // Offsets are the NAV-PVT layout
     pvt.hAcc_mm    = ubxU4(p + 40);
     pvt.vAcc_mm    = ubxU4(p + 44);
+    pvt.velN_mms   = ubxI4(p + 48);
+    pvt.velE_mms   = ubxI4(p + 52);
     pvt.velD_mms   = ubxI4(p + 56);
     pvt.gSpeed_mms = ubxI4(p + 60);
     pvt.headMot_e5 = ubxI4(p + 64);

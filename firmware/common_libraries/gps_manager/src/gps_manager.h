@@ -38,6 +38,8 @@ struct UBX_PVT{
   int32_t  lat_e7;        // latitude,  1e-7 deg
   int32_t  lng_e7;        // longitude, 1e-7 deg
   int32_t  gSpeed_mms;    // 2D ground speed, mm/s
+  int32_t  velN_mms;      // NED north velocity, mm/s
+  int32_t  velE_mms;      // NED east  velocity, mm/s
   int32_t  velD_mms;      // NED down velocity,  mm/s (POSITIVE DOWN - gps.csv
                           // logs -velD as vUp, which is what the wave analysis
                           // builds its elevation spectrum from)

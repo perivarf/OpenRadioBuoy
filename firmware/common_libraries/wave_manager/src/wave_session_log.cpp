@@ -14,6 +14,19 @@
   there because file format and capture flow are read for different reasons.
 */
 
+// platformio.ini passes the commit and branch UNQUOTED (-DREPO_COMMIT_ID=b402450...),
+// so they have to be stringified here. A hash that starts with a digit is a valid
+// preprocessing number and nothing else - # is the only thing that can consume it.
+// The fallbacks cover a build outside the ini, where the flags are simply absent.
+#ifndef REPO_COMMIT_ID
+#define REPO_COMMIT_ID unknown
+#endif
+#ifndef REPO_GIT_BRANCH
+#define REPO_GIT_BRANCH unknown
+#endif
+#define BUILD_STR2(x) #x
+#define BUILD_STR(x)  BUILD_STR2(x)
+
 // imu.csv column contract. Naming convention, so a capture can be read without
 // consulting the firmware to find out which orientation a column came from:
 //   unsuffixed  = the SELECTED filter (WaveAhrs, or SFLP when wave_use_sflp)
@@ -194,17 +207,10 @@ bool WaveManager::startSession(void) {
 
   if (imuFile_) { imuFile_.println(kImuCsvHeader); imuFile_.sync(); }
 
-  // Decoded SI units, one column per NAV-PVT channel the analysis uses - the format
-  // postprocess.py and mapplot.py read as they stand. vUp is what the GPS elevation
-  // spectrum is built from; hAccuracy/sats are what the report quotes for fix quality.
-  // See serviceGps for the cost this carries.
-  //
-  // No alt_msl/vN/vE: nothing reads them. The height is GPS height and says nothing
-  // about the waves, and the horizontal velocity is already in gspeed. vUp is the one
-  // velocity channel the analysis actually builds on.
+  // Gps-logging
   if (gpsFile_) {
-    gpsFile_.println("rel_ms,utc,lat,lon,gspeed,vUp,head,"
-                     "sAccuracy,hAccuracy,vAccuracy,pdop,fix,sats");
+    gpsFile_.println("rel_ms,utc,lat,lon,gspeed,vN,vE,vUp,head,"
+                     "sAccuracy,hAccuracy,vAccuracy,pdop,sats");
     gpsFile_.sync();
   }
 
@@ -259,6 +265,12 @@ void WaveManager::writeSessionAnchor(void) {
 void WaveManager::writeSessionConfig(File &f) {
   f.println("key,value");
 
+  // Build date and commit/branch. NB at time of file compilation, so need to do 
+  // clean rebuild to refresh.
+  f.print("build_date,");         f.println(__DATE__ " " __TIME__);
+  f.print("build_commit,");       f.println(BUILD_STR(REPO_COMMIT_ID));
+  f.print("build_branch,");       f.println(BUILD_STR(REPO_GIT_BRANCH));
+
   // --- capture scheduling ---
   f.print("duration_ms,");        f.println(wave_measurement_duration);
   f.print("period_ms,");          f.println(base_measurement_period_wave_analysis);
@@ -291,7 +303,7 @@ void WaveManager::writeSessionConfig(File &f) {
   // block never ran, so those columns carry no information at all.
   f.print("sflp_enabled,");       f.println(kEnableSflp ? 1 : 0);
   f.print("sflp_odr_hz,");        f.println(kSflpOdrHz, 1);
-  f.print("sflp_rotation_tag,");  f.println(kSflpRotationTag);
+  f.print("sflp_rotation_tag,");  f.println(kTagSflpRotation);
   // Which drain trigger the capture used. The strings distinguish it from an older
   // firmware where "poll" meant draining on every loop iteration regardless of level;
   // both values here describe a watermark-paced drain.
@@ -530,7 +542,7 @@ void WaveManager::writeTimingBlock(void) {
   sessionFile_.print("tim_stop_total_us,");    sessionFile_.println(wave_timing.stopTotalUs);
 
   // The budget every number above is measured against, so the file can be read without
-  // the firmware that wrote it. See kFifoFillMs in wave_config.h - this is that same
+  // the firmware that wrote it. See kFifoFillMs in imu_config.h - this is that same
   // quantity in microseconds, and kDrainIntervalMs is the fraction of it the drain is
   // allowed to use.
   // Computed here in microseconds rather than as kFifoFillMs * 1000: the constant is
@@ -556,6 +568,15 @@ void WaveManager::serviceGps(uint32_t relMs) {
   gps_manager.update();
   if (!sessionActive_ || !gpsFile_ || !gps_manager.freshFix()) return;
   const UBX_PVT &f = gps_manager.lastFix();
+  // A PVT that is not gnssFixOK leaves every field below at the PREVIOUS solution -
+  // the parser only fills them when valid - so such a row is the last position
+  // repeated under a new timestamp, not a measurement. It used to go in the file with
+  // fix=0 for the reader to drop; without that column it has to be dropped here.
+  //
+  // 3D and not merely valid (which is fixType >= 2): a 2D solution holds the height
+  // fixed, so its velD - the vUp this file exists to provide - is not measured but
+  // assumed. mapplot.py applied exactly this cut on the fix column it no longer has.
+  if (!f.valid || f.fixType < 3) return;
   // Scaled to SI here, in the writer, and not kept scaled in UBX_PVT: the module's
   // integers stay exact for everything else that reads lastFix() (the radio message
   // carries lat/lng_e7 as they are), and only the CSV pays for the conversion.
@@ -565,7 +586,7 @@ void WaveManager::serviceGps(uint32_t relMs) {
   // arrives in and the floor of the elevation spectrum built from it. Trimming
   // either would throw away resolution the module actually delivered.
   //
-  // COST: 12 float conversions per fix, ~7 fixes/s. That is real work in the drain
+  // COST: 13 float conversions per fix. That is real work in the drain
   // loop, but it happens between FIFO reads and not inside one, and it is the price
   // of a gps.csv the analysis chain reads without a conversion step in between.
   gpsFile_.print(relMs);                    gpsFile_.print(',');
@@ -578,6 +599,8 @@ void WaveManager::serviceGps(uint32_t relMs) {
   gpsFile_.print(f.lat_e7 * 1e-7, 6);       gpsFile_.print(',');
   gpsFile_.print(f.lng_e7 * 1e-7, 6);       gpsFile_.print(',');
   gpsFile_.print(f.gSpeed_mms / 1000.0, 4); gpsFile_.print(',');
+  gpsFile_.print(f.velN_mms / 1000.0, 4);   gpsFile_.print(',');
+  gpsFile_.print(f.velE_mms / 1000.0, 4);   gpsFile_.print(',');
   // vUp, not velD: the analysis works in an up-positive elevation, and the sign
   // flip belongs here - at the one place the column is named - rather than in
   // every reader that has to remember which way NED points.
@@ -587,7 +610,6 @@ void WaveManager::serviceGps(uint32_t relMs) {
   gpsFile_.print(f.hAcc_mm / 1000.0, 2);    gpsFile_.print(',');
   gpsFile_.print(f.vAcc_mm / 1000.0, 2);    gpsFile_.print(',');
   gpsFile_.print(f.pDOP_e2 * 0.01, 2);      gpsFile_.print(',');
-  gpsFile_.print(f.fixType);                gpsFile_.print(',');
   gpsFile_.println(f.numSV);
   gpsRowsWritten_++;
 }

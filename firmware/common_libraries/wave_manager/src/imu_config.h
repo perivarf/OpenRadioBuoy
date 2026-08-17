@@ -2,20 +2,25 @@
 #define IMU_CONFIG_H
 
 #include <Arduino.h>
-#include <LSM6DSV16XSensor.h>
+#include "imu_device.h"   // the part itself: FIFO geometry, register map, FS and LPF2
+                          // ladders, power-mode names. This file only CHOOSES from them.
 
 /*
   Sensor tuning: rates, ranges, filters, and the FIFO timing budget everything else in
   the capture loop is measured against.
 
+  What the sensor IS lives in imu_device.h - depth, tags, registers, the tables. What we
+  ASK OF IT lives here, and the include goes one way only: this file reaches down into
+  imu_device.h, never the reverse.
+
   THE BUDGET. Accel, gyro and the on-chip fusion are all batched into the FIFO at their
   own rates, so it takes kFifoWordsPerSec words a second - 1200 at 480 Hz. Divided into
   kFifoDepthWords that gives kFifoFillMs, the time a drain has before the oldest word is
-  overwritten: 213 ms at 480 Hz, 118 at 960. 
+  overwritten: 213 ms at 480 Hz, 118 at 960.
 
   Draining is not the problem. A word is 7 bytes over the bus plus an address byte, so
-  a full FIFO is 256 * 64 bit / 6 MHz = ~2.7 ms. 
-  
+  a full FIFO is 256 * 64 bit / 6 MHz = ~2.7 ms.
+
   The choice of AHRS and writes to SD-card are what fill the budget.
 */
 
@@ -33,20 +38,17 @@ static_assert(kImuOdrHz == 120 || kImuOdrHz == 240 || kImuOdrHz == 480 || kImuOd
 static_assert(!(kImuLowPower && kImuOdrHz > 240),
               "Low-power is only valid for ODR <= 240 Hz");
 
-static constexpr LSM6DSV16X_ACC_Operating_Mode_t kImuAccMode =
-    kImuLowPower ? LSM6DSV16X_ACC_LOW_POWER_MODE1 : LSM6DSV16X_ACC_HIGH_PERFORMANCE_MODE;
-static constexpr LSM6DSV16X_GYRO_Operating_Mode_t kImuGyrMode =
-    kImuLowPower ? LSM6DSV16X_GYRO_LOW_POWER_MODE : LSM6DSV16X_GYRO_HIGH_PERFORMANCE_MODE;
-
-
-// SPI clock request. The LSM6DSV16X is rated max 10 MHz - exceeding it may give corrupt
-// reads. spi_init pick fastest supported rate on or below. 
-static constexpr uint32_t kImuSpiHz = 8000000;
+// What this part calls the mode asked for above. auto, not the driver's enum type: the
+// name of that type is as device-specific as the values, and belongs on the other side
+// of the split with everything else the wrapper insists on.
+static constexpr auto kImuAccMode = accModeFor(kImuLowPower);
+static constexpr auto kImuGyrMode = gyrModeFor(kImuLowPower);
 
 // -----------------------------------------------------------------------------
-// Accel LPF2. The cutoff is a FRACTION OF ODR (CTRL8.hp_lpf2_xl_bw), so pinning one
-// enum makes it move with kImuOdrHz - STRONG is 9.6 Hz at 960 Hz but 1.2 Hz at 120,
-// on top of the analysed band. The divisor is therefore derived, not chosen.
+// Accel LPF2. The cutoff is a FRACTION OF ODR, so pinning one enum would make it move
+// with kImuOdrHz - STRONG is 9.6 Hz at 960 Hz but 1.2 Hz at 120, on top of the analysed
+// band. The divisor is therefore derived, not chosen; the ladder it is picked from is
+// the part's, and lives in imu_device.h.
 // -----------------------------------------------------------------------------
 static constexpr bool kUseLpf2 = true;
 
@@ -56,34 +58,11 @@ static constexpr bool kUseLpf2 = true;
 static constexpr float kLpf2Margin = 4.0f;
 static constexpr float kLpf2MinHz  = kLpf2Margin * kWaveFMax;   // 4.0 Hz @ kWaveFMax 1.0
 
-// Strongest LPF2 (largest divisor) whose cutoff still clears kLpf2MinHz. The hardware
-// offers only these eight divisors, so this picks from the list rather than computing a
-// number. At kWaveFMax 1.0 that is 200/100/45/20 for ODR 960/480/240/120.
-static constexpr uint16_t lpf2DivForOdr(uint16_t odr) {
-  return (float)odr >= 800.0f * kLpf2MinHz ? 800
-       : (float)odr >= 400.0f * kLpf2MinHz ? 400
-       : (float)odr >= 200.0f * kLpf2MinHz ? 200
-       : (float)odr >= 100.0f * kLpf2MinHz ? 100
-       : (float)odr >=  45.0f * kLpf2MinHz ?  45
-       : (float)odr >=  20.0f * kLpf2MinHz ?  20
-       : (float)odr >=  10.0f * kLpf2MinHz ?  10
-       :                                        4;
-}
-static constexpr uint16_t kLpf2Div = lpf2DivForOdr(kImuOdrHz);
-
-// Divisor -> CTRL8.hp_lpf2_xl_bw register value
-static constexpr uint8_t lpf2BwForDiv(uint16_t div) {
-  return div ==   4 ? LSM6DSV16X_XL_ULTRA_LIGHT   // ODR/4
-       : div ==  10 ? LSM6DSV16X_XL_VERY_LIGHT    // ODR/10
-       : div ==  20 ? LSM6DSV16X_XL_LIGHT         // ODR/20
-       : div ==  45 ? LSM6DSV16X_XL_MEDIUM        // ODR/45
-       : div == 100 ? LSM6DSV16X_XL_STRONG        // ODR/100
-       : div == 200 ? LSM6DSV16X_XL_VERY_STRONG   // ODR/200
-       : div == 400 ? LSM6DSV16X_XL_AGGRESSIVE    // ODR/400
-       :              LSM6DSV16X_XL_XTREME;       // ODR/800
-}
-static constexpr uint8_t kLpf2Bw       = lpf2BwForDiv(kLpf2Div);
-static constexpr float   kLpf2CutoffHz = (float)kImuOdrHz / kLpf2Div;  // 4.8 Hz @ 960 Hz
+// Strongest divisor that still clears kLpf2MinHz. At kWaveFMax 1.0 that is
+// 200/100/45/20 for ODR 960/480/240/120.
+static constexpr uint16_t kLpf2Div      = lpf2DivForOdr(kImuOdrHz, kLpf2MinHz);
+static constexpr uint8_t  kLpf2Bw       = lpf2BwForDiv(kLpf2Div);
+static constexpr float    kLpf2CutoffHz = (float)kImuOdrHz / kLpf2Div;  // 4.8 Hz @ 960 Hz
 
 static_assert(kLpf2CutoffHz >= kLpf2MinHz,
               "no LPF2 divisor clears kWaveFMax by kLpf2Margin - raise kImuOdrHz, "
@@ -92,30 +71,12 @@ static_assert(kLpf2CutoffHz >= kLpf2MinHz,
 // -----------------------------------------------------------------------------
 // Full-scale range. The enum value IS the number passed to Set_X_FS/Set_G_FS (g / dps),
 // and the raw-FIFO sensitivity is derived from it, so range and scaling cannot drift
-// apart. A larger range captures bigger motion at coarser resolution.
+// apart. A larger range captures bigger motion at coarser resolution. Ladders and
+// sensitivities: imu_device.h.
 // -----------------------------------------------------------------------------
-enum class AccelFS : uint8_t  { G2 = 2, G4 = 4, G8 = 8, G16 = 16 };
-enum class GyroFS  : uint16_t { DPS125 = 125, DPS250 = 250, DPS500 = 500,
-                                DPS1000 = 1000, DPS2000 = 2000, DPS4000 = 4000 };
-
 static constexpr AccelFS kAccelFS = AccelFS::G2;      // +-2 g
 static constexpr GyroFS  kGyroFS  = GyroFS::DPS1000;  // +-1000 dps
 
-// LSM6DSV16X sensitivities (datasheet), selected from the ranges above.
-static constexpr float accSensMgPerLsb(AccelFS fs) {
-  return fs == AccelFS::G2 ? 0.061f
-       : fs == AccelFS::G4 ? 0.122f
-       : fs == AccelFS::G8 ? 0.244f
-       :                     0.488f;   // G16
-}
-static constexpr float gyrSensMdpsPerLsb(GyroFS fs) {
-  return fs == GyroFS::DPS125  ? 4.375f
-       : fs == GyroFS::DPS250  ? 8.75f
-       : fs == GyroFS::DPS500  ? 17.5f
-       : fs == GyroFS::DPS1000 ? 35.0f
-       : fs == GyroFS::DPS2000 ? 70.0f
-       :                         140.0f;  // DPS4000
-}
 static constexpr float kAccSensMgPerLsb   = accSensMgPerLsb(kAccelFS);
 static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 
@@ -125,9 +86,8 @@ static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 // own rate. Declared here and not with the analysis settings because kFifoWordsPerSec
 // below needs the rate, and the whole timing budget needs kFifoWordsPerSec.
 // -----------------------------------------------------------------------------
-static constexpr bool    kEnableSflp      = true;
-static constexpr float   kSflpOdrHz       = 240.0f;
-static constexpr uint8_t kSflpRotationTag = 0x13;   // FIFO tag: SFLP rotation vector
+static constexpr bool  kEnableSflp = true;
+static constexpr float kSflpOdrHz  = 240.0f;
 
 // Words the FIFO takes in a second: accel and gyro at kImuOdrHz, plus the rotation
 // vector at the fusion's own rate when it is batched. The denominator behind every
@@ -136,11 +96,9 @@ static constexpr uint32_t kFifoWordsPerSec =
     2u * (uint32_t)kImuOdrHz + (kEnableSflp ? (uint32_t)kSflpOdrHz : 0u);
 
 // -----------------------------------------------------------------------------
-// FIFO depth, watermark and the drain triggers
+// Watermark and the drain triggers. The depth they are measured against is
+// kFifoDepthWords in imu_device.h.
 // -----------------------------------------------------------------------------
-
-// FIFO depth in words, must match sensor. 1.5 kB of data / 6 payload bytes = 256 levels
-static constexpr uint16_t kFifoDepthWords = 256;
 
 /*
   Watermark in FIFO words: the level at which the sensor raises INT1.
@@ -153,7 +111,7 @@ static constexpr uint16_t kFifoDepthWords = 256;
   but most importantly it gives less opportunity for MCU sleep and potential energy saving.
 */
 
-static constexpr uint16_t kFifoWatermark = 128; // Should not be set too close to kFifoWatermark, or the FIFO may overrun before the drain is triggered. 128 is a good compromise between latency and energy efficiency.
+static constexpr uint16_t kFifoWatermark = 128; // Should not be set too close to kFifoDepthWords, or the FIFO may overrun before the drain is triggered. 128 is a good compromise between latency and energy efficiency.
 static_assert(kFifoWatermark > 0 && kFifoWatermark < 256,
               "FIFO_CTRL1.WTM is 8 bits - a larger watermark would be truncated");
 
@@ -166,29 +124,6 @@ static_assert(kFifoWatermark > 0 && kFifoWatermark < 256,
   Either way a drain empties the whole buffer
 */
 static constexpr bool kImuUseInt1 = true;
-
-// INT1_CTRL (0x0D): which events the sensor drives out on the INT1 pin. Raw register
-// values because the Arduino wrapper exposes no setter, only Write_Reg.
-static constexpr uint8_t kInt1CtrlReg = 0x0D;
-static constexpr uint8_t kInt1FifoTh  = 0x08;  // bit 3: FIFO watermark reached
-
-// FIFO_STATUS1/FIFO_STATUS2. Read as a 2-byte burst rather than through the wrapper:
-// lsm6dsv16x_fifo_status_get drops FIFO_OVR_LATCHED, and that bit is reset by the very
-// read that drops it, so going through the wrapper makes it permanently unobservable.
-static constexpr uint8_t kFifoStatus1Reg = 0x1B;
-
-// FIFO_DATA_OUT_TAG. The six payload registers follow it (0x79..0x7E), and reading
-// 0x7E is what pops the word - so a 7-byte auto-incrementing burst from here takes tag
-// and payload out together, which is what makes the pairing atomic.
-static constexpr uint8_t kFifoDataOutTagReg = 0x78;
-
-/*
-  SPI burst read.How many FIFO words come out per SPI transaction.
-  Higher burst is better for efficiency, worse for memory.
-*/
-static constexpr uint16_t kFifoBurstWords = 32;
-static_assert(kFifoBurstWords > 0 && kFifoBurstWords <= kFifoDepthWords,
-              "a burst cannot be empty, nor larger than the FIFO it reads from");
 
 // Time for the FIFO to go from empty to full. The whole timing budget in this project
 // is measured against this number, and ses.csv writes it out as tim_fifo_budget_us.
@@ -204,7 +139,7 @@ static constexpr uint32_t kMaxDrainIntervalMs = 3u * kFifoFillMs / 5u;  // 127 m
 static constexpr uint32_t kDrainIntervalPct = 100;
 static constexpr uint32_t kDrainIntervalMs  = kDrainIntervalPct * kMaxDrainIntervalMs / 100u;
 
-// Asserting that kDrainIntervalMs <= kMaxDrainIntervalMs 
+// Asserting that kDrainIntervalMs <= kMaxDrainIntervalMs
 static_assert(kDrainIntervalMs <= kMaxDrainIntervalMs,
               "the chosen drain deadline exceeds what the FIFO depth allows - "
               "kDrainIntervalPct must not go above 100");

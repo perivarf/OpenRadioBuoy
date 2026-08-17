@@ -1,5 +1,6 @@
 #include "imu_device.h"
-#include "config.h"
+#include "config.h"        // SPI_CS_IMU_PIN, INT1_IMU_PIN
+#include "wave_config.h"   // the choices written into the registers below
 
 #include <math.h>
 
@@ -43,7 +44,8 @@ void Lsm6dsvDevice::configure() {
   imu_.Enable_X();      // accelerometer
   imu_.Enable_G();      // gyroscope
 
-  // Ranges, ODR and power mode, all from wave_config.h
+  // Ranges, ODR and power mode - the choices from imu_config.h, already translated into
+  // this part's enums by the mapping helpers in imu_device.h
   imu_.Set_X_FS((int32_t)kAccelFS);
   imu_.Set_G_FS((int32_t)kGyroFS);
   imu_.Set_X_ODR((float)kImuOdrHz, kImuAccMode);
@@ -148,7 +150,7 @@ void Lsm6dsvDevice::resetBurst() {
 void Lsm6dsvDevice::fillBurst(uint16_t n) {
   burstFill_ = n < kFifoBurstWords ? n : kFifoBurstWords;
   burstIdx_  = 0;
-  burstRead(kFifoDataOutTagReg, burstBuf_, (uint16_t)(burstFill_ * kRawWordBytes));
+  burstRead(kFifoDataOutTagReg, burstBuf_, (uint16_t)(burstFill_ * kImuFifoWordBytes));
 }
 
 // -----------------------------------------------------------------------------
@@ -218,19 +220,19 @@ static inline void payloadToQuat(const uint8_t p[6], float q[4]) {
 */
 void Lsm6dsvDevice::popWord(ImuFifoWord &w, uint16_t remaining) {
   if (burstIdx_ == burstFill_) fillBurst(remaining);
-  const uint8_t *raw = burstBuf_ + burstIdx_ * kRawWordBytes;
+  const uint8_t *raw = burstBuf_ + burstIdx_ * kImuFifoWordBytes;
   burstIdx_++;
 
   w.tag = (uint8_t)(raw[0] >> 3);
   for (uint8_t k = 0; k < 6; k++) w.payload[k] = raw[k + 1];
 
-  if (w.tag == 2) {
+  if (w.tag == kTagAccel) {
     w.kind = ImuSampleKind::Accel;
     payloadToAxes(w.payload, kAccSensMgPerLsb, w.v);      // mg
-  } else if (w.tag == 1) {
+  } else if (w.tag == kTagGyro) {
     w.kind = ImuSampleKind::Gyro;
     payloadToAxes(w.payload, kGyrSensMdpsPerLsb, w.v);    // mdps
-  } else if (w.tag == kSflpRotationTag) {
+  } else if (w.tag == kTagSflpRotation) {
     w.kind = ImuSampleKind::Quat;
     payloadToQuat(w.payload, w.v);                        // [x, y, z, w]
   } else {
