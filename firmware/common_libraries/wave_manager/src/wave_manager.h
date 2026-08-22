@@ -170,10 +170,12 @@ class WaveManager {
     reading the fix later would give whatever the receiver had by then, which after a
     30-minute drift is a different place.
 
-    The END pair is not quite simultaneous when wave_gps_track_in_capture is off: the
-    timestamp is taken when the loop exits, then the receiver is re-polled, so the
-    position is up to one fix later (~100-200 ms with a lock). The timestamp is the one
-    that has to stay honest, since ses.csv and the 'W' message both carry it.
+    The END pair is not simultaneous when wave_gps_track_in_capture is off: the receiver
+    is shut down for the capture and started again afterwards, so the timestamp is taken
+    when the loop exits and the position only once the restarted receiver has a fix -
+    seconds later on a hotstart, up to wave_gps_fix_timeout if it never gets one (in
+    which case the end position stays 0,0). The timestamp is the one that has to stay
+    honest, since ses.csv and the 'W' message both carry it.
   */
   struct FixE7 { int32_t lat = 0; int32_t lng = 0; };
   FixE7 captureStartPos_;

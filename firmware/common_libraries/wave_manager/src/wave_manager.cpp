@@ -208,6 +208,16 @@ uint8_t WaveManager::takeReading(void) {
   captureEndPos_ = FixE7{}; // Initialize end position as start, will be overwritten at the end if successful logging
   IWatchdog.reload();
 
+  // Without a drift track the receiver has nothing left to do until the end position,
+  // so stop it here rather than let it draw current through the whole window. It is
+  // started again - and stopped again - around the end fix at the bottom of this
+  // function. Compiled out when the track is on: that path needs the receiver awake
+  // for the entire capture loop.
+  if constexpr (!wave_gps_track_in_capture) {
+    gps_manager.shutdownGPS();
+    if (debug_serial) Serial.println("WaveManager: GPS off for the capture (no drift track)");
+  }
+
   // Start the analyzer (produces PSD and wave parameters)
   analyzer_.begin();
 
@@ -320,10 +330,19 @@ uint8_t WaveManager::takeReading(void) {
   // what ses.csv and the 'W' message carry.
   captureEnd_ = now();
 
-  /* The end position. If we used gps track in capture, then we already have fix,
-     otherwise we will wait */
-  if (wave_gps_track_in_capture || waitForGpsFix()) {
+  /* The end position. With the drift track the receiver ran through the whole capture
+     and already holds a current solution. Without it, it was shut down after the start
+     fix, so bring it back up, wait the same wave_gps_fix_timeout as at the start, and
+     shut it down again - the capture is over, and the next wake() starts it anew. */
+  if constexpr (wave_gps_track_in_capture) {
     captureEndPos_ = currentFixE7();
+  } else {
+    gps_manager.begin();
+    IWatchdog.reload();
+    if (waitForGpsFix()) {
+      captureEndPos_ = currentFixE7();
+    }
+    gps_manager.shutdownGPS();
   }
   return 0;
 }

@@ -74,8 +74,8 @@ static_assert(kLpf2CutoffHz >= kLpf2MinHz,
 // apart. A larger range captures bigger motion at coarser resolution. Ladders and
 // sensitivities: imu_device.h.
 // -----------------------------------------------------------------------------
-static constexpr AccelFS kAccelFS = AccelFS::G2;      // +-2 g
-static constexpr GyroFS  kGyroFS  = GyroFS::DPS1000;  // +-1000 dps
+static constexpr AccelFS kAccelFS = AccelFS::G4;      // +-4 g
+static constexpr GyroFS  kGyroFS  = GyroFS::DPS500;  // +-500 dps
 
 static constexpr float kAccSensMgPerLsb   = accSensMgPerLsb(kAccelFS);
 static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);

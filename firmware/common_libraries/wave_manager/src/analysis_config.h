@@ -140,9 +140,9 @@ static constexpr uint16_t kQuatDelaySlots = kQuatDelaySteps + 1;
 
 // -----------------------------------------------------------------------------
 // Braking wave detection: linear |a| over threshold long enough within a window.
-// TODO - find some good values from literature
+// Brown et al. (2018), threshold 𝛼 = 3.25 m s−2 => 33% of G
 // -----------------------------------------------------------------------------
-static constexpr float  kBrakeGThreshold = 0.5f;
+static constexpr float  kBrakeGThreshold = 1.0/3.0f;
 static constexpr double kBrakeThresholdMg2 =
     (double)(kBrakeGThreshold * 1000.0) * (kBrakeGThreshold * 1000.0);
 static constexpr uint16_t kBrakeMinMs = 5;
