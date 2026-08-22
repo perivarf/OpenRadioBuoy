@@ -209,7 +209,7 @@ bool WaveManager::startSession(void) {
 
   // Gps-logging
   if (gpsFile_) {
-    gpsFile_.println("rel_ms,utc,lat,lon,gspeed,vN,vE,vUp,head,"
+    gpsFile_.println("rel_ms,utc,itow,lat,lon,gspeed,vN,vE,vUp,head,"
                      "sAccuracy,hAccuracy,vAccuracy,pdop,sats");
     gpsFile_.sync();
   }
@@ -596,6 +596,12 @@ void WaveManager::serviceGps(uint32_t relMs) {
                  (uint32_t)f.minute * 10000UL +
                  (uint32_t)f.second * 100UL);
   gpsFile_.print(',');
+  // The receiver's own epoch time, ms into the GPS week. rel_ms is when the firmware got
+  // round to reading the frame - up to GPS_ddc_check_ms late, and later still behind an SD
+  // stall - while this is when the solution was computed. utc above resolves to a whole
+  // second, which cannot separate two 10 Hz epochs, so this is the only column the wave
+  // analysis can build an even time base from.
+  gpsFile_.print(f.iTOW_ms);                gpsFile_.print(',');
   gpsFile_.print(f.lat_e7 * 1e-7, 6);       gpsFile_.print(',');
   gpsFile_.print(f.lng_e7 * 1e-7, 6);       gpsFile_.print(',');
   gpsFile_.print(f.gSpeed_mms / 1000.0, 4); gpsFile_.print(',');

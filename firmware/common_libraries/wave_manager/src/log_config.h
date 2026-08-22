@@ -30,7 +30,9 @@ static constexpr uint16_t wave_csv_sync_rows {1024};  // File.sync() cadence
 static constexpr uint16_t wave_imu_row_bytes_max {256};
 
 // Measured on created GPS-file. Change if file definition is changed.
-static constexpr uint16_t wave_gps_row_bytes_max {192};
+// 208 and not 192 since the itow column: iTOW runs to 604799999 near the end of a GPS
+// week, so ten digits plus the comma. Re-measure on a real file after changing the row.
+static constexpr uint16_t wave_gps_row_bytes_max {208};
 
 static constexpr char wave_log_dir[] = "waves";  // parent dir for session folders
 #define WAVE_IMU_PREFIX      "imu"

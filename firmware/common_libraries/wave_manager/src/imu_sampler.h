@@ -49,7 +49,12 @@ class ImuSampler {
   // Drain all pending FIFO words once (call repeatedly during a capture).
   // captureLeftMs is passed straight to the debug line - the sampler does not time
   // the capture, it only reports what the caller already knows.
-  void update(Print &dbg, uint32_t captureLeftMs);
+  // gpsRows is the caller's CUMULATIVE gps.csv row count (WaveManager::gpsRowsWritten_).
+  // The debug line differences it the same way it does the accel and gyro counters, so the
+  // drift track's effective rate shows up next to the IMU's - the two share one budget, and
+  // a GPS rate that has quietly fallen off is worth seeing while the capture is still
+  // running. Ignored unless wave_gps_track_in_capture, which is when the field is printed.
+  void update(Print &dbg, uint32_t captureLeftMs, uint32_t gpsRows = 0);
 
   // Reset windowing for a new capture. captureStartMs is the capture t=0.
   void resetWindowing(uint32_t captureStartMs);
@@ -111,6 +116,7 @@ class ImuSampler {
   //   nUnknownDbg_       words popped but decoded by no branch (datasheet table 210)
   uint32_t dbgLastPrint_ = 0;
   uint32_t nAccDbg_ = 0, nGyrDbg_ = 0;
+  uint32_t dbgGpsPrev_ = 0;  // gpsRows at the last print; the counter itself lives in WaveManager
   uint32_t nUnknownDbg_ = 0;
   uint8_t  lastUnknownTag_ = 0;
 

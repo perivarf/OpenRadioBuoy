@@ -172,10 +172,39 @@ void GPS_Manager::begin(){
       sendUbx(0x06, 0x08, rate, 6);
       delay(100);
       flushDDC(availBytes());  // drop the ACK
+
+      /*
+        Turn NAV-PVT into a periodic message instead of something update() has to ask for.
+        AFTER CFG-RATE, so the first solution out is already at the final rate.
+
+        Same three-byte CFG-MSG form as the NMEA loop above, so it is scoped to the port
+        the command arrived on (DDC) and leaves the UART configuration alone.
+
+        This is the fix for the 1.2 s gaps in gps.csv. A polled NAV-PVT has exactly one
+        answer, and when that answer went missing nothing else was ever coming: update()
+        had to sit out its whole timeout - twelve navigation epochs - before it could ask
+        again. Two 30-minute captures on 2026-08-16 lost 446 and 461 epochs that way,
+        ~38 % of the run, and the count did not move when NMEA was switched off or when
+        the SD stalls got three times shorter. With the module emitting on its own, a
+        frame that goes missing costs the one epoch: the next arrives 100 ms later
+        whether or not anybody asked.
+
+        Not written to flash (no CFG-CFG). shutdownGPS() ends with Wire.end() and begin()
+        runs on every wake-up, so this is re-sent each cycle, same as the NMEA list.
+      */
+      uint8_t pvtOn[3] = {0x01, 0x07, 0x01};  // class 0x01 NAV, id 0x07 PVT, one per epoch
+      sendUbx(0x06, 0x01, pvtOn, 3);
+      delay(50);
+      flushDDC(availBytes());  // the ACK, and the first solution if it beat us here
+      frameIdx_ = 0;
+      lastFixMs_ = lastCheckMs_ = millis();
+
       if (debug_serial){
         Serial.print(F("GPS: ready, nav rate "));
         Serial.print(GPS_nav_rate_hz);
-        Serial.println(F(" Hz"));
+        Serial.print(F(" Hz, NAV-PVT periodic, DDC check every "));
+        Serial.print(GPS_ddc_check_ms);
+        Serial.println(F(" ms"));
       }
     } else if (debug_serial){
       Serial.println(F("GPS: no MON-VER response"));
@@ -188,11 +217,19 @@ void GPS_Manager::begin(){
   currentPosition = {0,0,0,0,0,0};
 }
 
-uint16_t GPS_Manager::availBytes(void){
+uint16_t GPS_Manager::availBytes(bool * ok){
   /*
     Number of bytes waiting in the module's DDC output buffer, from the
     0xFD/0xFE register pair.
+
+    `ok` separates the two ways this can return 0. A transaction that never completed
+    means the bus is in trouble and the count is unknown; a completed read of 0 means
+    the receiver genuinely has nothing to say yet. update() has to tell them apart -
+    treating a wedged bus as an empty buffer is what let it wait out a full timeout
+    against a receiver it could not hear. Callers that only want the count (begin,
+    the flushDDC sites, pollPVT) pass nothing and keep the old behaviour.
   */
+  if (ok) *ok = false;
   Wire.beginTransmission(GPS_I2C_ADDR);
   Wire.write((uint8_t) 0xFD);
   if (Wire.endTransmission(false) != 0){  // repeated start, keep the bus
@@ -202,6 +239,7 @@ uint16_t GPS_Manager::availBytes(void){
     return 0;
   }
   uint16_t nbytes = ((uint16_t) Wire.read() << 8) | (uint8_t) Wire.read();
+  if (ok) *ok = true;
   return (nbytes == 0xFFFF) ? 0 : nbytes;  // 0xFFFF means "no data" per the protocol spec
 }
 
@@ -228,6 +266,15 @@ bool GPS_Manager::pollPVT(uint32_t max_wait_time){
     Poll NAV-PVT and block until the answer has been read and decoded, or
     max_wait_time has passed. Returns true if a checksum-valid PVT frame was
     decoded; the caller inspects pvt.valid to see whether it also holds a fix.
+
+    BLOCKING - up to max_wait_time. Never call this from the wave capture loop; that is
+    what update() is for. The drifter's own measurement path (getGPSData, setTimeFromGps)
+    runs with the IMU idle and can afford it.
+
+    Since begin() switched the module to periodic output the explicit poll is belt and
+    braces: the buffer fills on its own every epoch, so this usually finds a solution
+    already waiting rather than one it asked for. The poll stays because it still works
+    if the CFG-MSG did not take.
   */
   if (!initialized){
     return false;
@@ -260,55 +307,62 @@ bool GPS_Manager::pollPVT(uint32_t max_wait_time){
   frame is already waiting (caller checks availBytes). Shared by the blocking
   pollPVT and the non-blocking update().
 */
-bool GPS_Manager::readPvtFrame(uint16_t avail){
-  uint8_t frame[GPS_pvt_frame_size];
-  uint16_t idx = 0;
+bool GPS_Manager::readPvtFrame(uint16_t avail, uint16_t maxBytes){
+  uint16_t budget = (avail > maxBytes) ? maxBytes : avail;
   bool gotPVT = false;
-  while (avail > 0){
-    uint8_t chunk = (avail > 32) ? 32 : (uint8_t) avail;
+  while (budget > 0){
+    uint8_t chunk = (budget > 32) ? 32 : (uint8_t) budget;
     uint8_t got = Wire.requestFrom(GPS_I2C_ADDR, chunk);
     if (got == 0){
       break;
     }
     while (Wire.available()){
       uint8_t b = Wire.read();
-      if (idx == 0 && b != 0xB5){          // sync char 1
+      if (frameIdx_ == 0 && b != 0xB5){          // sync char 1
         continue;
       }
-      if (idx == 1 && b != 0x62){          // sync char 2
-        idx = 0;
+      if (frameIdx_ == 1 && b != 0x62){          // sync char 2
+        // A 0xB5 here is the start of a real frame, not a failed second sync char:
+        // resyncing to 0 would drop it and cost the epoch.
+        frameIdx_ = (b == 0xB5) ? 1 : 0;
         continue;
       }
-      frame[idx++] = b;
-      if (idx == GPS_pvt_frame_size){
+      frameBuf_[frameIdx_++] = b;
+      if (frameIdx_ == GPS_pvt_frame_size){
         // NAV-PVT is class 0x01, id 0x07 with a 92 byte payload
-        if (frame[2] == 0x01 && frame[3] == 0x07 && ubxU2(frame + 4) == 92){
+        if (frameBuf_[2] == 0x01 && frameBuf_[3] == 0x07 && ubxU2(frameBuf_ + 4) == 92){
           uint8_t ckA = 0, ckB = 0;
           for (uint16_t j = 2; j < GPS_pvt_frame_size - 2; j++){
-            ckA += frame[j];
+            ckA += frameBuf_[j];
             ckB += ckA;
           }
-          if (ckA == frame[GPS_pvt_frame_size - 2] && ckB == frame[GPS_pvt_frame_size - 1]){
-            decodePVT(frame + 6);
+          if (ckA == frameBuf_[GPS_pvt_frame_size - 2] && ckB == frameBuf_[GPS_pvt_frame_size - 1]){
+            decodePVT(frameBuf_ + 6);
             gotPVT = true;
           }
         }
-        idx = 0;
+        frameIdx_ = 0;
       }
     }
-    avail -= got;
+    budget -= got;
     IWatchdog.reload();
   }
   return gotPVT;
 }
 
 /*
-  Non-blocking NAV-PVT poll, ported from ORB_test Gps::update(). Call it once per
-  loop iteration; it sends a poll every GPS_nav_period_ms (IDLE) and reads the
-  answer back without blocking (WAIT), falling back to IDLE after a ~1.2 s
-  timeout. freshFix() is true only on the iteration a new PVT was decoded, so a
-  caller writes exactly one row per fix. Keeps the IMU FIFO drained during a
-  wave capture where a blocking pollPVT (~1.1 s) would overflow it.
+  Collect whatever NAV-PVT the module has emitted. Call it once per loop iteration; it
+  rate-limits itself to GPS_ddc_check_ms and never waits on anything, so it can run inside
+  the wave capture's IMU drain without starving the FIFO. freshFix() is true only on the
+  call that decoded a new PVT, so a caller writes exactly one row per fix.
+
+  There is no poll here any more, and no IDLE/WAIT state machine. begin() put the receiver
+  in periodic output, so the rate is the module's: this can only ever miss an epoch, never
+  make an extra one, and the entire job is making sure nothing costs more than one.
+
+  Worst case for a single call, at 400 kHz: ~0.13 ms for the length read plus ~3 ms for a
+  full-budget drain, against a 213 ms FIFO budget. The blocking pollPVT (up to ~1.1 s) is
+  never reached from here.
 */
 void GPS_Manager::update(void){
   freshFix_ = false;
@@ -316,32 +370,58 @@ void GPS_Manager::update(void){
     return;
   }
   uint32_t nowMs = millis();
-
-  if (pollState_ == GPS_POLL_IDLE){
-    if (nowMs - lastPollMs_ < GPS_nav_period_ms){
-      return;
-    }
-    lastPollMs_ = nowMs;
-    Wire.beginTransmission(GPS_I2C_ADDR);
-    Wire.write(navPvtPoll, sizeof(navPvtPoll));
-    if (Wire.endTransmission() != 0){
-      return;  // bus hiccup: retry next interval
-    }
-    pollSentMs_ = nowMs;
-    pollState_ = GPS_POLL_WAIT;
+  if (nowMs - lastCheckMs_ < GPS_ddc_check_ms){
     return;
   }
+  lastCheckMs_ = nowMs;
 
-  // WAIT: poll the byte-count register without blocking.
-  uint16_t avail = availBytes();
-  if (avail < GPS_pvt_frame_size){
-    if (nowMs - pollSentMs_ > 1200){
-      pollState_ = GPS_POLL_IDLE;  // timeout, resend next interval
-    }
-    return;
+  bool busOk = true;
+  uint16_t avail = availBytes(&busOk);
+  if (busOk && avail > 0 && readPvtFrame(avail, GPS_ddc_max_drain)){
+    lastFixMs_ = nowMs;
   }
-  readPvtFrame(avail);  // sets freshFix_ (via decodePVT) on a valid frame
-  pollState_ = GPS_POLL_IDLE;
+
+  // Silence for ten epochs is not something waiting can fix - see recoverDdc.
+  if (nowMs - lastFixMs_ > GPS_stall_timeout_ms){
+    recoverDdc(nowMs);
+  }
+}
+
+void GPS_Manager::recoverDdc(uint32_t nowMs){
+  /*
+    Nothing decoded for GPS_stall_timeout_ms. Two things cause that and both are addressed
+    here, because from the host side they look identical - a length register that reads as
+    empty forever:
+
+      1. The STM32's I2C peripheral latched an error flag. It will not clear on its own and
+         every later transaction fails; end/begin re-initialises it.
+      2. The module restarted and lost the CFG-MSG that makes it emit NAV-PVT at all, so it
+         is alive and answering on the bus but has nothing to send.
+
+    No delay() anywhere: this runs in the capture loop. end/begin are register writes only -
+    i2c_deinit does an RCC force-reset, which is what actually clears case 1 - so the only
+    part that can take time is the CFG-MSG write: ~0.3 ms on a healthy bus, and bounded by
+    I2C_TIMEOUT_TICK (20 ms, set in platformio.ini, down from the core's 100 ms default) if
+    the bus is still stuck. Setting lastFixMs_ rate-limits the whole thing to one attempt
+    per stall timeout even when the cause persists, so the worst this costs the FIFO is
+    20 ms per second against a 213 ms budget.
+  */
+  Wire.end();
+  Wire.setSDA(sda_pin);  // same order as begin(): setSDA/setSCL must precede begin()
+  Wire.setSCL(scl_pin);
+  Wire.begin();
+  Wire.setClock(GPS_I2C_CLOCK);
+  frameIdx_ = 0;  // whatever was half-parsed died with the bus
+
+  uint8_t pvtOn[3] = {0x01, 0x07, 0x01};
+  sendUbx(0x06, 0x01, pvtOn, 3);
+
+  lastFixMs_ = nowMs;
+  recoverCount_++;
+  if (debug_serial){
+    Serial.print(F("GPS: DDC stalled, bus reset #"));
+    Serial.println(recoverCount_);
+  }
 }
 
 void GPS_Manager::decodePVT(const uint8_t * p){
@@ -349,6 +429,10 @@ void GPS_Manager::decodePVT(const uint8_t * p){
     Decode a NAV-PVT payload (92 bytes, protocol version 18) into pvt.
     Offsets are counted from the start of the payload.
   */
+  // The receiver's own epoch clock. hour/minute/second below resolve to a second, which is
+  // too coarse to tell one 10 Hz epoch from the next; iTOW is what gives gps.csv a time
+  // base independent of when the firmware got round to reading the frame.
+  pvt.iTOW_ms   = ubxU4(p);
   pvt.year      = ubxU2(p + 4);
   pvt.month     = p[6];
   pvt.day       = p[7];
@@ -720,6 +804,7 @@ void GPS_Manager::shutdownGPS(void){
   }
   packet.clear();
   Wire.end();
+  frameIdx_ = 0;  // a half-parsed frame must not be finished with bytes from the next session
   initialized = false;
 }
 

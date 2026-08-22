@@ -32,6 +32,7 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   fir_.reset();
   dbgLastPrint_ = captureStartMs;
   nAccDbg_ = nGyrDbg_ = 0;
+  dbgGpsPrev_ = 0;  // matches WaveManager::gpsRowsWritten_, which is zeroed per session
   nUnknownDbg_ = 0;
   lastUnknownTag_ = 0;
 }
