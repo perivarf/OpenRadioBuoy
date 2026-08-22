@@ -280,6 +280,13 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("filter_warm_up_ms,");  f.println(wave_measurement_filter_warm_up);
 
   // GNSS
+  // The nav rate the receiver is SET to (UBX-CFG-RATE in gps_manager::begin), against
+  // which the achieved fix rate from the track is read. It is not decoration: the GPS
+  // elevation comes from vUp sampled at this rate, an order of magnitude below the IMU,
+  // and that is most of why the GPS row under-reads chop - so postprocess puts it in
+  // parentheses beside that row the same way it does for the AHRS filters. The key was
+  // dropped from cfg.csv after 20260731, and every session since has had a dash there.
+  f.print("gps_rate_hz,");        f.println(GPS_nav_rate_hz);
   f.print("gps_fix_timeout_ms,"); f.println(wave_gps_fix_timeout);
   f.print("gps_fix_required,");   f.println((wave_measurement_require_gps && enable_GPS) ? 1 : 0);
   // 0 means the capture deliberately wrote no gps.csv. Without this key a session folder
