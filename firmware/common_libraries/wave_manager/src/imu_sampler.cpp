@@ -96,18 +96,18 @@ void ImuSampler::closeWindow() {
 // decimation filters, so every delay line advances exactly once per accel sample and
 // they can never drift apart. Gyro and quaternion words only latch their latest value
 // for the accel branch to pair with.
-void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
-  
+void ImuSampler::update(Print &dbg, uint32_t captureLeftMs, uint32_t gpsRows) {
+
   // Watermark: If not triggered, return
   if (kImuUseInt1 && !dev_.fifoReady()) {
     // Still print, so a stalled interrupt shows up as frozen counters, not silence.
-    debugPrintStatus(dbg, captureLeftMs);
+    debugPrintStatus(dbg, captureLeftMs, gpsRows);
     return;
   }
 
   // If not using watermark, check the drain deadline. If not reached, return.
   if (!kImuUseInt1 && (millis() - lastDrainMs_) < kDrainIntervalMs) {
-    debugPrintStatus(dbg, captureLeftMs);
+    debugPrintStatus(dbg, captureLeftMs, gpsRows);
     return;
   }
 
@@ -327,11 +327,11 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs) {
   }
 
   // Debug print status
-  debugPrintStatus(dbg, captureLeftMs);
+  debugPrintStatus(dbg, captureLeftMs, gpsRows);
 }
 
 // Print the effective accel/gyro sample rate + mean magnitudes
-void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs) {
+void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs, uint32_t gpsRows) {
   if (!debug_serial || imu_debug_print_period == 0) return;
 
   uint32_t now = millis();
@@ -348,6 +348,16 @@ void ImuSampler::debugPrintStatus(Print &dbg, uint32_t captureLeftMs) {
   dbg.print("[IMU] ");              dbg.print(captureLeftMs / 1000UL);
   dbg.print(" s left  |  Accel: "); dbg.print(accHz, 0);
   dbg.print(" Hz, Gyro: ");         dbg.print(gyrHz, 0);
+
+  // The drift track's effective rate, next to the IMU's - the two share one loop budget,
+  // so a GPS rate that has quietly fallen off is worth seeing while the capture runs.
+  // Differenced the same way the accel/gyro counters are; gpsRows is cumulative.
+  if constexpr (wave_gps_track_in_capture) {
+    const uint32_t dGps = gpsRows - dbgGpsPrev_;
+    dbgGpsPrev_ = gpsRows;
+    dbg.print(" Hz, GPS: ");
+    dbg.print(elapsedS > 0 ? dGps / elapsedS : 0.0, 1);
+  }
 
   if (nUnknownDbg_ > 0) {
     dbg.print("  [WARN] unk "); dbg.print(nUnknownDbg_);

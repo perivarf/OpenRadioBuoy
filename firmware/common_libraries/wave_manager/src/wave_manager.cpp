@@ -249,7 +249,8 @@ uint8_t WaveManager::takeReading(void) {
     // The countdown rides along on the IMU report rather than printing on its own:
     // the two answer one question together - whether the capture is still running,
     // and whether the drain is keeping up while it does.
-    imu_.update(Serial, wave_measurement_duration - elapsed);  // drain the FIFO (stay tight)
+    imu_.update(Serial, wave_measurement_duration - elapsed,
+                gpsRowsWritten_);   // drain the FIFO (stay tight)
     const uint32_t tSync = timeStart();
     syncImuCsvIfPending();          // deferred from onRow: never with the FIFO half full
     timeAdd(TIM_SYNCCSV, tSync);

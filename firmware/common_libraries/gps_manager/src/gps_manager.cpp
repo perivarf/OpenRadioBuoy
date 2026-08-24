@@ -373,6 +373,24 @@ void GPS_Manager::update(void){
   if (nowMs - lastCheckMs_ < GPS_ddc_check_ms){
     return;
   }
+
+  /*
+    The stall timeout below measures silence while somebody was LISTENING, so a long gap
+    between two CALLS has to rebase it. Nothing was read in that gap, and nothing could
+    have been: the module keeps its output buffer, and the next call drains whatever
+    collected there.
+
+    Without this, every caller that goes away for longer than GPS_stall_timeout_ms is
+    reported as a dead bus on its way back. takeReading does exactly that: waitForGpsFix
+    polls until a fix lands, then seedReadingId, analyzer_.begin and startSession run -
+    mkdir, five file opens, headers and the preAllocate calls, tens of MB on the raw file -
+    before the capture loop makes its first update() call. That put a "DDC stalled, bus
+    reset #1" in front of a capture whose very first debug line then showed the full 10 Hz.
+    start_session_us in ses.csv is the gap.
+  */
+  if (nowMs - lastCheckMs_ > GPS_stall_timeout_ms){
+    lastFixMs_ = nowMs;
+  }
   lastCheckMs_ = nowMs;
 
   bool busOk = true;

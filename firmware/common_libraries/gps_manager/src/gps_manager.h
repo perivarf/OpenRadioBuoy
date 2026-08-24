@@ -122,6 +122,8 @@ static constexpr uint16_t GPS_ddc_max_drain              {128};
 
 // No valid frame for ten navigation epochs means the bus or the module needs a nudge; see
 // recoverDdc(). Long enough that a normal SD stall (measured max 878 ms) never trips it.
+// Counted only across epochs update() was there to see - a gap between CALLS this long
+// rebases the timer instead of tripping it (see update()).
 static constexpr uint16_t GPS_stall_timeout_ms           {10 * GPS_nav_period_ms};
 
 

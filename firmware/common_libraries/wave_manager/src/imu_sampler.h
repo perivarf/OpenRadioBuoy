@@ -98,7 +98,7 @@ class ImuSampler {
   // Print the effective accel/gyro rate + mean magnitudes at most every
   // imu_debug_print_period ms (the ex-reportOncePerSecond, now interval-driven),
   // led by how much of the capture is left.
-  void debugPrintStatus(Print &dbg, uint32_t captureLeftMs);
+  void debugPrintStatus(Print &dbg, uint32_t captureLeftMs, uint32_t gpsRows);
 
   ImuDevice     dev_;
   ImuRowSink    rowSink_ = nullptr;
