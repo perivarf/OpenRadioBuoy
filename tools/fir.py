@@ -1,97 +1,91 @@
-"""FIR-lavpass + desimering - speiler sfy-bøyas src/fir.rs.
+"""FIR lowpass + decimation - mirrors the sfy buoy's src/fir.rs.
 
-Alternativet til firmwares bøtte-middel. Et middel over D samples ER et FIR-filter,
-men et dårlig et: amplituderesponsen |sin(πfD/fs)/(D·sin(πf/fs))| har null i
-multipla av utgangsraten og lekker kraftig mellom dem, så alt over Nyquist brettes
-ned i analysebåndet. Et vindusbasert sinc-filter demper det som skal bort.
-
-Ratene sendes inn som argumenter (bucket_ms, fs_out). De lå tidligere som
-modulglobaler i postprocess.py, slik at --decimate-hz måtte skrive om en global
-før noen kalte hit. Nå er koblingen eksplisitt.
+The alternative to the firmware's bucket mean. A mean over D samples IS a FIR filter,
+but a poor one: the amplitude response |sin(pi*f*D/fs)/(D*sin(pi*f/fs))| has nulls at
+multiples of the output rate and leaks heavily between them, so everything above
+Nyquist folds down into the analysis band. A windowed sinc filter attenuates what is
+meant to go away.
 """
 
 import numpy as np
 
-NTAP = 129                   # antall tap, som fir.rs. MÅ være oddetall - se under
-CUTOFF = None                # None => halve utgangsraten (fs_out/2), som fir.rs
-COMPENSATE_DELAY = True      # kompenser gruppeforsinkelsen (firmware gjør ikke det)
+NTAP = 129                   # number of taps, as in fir.rs. MUST be odd - see below
+CUTOFF = None                # None => half the output rate (fs_out/2), as in fir.rs
+COMPENSATE_DELAY = True      # compensate the group delay (the firmware does not)
 
 
 def firwin_lowpass(ntap, cutoff, fs):
-    """Vindusbasert sinc-lavpass - identisk med scipy.signal.firwin(ntap, cutoff,
-    fs=fs) med standardvalgene (Hamming-vindu, scale=True).
+    """Windowed sinc lowpass - identical to scipy.signal.firwin(ntap, cutoff, fs=fs)
+    with the default choices (Hamming window, scale=True), but written out by hand
+    because scipy is an OPTIONAL dependency here:
 
-    Skrevet ut for hånd fordi scipy er en VALGFRI avhengighet her (kun
-    --cutoff auto bruker den), og fordi den eksplisitte formelen viser nøyaktig
-    hva firmware har liggende ferdig utregnet:
+      h[n] = sinc(2*(fc/fs)*(n - (N-1)/2)) * w_hamming[n],  normalised so sum(h) = 1
 
-      h[n] = sinc(2·(fc/fs)·(n − (N−1)/2)) · w_hamming[n],  normalisert så Σh = 1
+    The normalisation gives exactly unity gain at DC, which is what keeps a filtered
+    mean level (a residual accel bias, say) from being scaled.
 
-    Normaliseringen gir nøyaktig enhetsforsterkning ved DC, som er det som gjør at
-    et filtrert middelnivå (f.eks. en gjenværende accel-bias) ikke skaleres.
-
-    Merk grensetilfellet cutoff = fs/2: da blir sinc(n − M) en ren delta, og
-    filteret er eksakt identitet. Det er nettopp riktig oppførsel når det ikke
-    skal desimeres (D = 1)."""
+    Note the limiting case cutoff = fs/2: sinc(n - M) then becomes a pure delta, and
+    the filter is exactly the identity. That is precisely the right behaviour when
+    nothing is to be decimated (D = 1)."""
     if ntap < 3:
-        raise ValueError(f"FIR: ntap må være >= 3 (fikk {ntap})")
+        raise ValueError(f"FIR: ntap must be >= 3 (got {ntap})")
     if ntap % 2 == 0:
-        # Odde lengde => gruppeforsinkelsen (N−1)/2 er et HELT antall samples og kan
-        # kompenseres eksakt ved indeksering. Med like lengde blir den et halvt
-        # sample, og da måtte serien reinterpoleres for å ligge på samme tidsakse.
-        raise ValueError(f"FIR: ntap må være oddetall for eksakt fasekompensasjon (fikk {ntap})")
+        # Odd length => the group delay (N-1)/2 is a WHOLE number of samples and can be
+        # compensated exactly by indexing.
+        raise ValueError(f"FIR: ntap must be odd for exact phase compensation (got {ntap})")
     if not (0.0 < cutoff <= 0.5 * fs):
-        raise ValueError(f"FIR: cutoff må ligge i (0, fs/2) = (0, {0.5 * fs:g}) Hz (fikk {cutoff})")
+        raise ValueError(f"FIR: cutoff must lie in (0, fs/2) = (0, {0.5 * fs:g}) Hz (got {cutoff})")
     n = np.arange(ntap, dtype=np.float64)
     h = np.sinc(2.0 * (cutoff / fs) * (n - 0.5 * (ntap - 1)))
-    h *= 0.54 - 0.46 * np.cos(2.0 * np.pi * n / (ntap - 1))   # Hamming (symmetrisk)
+    h *= 0.54 - 0.46 * np.cos(2.0 * np.pi * n / (ntap - 1))   # Hamming (symmetric)
     return h / float(np.sum(h))
 
 
 def fir_filter_centered(x, coeffs, compensate=True):
-    """Kjør FIR-en over x og legg resultatet tilbake på x' EGEN tidsakse.
+    """Run the FIR over x and put the result back on x's OWN time axis.
 
-    Returnerer (y, first_valid, last_valid), der y[n] er filterverdien SENTRERT på
-    x[n] og [first_valid, last_valid] er området der ingen null-utfylling har
-    bidratt. Lineærfase gir forsinkelsen h = (N−1)/2 samples, så den sentrerte
-    verdien i n er den kausale verdien i n+h - derfor bare en indeksforskyvning.
+    Returns (y, first_valid, last_valid), where y[n] is the filter value CENTRED on
+    x[n] and [first_valid, last_valid] is the range where no zero padding has
+    contributed. Linear phase gives a delay of h = (N-1)/2 samples, so the centred
+    value at n is the causal value at n+h - hence just an index shift.
 
-    compensate=False gir firmware-oppførselen (kausal, etterslep på h samples)."""
+    compensate=False gives the firmware behaviour (causal, lagging by h samples)."""
     c = np.asarray(coeffs, dtype=np.float64)
     x = np.asarray(x, dtype=np.float64)
     h = (len(c) - 1) // 2 if compensate else 0
-    full = np.convolve(x, c)                 # len = len(x) + len(c) − 1
+    full = np.convolve(x, c)                 # len = len(x) + len(c) - 1
     y = full[h:h + len(x)]
-    # Kausal indeks n+h er ren først når hele vinduet ligger inne i x:
-    #   n + h >= len(c) − 1  og  n + h <= len(x) − 1
+    # The causal index n+h is clean only once the whole window lies inside x:
+    #   n + h >= len(c) - 1  and  n + h <= len(x) - 1
     return y, max(0, len(c) - 1 - h), len(x) - 1 - h
 
 
 def raw_uniform_grid(t_ms, raw_dt_ms=None):
-    """Legg radene på et EKSAKT uniformt rå-rutenett.
+    """Place the rows on an EXACTLY uniform raw grid.
 
-    FIR-en antar konstant samplerate; radene kan mangle (FIFO-overflow, blokkerende
-    SD-flush). Vi finner rutenettet fra median-dt, setter inn de manglende
-    indeksene og flagger dem.
+    The FIR assumes a constant sample rate; rows can be missing (FIFO overflow, a
+    blocking SD flush). We find the grid from the median dt, insert the missing
+    indices and flag them.
 
-    raw_dt_ms = kWindowMs fra cfg.csv når den finnes. Den er fasit: median-dt er
-    bare et estimat og bommer hvis nok rader mangler. Spriker de mye, er mappa
-    feilparet eller tidsstemplene ødelagte - da stoler vi på det radene viser.
+    raw_dt_ms = kWindowMs from cfg.csv when it is there, and it is the ground truth:
+    the median dt is only an estimate and misses if enough rows are gone. If the two
+    diverge a lot, the directory is mispaired or the timestamps are broken - and then
+    we trust what the rows show.
 
-    Returnerer (n_idx, nfull, dt_ms, gap_raw), der n_idx er hver rads plass i
+    Returns (n_idx, nfull, dt_ms, gap_raw), where n_idx is each row's place in
     nfull."""
     t = np.asarray(t_ms, dtype=np.float64)
     if len(t) < 2:
-        raise ValueError("FIR: trenger minst to rader")
+        raise ValueError("FIR: needs at least two rows")
     dt = float(np.median(np.diff(t)))
     if dt <= 0.0:
-        raise ValueError(f"FIR: ugyldig rå-dt ({dt} ms)")
+        raise ValueError(f"FIR: invalid raw dt ({dt} ms)")
     if raw_dt_ms:
         if abs(float(raw_dt_ms) - dt) <= 0.25 * dt:
             dt = float(raw_dt_ms)
         else:
-            print(f"  ADVARSEL: cfg.csv window_ms={float(raw_dt_ms):g} ms, men "
-                  f"radene viser {dt:g} ms - bruker {dt:g} ms")
+            print(f"  WARNING: cfg.csv window_ms={float(raw_dt_ms):g} ms, but "
+                  f"the rows show {dt:g} ms - using {dt:g} ms")
     n_idx = np.rint((t - t[0]) / dt).astype(np.int64)
     nfull = np.arange(n_idx[-1] + 1, dtype=np.int64)
     gap_raw = np.ones(len(nfull), dtype=np.float64)
@@ -102,39 +96,39 @@ def raw_uniform_grid(t_ms, raw_dt_ms=None):
 def fir_decimate_series(t_ms, series, bucket_idx, bucket_ms, fs_out,
                         ntap=NTAP, cutoff=CUTOFF, unwrap=(),
                         compensate=COMPENSATE_DELAY, raw_dt_ms=None):
-    """Bytt ut bøtte-midlet med FIR-lavpass + desimering, på ALLE seriene.
+    """Replace the bucket mean with a FIR lowpass + decimation, on ALL the series.
 
-    t_ms       = win_start_ms per rad (rå rate)
-    series     = {navn: rå-rate array}
-    bucket_idx = bøtte-indeksene serien skal leveres på (etter hull-fylling)
-    bucket_ms  = bøttelengden i ms (utgangsperioden)
-    fs_out     = utgangsraten i Hz, brukt som default cutoff (fs_out/2)
-    unwrap     = navn som er VINKLER og må np.unwrap-es før filtrering (roll/pitch
-                 fra atan2 hopper 2π, og et hopp ville smurt seg utover hele
-                 filterstøtten)
+    t_ms       = win_start_ms per row (raw rate)
+    series     = {name: raw-rate array}
+    bucket_idx = the bucket indices the series is to be delivered on (after gap filling)
+    bucket_ms  = the bucket length in ms (the output period)
+    fs_out     = the output rate in Hz, used as the default cutoff (fs_out/2)
+    unwrap     = names that are ANGLES and must be np.unwrap-ed before filtering (roll
+                 and pitch from atan2 jump by 2*pi, and a jump would smear itself
+                 across the whole filter support)
 
-    Alle seriene får NØYAKTIG samme behandling - det er et krav når serier skal
-    sammenlignes bin for bin etterpå.
+    All the series get EXACTLY the same treatment - a requirement when series are to
+    be compared bin by bin afterwards. The output for bucket b is taken at the MIDDLE
+    of the bucket, so that it sits at the same instant as the bucket mean it replaces.
 
-    Utgangen for bøtte b hentes i MIDTEN av bøtta, slik at den ligger på samme
-    tidspunkt som bøtte-midlet den erstatter - se bucket_ms/2-forskyvningen.
-
-    Returnerer (out, gap, stats). gap er 1 for bøtter der filterstøtten (±(N−1)/2
-    samples) berører utfylte rader eller stikker utenfor serien - de er ikke ekte
-    data og ORes inn i hull-masken, så welch_psd kan forkaste segmentene."""
+    Returns (out, gap, stats). gap is 1 for buckets where the filter support
+    (+/-(N-1)/2 samples) touches filled-in rows or reaches outside the series - those
+    are not real data and are ORed into the gap mask, so welch_psd can discard the
+    segments."""
     n_idx, nfull, dt_ms, gap_raw = raw_uniform_grid(t_ms, raw_dt_ms)
     fs_raw = 1000.0 / dt_ms
     dec = int(round(bucket_ms / dt_ms))
     if dec < 1:
-        raise ValueError(f"FIR: rå-raten ({fs_raw:.1f} Hz) er lavere enn utgangen "
-                         f"({fs_out:g} Hz) - senk --decimate-hz")
-    # Bøttegrensene ligger på hele bucket_ms. Går ikke det opp i radperioden, faller
-    # de midt i en rad, og round() over gir en desimering som glir i forhold til
-    # tidsaksen. Firmware har samme krav som static_assert (kVacc10HzBucketMs %
-    # kWindowMs == 0); her kan vi ikke avbryte, siden loggeraten varierer per økt.
+        raise ValueError(f"FIR: the raw rate ({fs_raw:.1f} Hz) is lower than the output "
+                         f"({fs_out:g} Hz) - lower --decimate-hz")
+    # The bucket boundaries sit on whole bucket_ms. If that does not divide the row
+    # period, they fall in the middle of a row and the round() above gives a decimation
+    # that slides relative to the time axis. The firmware makes this a static_assert
+    # (kVacc10HzBucketMs % kWindowMs == 0); here we cannot abort, since the logging rate
+    # varies from session to session.
     if abs(bucket_ms - dec * dt_ms) > 1e-6:
-        print(f"  ADVARSEL: bøtte {bucket_ms} ms går ikke opp i radperioden "
-              f"{dt_ms:g} ms - desimeringen (D={dec}) glir mot tidsaksen")
+        print(f"  WARNING: the bucket {bucket_ms} ms does not divide the row period "
+              f"{dt_ms:g} ms - the decimation (D={dec}) slides against the time axis")
     fc = float(cutoff) if cutoff is not None else 0.5 * fs_out
     coeffs = firwin_lowpass(ntap, fc, fs_raw)
     half = (ntap - 1) // 2
@@ -146,17 +140,17 @@ def fir_decimate_series(t_ms, series, bucket_idx, bucket_ms, fs_out,
         v = np.asarray(v, dtype=np.float64)
         if name in unwrap:
             v = np.unwrap(v)
-        # Interpolér opp på det uniforme rutenettet (identitet når ingen rader mangler).
+        # Interpolate up onto the uniform grid (the identity when no rows are missing).
         vu = v if len(nfull) == len(v) else np.interp(xf, xb, v)
         out[name], first_ok, last_ok = fir_filter_centered(vu, coeffs, compensate)
 
-    # Bøttesentrene i rå-indekser: bøtte b starter ved tid b·bucket_ms.
+    # The bucket centres in raw indices: bucket b starts at time b*bucket_ms.
     b = np.asarray(bucket_idx, dtype=np.float64)
     m = np.rint((b * bucket_ms - float(t_ms[0])) / dt_ms).astype(np.int64) + dec // 2
     inside = (m >= first_ok) & (m <= last_ok)
     mc = np.clip(m, 0, len(nfull) - 1)
 
-    # Hull smøres utover hele filterstøtten, så flagget må dilateres tilsvarende.
+    # A gap smears out over the whole filter support, so the flag is dilated to match.
     gap_dil = (np.convolve(gap_raw, np.ones(ntap), mode="same") > 0.0).astype(np.float64)
     gap = np.maximum(gap_dil[mc], (~inside).astype(np.float64))
 
@@ -170,10 +164,7 @@ def fir_decimate_series(t_ms, series, bucket_idx, bucket_ms, fs_out,
 
 
 def fir_response(f, coeffs, fs_raw):
-    """|H(f)| for FIR-en (DTFT av koeffisientene).
-
-    Ingen kaller denne i dag - den står igjen fordi den er den naturlige måten å
-    dokumentere antialias-filteret på i en figur."""
+    """|H(f)| for the FIR (the DTFT of the coefficients)."""
     f = np.atleast_1d(np.asarray(f, dtype=np.float64))
     n = np.arange(len(coeffs))
     return np.abs(np.exp(-2j * np.pi * np.outer(f / fs_raw, n)) @ np.asarray(coeffs))

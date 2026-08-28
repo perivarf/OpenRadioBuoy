@@ -1,35 +1,36 @@
 #!/usr/bin/env bash
 #
-# Begge kildene til samme økt, plottet hver for seg - og satt opp mot hverandre
-# til slutt.
+# Both sources for the same session, plotted separately - and put up against each
+# other at the end.
 #
-#   <stamp>_device/   enhetens egen imu.csv, altså tallene ombord-kjeden faktisk
-#                     regnet på (FIR + AHRS i firmware, float32, i sanntid)
-#   <stamp>_raw/      imu.csv rekonstruert fra raw.bin av raw_to_csv.py (samme
-#                     kjede om igjen offline, float64, AHRS på 480 Hz-strømmen)
+#   <stamp>_device/   the device's own imu.csv, that is the numbers the onboard
+#                     chain actually computed on (FIR + AHRS in firmware, float32,
+#                     in real time)
+#   <stamp>_raw/      imu.csv reconstructed from raw.bin by raw_to_csv.py (the same
+#                     chain over again offline, float64, AHRS on the 480 Hz stream)
 #
-# Hver kjøring er en egen rawplot.py, i sin egen katalog, med samme analysevalg.
-# Det er hele poenget: to uavhengige veier fra de samme samplene til Hs/Tz/Tc,
-# som ikke kan blande seg med hverandre. Spriker de, ligger feilen i kjeden
-# mellom dem - ikke i sjøen.
+# Each run is its own rawplot.py, in its own directory, with the same analysis
+# options. That is the whole point: two independent paths from the same samples to
+# Hs/Tz/Tc, which cannot mix with each other. If they diverge, the error is in the
+# chain between them - not in the sea.
 #
-# Økta røres ikke: rawplot.py skriver bare i katalogene over.
+# The session itself is untouched: rawplot.py only writes in the directories above.
 #
-#   ./plot_session.sh <øktkatalog>...
-#   ./plot_session.sh <øktkatalog> --taper-f1 0.15 --taper-f2 0.3
-#   ./plot_session.sh <øktkatalog> --reuse --force   # ny figur, behold imu.csv
-#   ./plot_session.sh <økt1> <økt2> -- --no-map      # flere økter, felles valg
+#   ./plot_session.sh <session dir>...
+#   ./plot_session.sh <session dir> --taper-f1 0.15 --taper-f2 0.3
+#   ./plot_session.sh <session dir> --reuse --force   # new figure, keep imu.csv
+#   ./plot_session.sh <sess1> <sess2> -- --no-map     # several sessions, same options
 #
-# Første argument som begynner med '-' avslutter lista over økter; resten
-# sendes videre til rawplot.py (som igjen sender det den ikke kjenner til
-# mapplot.py). '--' gjør det samme skillet eksplisitt.
+# The first argument beginning with '-' ends the list of sessions; the rest is passed
+# on to rawplot.py (which in turn passes on what it does not recognise to
+# mapplot.py). '--' makes the same split explicit.
 #
 set -uo pipefail
 
 TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RAWPLOT="$TOOLS/rawplot.py"
 
-# Hjelpeteksten ER kommentarblokka over: én tekst å holde oppdatert, ikke to.
+# The help text IS the comment block above: one text to keep up to date, not two.
 usage() {
   awk 'NR > 2 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
   exit "${1:-0}"
@@ -47,27 +48,25 @@ while [ $# -gt 0 ]; do
 done
 [ ${#SESSIONS[@]} -gt 0 ] || usage 1
 
-# --out-dir ville sendt begge kildene til SAMME katalog, og da er ikke lenger
-# figurene til å skille fra hverandre - det er nettopp det dette skriptet er til
-# for. Katalognavnene er derfor ikke til forhandling her; kjør rawplot.py
-# direkte hvis du vil styre dem.
+# --out-dir would send both sources to the SAME directory, and then the figures can no
+# longer be told apart - which is precisely what this script exists for.
 for a in ${EXTRA[@]+"${EXTRA[@]}"}; do
   case "$a" in
     --out-dir|--out-dir=*)
-      echo "--out-dir kan ikke brukes her: begge kildene ville havnet i samme" >&2
-      echo "katalog. Kjør rawplot.py --source raw/device direkte i stedet." >&2
+      echo "--out-dir cannot be used here: both sources would end up in the same" >&2
+      echo "directory. Run rawplot.py --source raw/device directly instead." >&2
       exit 2 ;;
   esac
 done
 
-# Ett tall ut av en key,value-CSV. Tåler at fila eller nøkkelen mangler - da er
-# svaret en tankestrek, ikke en tom kolonne man kan lese som null.
+# One number out of a key,value CSV. Tolerates a missing file or key - the answer is
+# then a dash, not an empty column that could be read as zero.
 kv() {
   [ -f "$1" ] || { printf -- '-'; return; }
   awk -F, -v k="$2" '$1 == k { printf "%s", $2; f = 1 } END { if (!f) printf "-" }' "$1"
 }
 
-rad() {   # rad <merkelapp> <ana-fil>
+row() {   # row <label> <ana file>
   printf '  %-22s %8s %8s %8s %8s %8s\n' "$1" \
     "$(kv "$2" Hs_madgwick)" "$(kv "$2" Tz_madgwick)" "$(kv "$2" Tc_madgwick)" \
     "$(kv "$2" Hs_gps)" "$(kv "$2" Tz_gps)"
@@ -76,52 +75,50 @@ rad() {   # rad <merkelapp> <ana-fil>
 status=0
 for sess in "${SESSIONS[@]}"; do
   sess="${sess%/}"
-  [ -d "$sess" ] || { echo "hopper over $sess: ikke en katalog" >&2; status=1; continue; }
+  [ -d "$sess" ] || { echo "skipping $sess: not a directory" >&2; status=1; continue; }
   stamp="$(basename "$sess")"
   echo
   echo "############################################################"
   echo "# $stamp"
   echo "############################################################"
 
-  kjort=()
-  for kilde in device raw; do
-    case "$kilde" in
+  ran=()
+  for src in device raw; do
+    case "$src" in
       device) [ -f "$sess/${stamp}_imu.csv" ] || {
-                echo; echo ">>> hopper over device: ingen ${stamp}_imu.csv "\
-"(økta er logget uten WaveLogMode::Both)"; continue; } ;;
+                echo; echo ">>> skipping device: no ${stamp}_imu.csv "\
+"(the session was logged without WaveLogMode::Both)"; continue; } ;;
       raw)    [ -f "$sess/${stamp}_raw.bin" ] || {
-                echo; echo ">>> hopper over raw: ingen ${stamp}_raw.bin"; continue; } ;;
+                echo; echo ">>> skipping raw: no ${stamp}_raw.bin"; continue; } ;;
     esac
     echo
-    echo ">>> $kilde"
-    if python3 -u "$RAWPLOT" "$sess" --source "$kilde" ${EXTRA[@]+"${EXTRA[@]}"}; then
-      kjort+=("$kilde")
+    echo ">>> $src"
+    if python3 -u "$RAWPLOT" "$sess" --source "$src" ${EXTRA[@]+"${EXTRA[@]}"}; then
+      ran+=("$src")
     else
-      echo ">>> $kilde FEILET" >&2
+      echo ">>> $src FAILED" >&2
       status=1
     fi
   done
 
-  # Sammenligningen er hele grunnen til at begge kjøres i samme kommando.
-  # Firmwarens egen _ana.csv står nederst uten GPS-kolonner - den regner ikke
-  # GPS-referansen ombord, og seglengden er som regel en annen enn python-
-  # kjedens, så den raden er en pekepinn og ikke en fasit.
-  if [ ${#kjort[@]} -gt 0 ]; then
+  # The firmware's own _ana.csv sits at the bottom without GPS columns - it does not
+  # compute the GPS reference onboard, and its segment length is usually a different
+  # one from the python chain's, so that row is an indication and not ground truth.
+  if [ ${#ran[@]} -gt 0 ]; then
     echo
     echo "=== $stamp: Hs/Tz/Tc ==="
-    printf '  %-22s %8s %8s %8s %8s %8s\n' "kilde" "Hs" "Tz" "Tc" "Hs_gps" "Tz_gps"
-    for kilde in "${kjort[@]}"; do
-      rad "$kilde" "$sess/${stamp}_${kilde}/${stamp}_ana_python.csv"
+    printf '  %-22s %8s %8s %8s %8s %8s\n' "source" "Hs" "Tz" "Tc" "Hs_gps" "Tz_gps"
+    for src in "${ran[@]}"; do
+      row "$src" "$sess/${stamp}_${src}/${stamp}_ana_python.csv"
     done
     ana="$sess/${stamp}_ana.csv"
     if [ -f "$ana" ]; then
-      # ASCII i merkelappen: printf %-22s teller bytes, og en 'ø' ville skjøvet
-      # hele raden ut av kolonnene.
+      # Labels stay ASCII: printf %-22s counts bytes, not characters.
       printf '  %-22s %8s %8s %8s %8s %8s\n' "firmware (_ana.csv)" \
         "$(kv "$ana" Hs)" "$(kv "$ana" Tz)" "$(kv "$ana" Tc)" "-" "-"
     fi
-    for kilde in "${kjort[@]}"; do
-      echo "  kart: $sess/${stamp}_${kilde}/${stamp}_kart.png"
+    for src in "${ran[@]}"; do
+      echo "  map: $sess/${stamp}_${src}/${stamp}_kart.png"   # mapplot.py's own name
     done
   fi
 done

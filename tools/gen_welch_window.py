@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
-"""Generer welch_window.h til firmware - Welch-vindusvektene som constexpr-array.
+"""Generate welch_window.h for the firmware - the Welch window weights as a constexpr array.
 
-Vektene avhenger bare av kWelchSegLen og kWelchWindow, og begge er constexpr i
-wave_config.h. De er altsa de samme for hvert eneste segment i hver eneste fangst -
-men firmware kan ikke regne dem ut selv (ingen sin/cos i constexpr), sa fram til na
-har accumSegment kalt sinf 1024 ganger per segment. Pa en M4 uten FPU er det den
-dyreste enkeltoperasjonen i FFT-en, og maling 2026-08-15 satte hele accumSegment til
-117 ms - lenge nok til at FIFO-en samler opp 136 av sine 256 ord mens den star pa.
+The weights depend only on kWelchSegLen and kWelchWindow, both constexpr in
+wave_config.h, so they are the same for every single segment of every single capture.
+The firmware cannot compute them itself (no sin/cos in constexpr), and computing them
+per segment costs one sinf per sample - the most expensive single operation in the FFT
+on an M4 without an FPU, inside the longest stretch where the FIFO is not read. As
+constexpr the table lands in .rodata (flash) and costs no RAM at all.
 
-Samme paritetspoeng som gen_fir_table.py: tabellen genereres fra welch.window_weights,
-som ER funksjonen offline-kjeden bruker. Da kan device og offline ikke drive fra
-hverandre, fordi det bare finnes én formel.
+The table is generated from welch.window_weights, which IS the function the offline
+chain uses, so the device and the offline chain cannot drift apart.
 
-Et RAM-oppsett i begin() var alternativet og er utelukket: 4 kB til, og bss ligger
-allerede pa 84 % av de 64 kB. Som constexpr havner tabellen i .rodata (flash, 52 %
-brukt) og koster ingen RAM i det hele tatt.
-
-Bruk:
+Usage:
   python gen_welch_window.py \\
       -o ../firmware/common_libraries/wave_manager/src/welch_window.h
 
-Endres kWelchSegLen eller kWelchWindow i wave_config.h, ma denne kjares pa nytt.
-Firmwarens static_assert stopper byggingen og sier hvilken av dem som ikke stemmer.
+If kWelchSegLen or kWelchWindow changes in wave_config.h, this has to be run again. The
+firmware's static_assert stops the build and says which of the two no longer matches.
 """
 
 import argparse
@@ -33,26 +28,21 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import welch  # noqa: E402
 
-# Ma falge enum class WindowType { Hann, Hamming } i wave_config.h. Naklene her er
-# strengene welch.window_weights forstar; verdiene er enumets tallverdier, og det er
-# de som havner i gjerdet firmware sjekker mot.
+# Must follow enum class WindowType { Hann, Hamming } in wave_config.h: the keys are the
+# strings welch.window_weights understands, the values the enum's numeric values.
 WINDOW_KIND = {"hann": 0, "hamming": 1}
 
-# kWelchSegLen i wave_config.h. Speilet her framfor a leses ut av headeren: en parser
-# for C++ ville vaert en ny ting som kunne ryke stille, og static_assert-en pa den
-# andre siden fanger uansett et avvik ved byggetid.
+# kWelchSegLen in wave_config.h. Mirrored here rather than read out of the header: a
+# parser for C++ would be one more thing that could fail quietly, and the static_assert
+# on the other side catches a mismatch at build time anyway.
 DEFAULT_SEGLEN = 1024
 DEFAULT_WINDOW = "hann"
 
 
 def lit(v):
-    """En float32-repr. %.9g er kort nok til a lese og langt nok til a runde tilbake
-    til nayaktig samme float32 - samme konvensjon som fir_coeffs.h.
-
-    Punktumet ma tvinges inn. Hann-vinduet starter i nayaktig 0, og %.9g gir da "0",
-    som med suffikset blir "0f" - ikke et float-literal i det hele tatt, men et
-    heltall fulgt av en identifikator. fir_coeffs.h slipper unna fordi ingen av
-    tappene der er eksakt null."""
+    """One float32 repr, with the decimal point forced in. The Hann window starts at
+    exactly 0, and %.9g then gives "0", which with the suffix becomes "0f" - not a float
+    literal at all, but an integer followed by an identifier."""
     s = f"{np.float32(v):.9g}"
     if not any(c in s for c in ".eE"):
         s += ".0"
@@ -75,30 +65,29 @@ def main():
                     help=f"kWelchSegLen (default {DEFAULT_SEGLEN})")
     ap.add_argument("--window", choices=sorted(WINDOW_KIND), default=DEFAULT_WINDOW,
                     help=f"kWelchWindow (default {DEFAULT_WINDOW})")
-    ap.add_argument("-o", "--out", default="-", help="utfil, '-' for stdout")
+    ap.add_argument("-o", "--out", default="-", help="output file, '-' for stdout")
     args = ap.parse_args()
 
     n = args.seglen
     if n < 2 or (n & (n - 1)) != 0:
-        sys.exit(f"seglen {n} er ikke en toerpotens - FFT-en er radix-2")
+        sys.exit(f"seglen {n} is not a power of two - the FFT is radix-2")
 
     w = welch.window_weights(n, args.window)
 
-    # Gjerdet mot en tabell som ser rimelig ut men er feil vindu: begge vinduene er
-    # symmetriske om N/2 og ligger i [0,1], og Hann starter i nayaktig 0.
+    # The fence against a table that looks reasonable but is the wrong window: both
+    # windows are symmetric about N/2 and lie in [0,1].
     if w.min() < -1e-12 or w.max() > 1.0 + 1e-12:
-        sys.exit(f"vindusvekter utenfor [0,1]: {w.min()!r}..{w.max()!r}")
+        sys.exit(f"window weights outside [0,1]: {w.min()!r}..{w.max()!r}")
     if not np.allclose(w[1:], w[1:][::-1], atol=1e-12):
-        sys.exit("vindusvektene er ikke symmetriske om N/2 - feil formel")
+        sys.exit("the window weights are not symmetric about N/2 - wrong formula")
 
-    # Samme sjekk som DC-forsterkningen i gen_fir_table.py, og av samme grunn: sum(w^2)
-    # er normaliseringen accumSegment deler pa, sa den er det float32-avrundingen kunne
-    # flyttet nivaet pa. Firmware summerer float32-vektene i double, sa det er den
-    # summen som ma stemme - ikke float64-vektenes.
+    # sum(w^2) is the normalisation accumSegment divides by, so it is what the float32
+    # rounding could have shifted the level with. The firmware sums the float32 weights
+    # in double, so it is that sum that has to hold - not the float64 weights'.
     s2_f64 = float(np.sum(w * w))
     s2_f32 = float(np.sum(np.float32(w).astype(np.float64) ** 2))
     if abs(s2_f32 - s2_f64) > 1e-6 * s2_f64:
-        sys.exit(f"sum(w^2) flyttet seg for mye i float32: {s2_f64!r} -> {s2_f32!r}")
+        sys.exit(f"sum(w^2) moved too far in float32: {s2_f64!r} -> {s2_f32!r}")
 
     kind = WINDOW_KIND[args.window]
     body = f"""#ifndef WELCH_WINDOW_H
@@ -157,7 +146,7 @@ static_assert(kWelchWindowTableKind == (uint8_t)kWelchWindow,
     else:
         with open(args.out, "w") as f:
             f.write(body)
-        print(f"skrev {args.out}: {n} vekter, vindu {args.window}, "
+        print(f"wrote {args.out}: {n} weights, window {args.window}, "
               f"sum(w^2) = {s2_f32:.9g}")
 
 

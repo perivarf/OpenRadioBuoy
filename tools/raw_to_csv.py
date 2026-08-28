@@ -62,8 +62,7 @@ def read_header(buf):
         sys.exit(f"raw: bad magic 0x{magic:08X} - not a _raw.bin")
     if ver != 2:
         sys.exit(f"raw: format v{ver}. This decoder follows the firmware in the repo, "
-                 f"and that writes v2. v1 had build_seq (u16) between word_bytes and "
-                 f"the ODRs, so everything after it sits 2 bytes earlier.")
+                 f"and that writes v2.")
     wordlen, imu_odr, sflp_odr = struct.unpack_from("<BHH", buf, 5)
     acc_sens, gyr_sens = struct.unpack_from("<ff", buf, 10)
     t0, reading_id, sync_bytes = struct.unpack_from("<IHH", buf, 18)
@@ -91,10 +90,9 @@ def parse(buf, hdr):
     # THE TAIL. An interrupted capture never reaches truncate(), so the file is left at
     # its full preallocated length, and what lies past the last written block is
     # whatever was in those clusters before - usually an earlier capture's raw.bin.
-    # That tail has valid tags and decodes into perfectly clean samples. Two things
-    # give it away, and both are things the capture's own stream never does: a sync
-    # record where the clock or the accel counter goes BACKWARDS, and a long run of
-    # unknown tags.
+    # That tail has valid tags and decodes into perfectly clean samples. Two things give
+    # it away, and the capture's own stream never does either: a sync record where the
+    # clock or the accel counter goes BACKWARDS, and a long run of unknown tags.
     MAX_UNKNOWN_IN_A_ROW = 64
     unknown_in_a_row = 0
     last_ms = last_an = None
@@ -159,8 +157,7 @@ def accel_times(n_acc, sync_n, sync_t, odr_hz):
 
     np.interp on its own will not do - it CLAMPS beyond the end points, and the last
     sync record sits at the START of the last drain, so that whole batch would get one
-    time. That reads as a rate higher than the real one, which is precisely the kind of
-    quiet time-axis error this file exists to avoid."""
+    time and read as a rate higher than the real one."""
     idx = np.arange(n_acc, dtype=np.float64)
     nominal = 1.0 / float(odr_hz)
     if len(sync_n) < 2:
@@ -247,9 +244,9 @@ def summarise(hdr, d, t_acc):
     ]
     if len(d["sync"]) > 1:
         ms = np.diff([s["millis"] for s in d["sync"]])
-        # The headroom is computed from the capture's OWN word rate: 256 words is
-        # 213 ms at 480 Hz but only 118 ms at 960, and a fixed number would call a
-        # 150 ms stall harmless in exactly the configuration where it is not.
+        # The headroom comes from the capture's OWN word rate: 256 words is 213 ms at
+        # 480 Hz but only 118 ms at 960, and a fixed number would call a 150 ms stall
+        # harmless in exactly the configuration where it is not.
         words = 2.0 * hdr["imu_odr_hz"] + hdr["sflp_odr_hz"]
         headroom = FIFO_DEPTH_WORDS / words * 1000.0 if words else float("nan")
         over = int((ms > headroom).sum())
@@ -291,7 +288,7 @@ def main():
 
     # A HARD stop, deliberately. Converting a file that has lost bytes does not break
     # visibly - it produces a full set of columns and clean-looking numbers, computed
-    # from payload bytes read as tags. A confidently wrong answer is worse than none.
+    # from payload bytes read as tags.
     if d["n_write_fail"]:
         msg = (f"the raw log lost {d['n_write_fail']} blocks and is desynchronised from "
                f"accel sample {d['first_write_fail_n']} of {n_acc}")
@@ -314,9 +311,8 @@ def main():
         print("  [!] no SFLP words in the file (kEnableSflp off?) - q*_sflp stay unit")
 
     # fifo_ovf is marked on the FIRST sample of the drain that reported the overflow:
-    # the loss happened BEFORE that sample, in the time between this drain and the
-    # previous one. The column cannot be derived from the samples - it comes from the
-    # sensor's status register, and the raw log is the only source.
+    # the loss happened BEFORE that sample, between this drain and the previous one. The
+    # column comes from the sensor's status register, so the raw log is its only source.
     ovf = np.zeros(n_acc, dtype=np.int8)
     for a_n in d["ovf_at"]:
         if 0 <= a_n < n_acc:

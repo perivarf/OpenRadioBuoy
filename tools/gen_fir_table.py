@@ -1,40 +1,36 @@
 #!/usr/bin/env python3
-"""Generer fir_coeffs.h til firmware - FIR-koeffisienttabeller som constexpr-arrays.
+"""Generate fir_coeffs.h for the firmware - FIR coefficient tables as constexpr arrays.
 
-Firmware kan ikke regne ut koeffisientene selv (ingen sinc/cos i constexpr, og et
-runtime-oppsett ville brent RAM pa noe som er konstant), sa de legges i flash som
-genererte tabeller. Poenget med a generere dem herfra er PARITET: samme
-firwin_lowpass som postprocess.py bruker offline, sa device og offline filtrerer
-med nayaktig de samme tallene i stedet for to uavhengige implementasjoner som
-driver fra hverandre.
+The firmware cannot compute the coefficients itself (no sinc/cos in constexpr, and a
+runtime setup would burn RAM on something constant), so they go into flash as generated
+tables. The point of generating them from here is PARITY: the same firwin_lowpass that
+postprocess.py uses offline, so the device and the offline chain filter with exactly the
+same numbers.
 
-TABELLENE ER INDEKSERT PA DESIMERINGSFAKTOR, IKKE PA RATEPAR. Det er ikke en
-forenkling, det falger av formelen:
+THE TABLES ARE INDEXED BY DECIMATION FACTOR, NOT BY RATE PAIR. That follows from the
+formula:
 
-    h[n] = sinc(2*(fc/fs)*(n - (N-1)/2)) * hamming[n],  normalisert sa sum(h) = 1
+    h[n] = sinc(2*(fc/fs)*(n - (N-1)/2)) * hamming[n],  normalised so sum(h) = 1
 
-fc og fs opptrer bare som forholdet fc/fs, og begge desimeringstrinnene i firmware
-har fc = fs_ut/2. Altsa er fc/fs = 1/(2*D) der D = fs_inn/fs_ut, og tabellen
-avhenger utelukkende av D. 960->100 og 480->50 gir derfor BIT-IDENTISKE tapper -
-verifisert, ikke antatt.
+fc and fs appear only as the ratio fc/fs, and both decimation stages in the firmware
+have fc = fs_out/2. So fc/fs = 1/(2*D) where D = fs_in/fs_out, and the table depends on
+D alone: 960->100 and 480->50 give BIT-IDENTICAL taps. One generated file therefore
+covers every rate pair whose D is in the list below, and the rates can be changed in
+wave_config.h without regenerating anything as long as the ratio is in here.
 
-Konsekvensen er at én generert fil dekker alle rateparene som gir en D i lista
-under, og firmware velger tabell med et constexpr-oppslag. Ratene kan endres i
-wave_config.h uten a regenerere noe, sa lenge forholdet finnes her.
+The keys are integers = round(10*D), since D can be 9.6:
 
-Naklene er heltall = round(10*D), siden D kan vaere 9,6:
+    D = 1.2 / 2.4 / 4.8   -> stage 1 at a low ODR
+    D = 9.6               -> stage 1 at 960->100 AND 480->50
+    D = 19.2              -> stage 1 at 960->50
+    D = 5 / 10            -> stage 2 at 50 / 100 Hz rows
 
-    D = 1,2 / 2,4 / 4,8   -> trinn 1 ved lav ODR
-    D = 9,6               -> trinn 1 @ 960->100 OG 480->50
-    D = 19,2              -> trinn 1 @ 960->50
-    D = 5 / 10            -> trinn 2 @ 50 / 100 Hz rader
-
-Bruk:
+Usage:
   python gen_fir_table.py \\
       -o ../firmware/common_libraries/wave_manager/src/fir_coeffs.h
 
-Legg til en ny rate-kombinasjon ved a utvide --decim; firmwarens static_assert
-sier fra med hvilken D som mangler.
+Add a new rate combination by extending --decim; the firmware's static_assert says
+which D is missing.
 """
 
 import argparse
@@ -46,27 +42,26 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fir  # noqa: E402
 
-# Desimeringsfaktorene firmware kan tenkes a bruke. kImuOdrHz i {120,240,480,960}
-# mot kOutputRateHz i {50,100} gir trinn 1; kOutputRateHz mot kVaccFsHz = 10 gir
-# trinn 2. Ubrukte tabeller kastes av lenkeren (-fdata-sections + --gc-sections),
-# sa lista koster ingenting a holde raus.
+# kImuOdrHz in {120,240,480,960} against kOutputRateHz in {50,100} gives stage 1;
+# kOutputRateHz against kVaccFsHz = 10 gives stage 2. Unused tables are dropped by the
+# linker (-fdata-sections + --gc-sections), so the list costs nothing to keep generous.
 DEFAULT_DECIM = [1.2, 2.4, 4.8, 5.0, 9.6, 10.0, 19.2]
 
 
 def decim_key(d):
-    """Heltallsnakkel = 10*D. Kun eksakte tideler er lovlige, ellers ville to ulike
-    D-er kunnet kollidere i samme navn uten at noen la merke til det."""
+    """Integer key = 10*D. Only exact tenths are legal, otherwise two different Ds
+    could collide in the same name without anyone noticing."""
     k = int(round(10.0 * d))
     if abs(10.0 * d - k) > 1e-9:
-        sys.exit(f"desimeringsfaktor {d!r} er ikke et helt antall tideler")
+        sys.exit(f"decimation factor {d!r} is not a whole number of tenths")
     if k < 10:
-        sys.exit(f"desimeringsfaktor {d!r} < 1 gir cutoff over Nyquist")
+        sys.exit(f"decimation factor {d!r} < 1 puts the cutoff above Nyquist")
     return k
 
 
 def fmt_table(name, d, coeffs, per_line=4):
-    """En float32-repr per koeffisient. %.9g er kort nok til a lese og langt nok
-    til a runde tilbake til nayaktig samme float32."""
+    """%.9g is short enough to read and long enough to round back to exactly the same
+    float32."""
     out = [f"// D = {d:g}: firwin_lowpass({len(coeffs)}, 0.5, {d:g}) => fc/fs = {0.5 / d:.9g}",
            f"inline constexpr float {name}[kFirNtap] = {{"]
     for i in range(0, len(coeffs), per_line):
@@ -80,10 +75,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--decim", type=float, nargs="+", default=DEFAULT_DECIM,
-                    help="desimeringsfaktorer det skal lages tabell for "
+                    help="the decimation factors to build tables for "
                          f"(default {DEFAULT_DECIM})")
-    ap.add_argument("--ntap", type=int, default=fir.NTAP, help=f"antall tap (default {fir.NTAP})")
-    ap.add_argument("-o", "--out", default="-", help="utfil, '-' for stdout")
+    ap.add_argument("--ntap", type=int, default=fir.NTAP, help=f"number of taps (default {fir.NTAP})")
+    ap.add_argument("-o", "--out", default="-", help="output file, '-' for stdout")
     args = ap.parse_args()
 
     keys = sorted({decim_key(d) for d in args.decim})
@@ -91,19 +86,17 @@ def main():
     tables = []
     for k in keys:
         d = k / 10.0
-        # fc = 0.5 og fs = D gir fc/fs = 1/(2D) - nayaktig det (fs_ut/2)/fs_inn var
-        # da tabellene ble generert per ratepar.
-        h = fir.firwin_lowpass(args.ntap, 0.5, d)
-        # firwin_lowpass normaliserer til sum(h) = 1 i float64, men vi lagrer float32.
-        # Avviket ma vaere sa lite at DC-forsterkningen fortsatt er 1 innenfor stayen -
-        # ellers ville et konstant accel-bias blitt skalert av filteret.
+        h = fir.firwin_lowpass(args.ntap, 0.5, d)   # fc = 0.5, fs = D => fc/fs = 1/(2D)
+        # firwin_lowpass normalises to sum(h) = 1 in float64, but we store float32. The
+        # deviation has to be small enough that the DC gain is still 1 within the noise -
+        # otherwise a constant accel bias would be scaled by the filter.
         s = float(np.sum(np.float32(h).astype(np.float64)))
         if abs(s - 1.0) > 1e-5:
-            sys.exit(f"D = {d:g}: float32-sum {s!r} avviker for mye fra 1.0")
+            sys.exit(f"D = {d:g}: the float32 sum {s!r} deviates too far from 1.0")
         tables.append((k, d, h))
 
-    # En kjede av ternaeroperatorer: constexpr-funksjonen ma vaere ett uttrykk for a
-    # kunne evalueres i en static_assert.
+    # A chain of ternary operators: the constexpr function has to be a single
+    # expression to be evaluable in a static_assert.
     selector = "\n".join(
         f"  {'return' if i == 0 else '     :'} k == {k:3d} ? kFirTapsD{k}"
         for i, (k, _, _) in enumerate(tables))
@@ -117,7 +110,7 @@ def main():
 /*
   GENERATED by tools/gen_fir_table.py - do not edit by hand.
 
-  Windowed-sinc lowpass (Hamming, normalised so sum(h) = 1). 
+  Windowed-sinc lowpass (Hamming, normalised so sum(h) = 1).
   Sum = 1 gives exactly unity gain at DC, so any residual accel bias
   is not scaled.
 
@@ -156,7 +149,7 @@ constexpr const float *firTapsForDecimX10(uint16_t k) {{
     else:
         with open(args.out, "w") as f:
             f.write(body)
-        print(f"skrev {args.out}: {len(tables)} tabeller a {args.ntap} tap, "
+        print(f"wrote {args.out}: {len(tables)} tables of {args.ntap} taps, "
               f"D = {', '.join(f'{d:g}' for _, d, _ in tables)}")
 
 

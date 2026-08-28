@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/pif/master/imu_master_thesis_figures_etc/imu_process/**)",
+      "Bash(ls -R /home/pif/master/OpenRadioBuoyFork/firmware/common_libraries/wave_manager 2>/dev/null | head -60; ls /home/pif/master/imu_master_thesis_figures_etc/imu_process/)"
+    ]
+  }
+}
