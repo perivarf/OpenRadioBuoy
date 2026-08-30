@@ -120,7 +120,9 @@ class ImuSampler {
   uint32_t nUnknownDbg_ = 0;
   uint8_t  lastUnknownTag_ = 0;
 
-  // Windowing state: kRowPeriodMs windows off a monotonic accel counter.
+  // Windowing state: kRowOdrHz windows off a monotonic accel counter. sampleTms_ is the
+  // time axis; the window boundaries come from rowIndexAt/rowStartMs, so a row period
+  // that is not a whole number of ms cannot drift.
   uint32_t sessionStartMs_ = 0;
   bool     logStarted_ = false;
   uint32_t accelIdx_ = 0;

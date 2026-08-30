@@ -70,12 +70,13 @@ void ImuSampler::closeWindow() {
   
   // No raw sample reached the window centre - a FIFO gap. Read the filters at the
   // window edge instead of dropping the row: the filtered value is still valid, it
-  // is just centred up to kRowPeriodMs late. Counted so a capture can be judged.
+  // is just centred up to one row period late. Counted so a capture can be judged.
   if (!winFirDone_) {
     latchRowValues();
     nFirLateEval_++;
   }
-  pendingRow_.winStartMs = (uint32_t)curWinIdx_ * kRowPeriodMs;
+  // Derived from the index, never accumulated - see the row grid in analysis_config.h.
+  pendingRow_.winStartMs = rowStartMs((uint32_t)curWinIdx_);
   pendingRow_.n = winNAcc_;
   pendingRow_.braking = winBraking_ ? 1 : 0;
   pendingRow_.sflpNan = winSflpNan_ ? 1 : 0;
@@ -177,7 +178,7 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs, uint32_t gpsRows) {
       const float *a = w.v;
       nAccDbg_++;   // debug print counter
       uint32_t tms = (uint32_t)sampleTms_;
-      int32_t widx = (int32_t)(tms / kRowPeriodMs);
+      int32_t widx = (int32_t)rowIndexAt(tms);
 
       if (!logStarted_) { logStarted_ = true; curWinIdx_ = widx; }
       
@@ -265,10 +266,11 @@ void ImuSampler::update(Print &dbg, uint32_t captureLeftMs, uint32_t gpsRows) {
       fir_.push(ax, ay, az, wX, wY, wZ,
                 latestGx_, latestGy_, latestGz_, vacc);
 
-      // Output sample: the first raw sample to reach the window centre. 
-      // The value sits in the middle of the window it represents. 
-      // 960/100 = 9.6 is not an integer decimation, the residual jitter is at most half a raw period.
-      if (!winFirDone_ && tms >= (uint32_t)curWinIdx_ * kRowPeriodMs + kFirS1CenterMs) {
+      // Output sample: the first raw sample to reach the window centre.
+      // The value sits in the middle of the window it represents.
+      // The centre falls between raw samples (and, at 120 Hz, between whole ms), so the
+      // residual jitter is at most half a raw period.
+      if (!winFirDone_ && tms >= rowCenterMs((uint32_t)curWinIdx_)) {
         latchRowValues();
       }
 

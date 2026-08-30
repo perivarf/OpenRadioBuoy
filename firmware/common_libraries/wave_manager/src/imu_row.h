@@ -4,10 +4,12 @@
 #include <stdint.h>
 
 /*
-  One row per kRowPeriodMs. Every field describes the SAME instant - the window centre,
+  One row per row period (1/kRowOdrHz). Every field describes the SAME instant - the window centre,
   where the decimating FIR's group delay puts it (kFirS1DelayS, 66.7 ms at 960 Hz). The
   quaternions are not filtered but are delayed by the same amount to match.
-  winStartMs labels the window; it is not the instant the values describe.
+  winStartMs labels the window; it is not the instant the values describe. It is the
+  window's true start rounded DOWN to whole ms - at 120 Hz the labels step 8,8,9 - so
+  read the rate from cfg.csv (window_ms) rather than differencing two rows.
 
   In its own header rather than imu_sampler.h because the readers outnumber the writer:
   the row is produced in one place and consumed by FirRowBank, StreamAnalyzer and

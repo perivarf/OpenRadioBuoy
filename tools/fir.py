@@ -64,7 +64,7 @@ def raw_uniform_grid(t_ms, raw_dt_ms=None):
     """Place the rows on an EXACTLY uniform raw grid.
 
     The FIR assumes a constant sample rate; rows can be missing (FIFO overflow, a
-    blocking SD flush). We find the grid from the median dt, insert the missing
+    blocking SD flush). We find the grid from the row spacing, insert the missing
     indices and flag them.
 
     raw_dt_ms = kWindowMs from cfg.csv when it is there, and it is the ground truth:
@@ -77,9 +77,18 @@ def raw_uniform_grid(t_ms, raw_dt_ms=None):
     t = np.asarray(t_ms, dtype=np.float64)
     if len(t) < 2:
         raise ValueError("FIR: needs at least two rows")
-    dt = float(np.median(np.diff(t)))
+    d = np.diff(t)
+    dt = float(np.median(d))
     if dt <= 0.0:
         raise ValueError(f"FIR: invalid raw dt ({dt} ms)")
+    # A row period that is not a whole number of ms (120 Hz is 8.333) reaches the CSV as
+    # win_start_ms labels stepping 8,8,9: the MEDIAN picks 8 and puts the rate 4 % out,
+    # while the MEAN recovers 8.333 exactly. Diffs far above the median are FIFO gaps,
+    # not the pattern, and are what the mean has to be protected from - hence the
+    # median first, then the mean over what it says is a normal step.
+    near = d[d <= 1.5 * dt]
+    if len(near) > 0:
+        dt = float(np.mean(near))
     if raw_dt_ms:
         if abs(float(raw_dt_ms) - dt) <= 0.25 * dt:
             dt = float(raw_dt_ms)
@@ -124,8 +133,10 @@ def fir_decimate_series(t_ms, series, bucket_idx, bucket_ms, fs_out,
     # The bucket boundaries sit on whole bucket_ms. If that does not divide the row
     # period, they fall in the middle of a row and the round() above gives a decimation
     # that slides relative to the time axis. The firmware makes this a static_assert
-    # (kVacc10HzBucketMs % kWindowMs == 0); here we cannot abort, since the logging rate
-    # varies from session to session.
+    # (kRowOdrHz % kWelchInputOdrHz == 0 - a whole number of ROWS per bucket, which is
+    # the same condition stated in rates rather than periods, and stays checkable when
+    # the row period is not a whole number of ms); here we cannot abort, since the
+    # logging rate varies from session to session.
     if abs(bucket_ms - dec * dt_ms) > 1e-6:
         print(f"  WARNING: the bucket {bucket_ms} ms does not divide the row period "
               f"{dt_ms:g} ms - the decimation (D={dec}) slides against the time axis")

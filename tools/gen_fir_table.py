@@ -45,7 +45,7 @@ import fir  # noqa: E402
 # kImuOdrHz in {120,240,480,960} against kOutputRateHz in {50,100} gives stage 1;
 # kOutputRateHz against kVaccFsHz = 10 gives stage 2. Unused tables are dropped by the
 # linker (-fdata-sections + --gc-sections), so the list costs nothing to keep generous.
-DEFAULT_DECIM = [1.2, 2.4, 4.8, 5.0, 9.6, 10.0, 19.2]
+DEFAULT_DECIM = [1.2, 2.4, 4.0, 4.8, 5.0, 6.0, 8.0, 9.6, 10.0, 12.0,19.2]
 
 
 def decim_key(d):

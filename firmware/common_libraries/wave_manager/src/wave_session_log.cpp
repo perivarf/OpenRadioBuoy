@@ -319,7 +319,9 @@ void WaveManager::writeSessionConfig(File &f) {
 
   // --- IMU.csv - windowing (raw ODR -> imu.csv rows) ---
   f.print("output_rate_hz,");     f.println(kRowOdrHz);
-  f.print("window_ms,");          f.println(kRowPeriodMs);
+  // The EXACT period, decimals and all: fir.py takes this as raw_dt_ms and builds the
+  // whole offline time axis on it, and the win_start_ms labels are rounded to whole ms.
+  f.print("window_ms,");          f.println(kRowPeriodMsF, 4);
   f.print("csv_sync_rows,");      f.println(wave_csv_sync_rows);
   f.print("imu_prealloc_bytes,");
   f.println((uint32_t)kRowOdrHz * (wave_measurement_duration / s_2_ms) *
@@ -332,7 +334,7 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("fir_s2_cutoff_hz,");   f.println(kFirS2CutoffHz, 3);
   f.print("fir_s1_delay_s,");     f.println(kFirS1DelayS, 6);
   f.print("fir_s2_delay_s,");     f.println(kFirS2DelayS, 6);
-  f.print("fir_s1_center_ms,");   f.println(kFirS1CenterMs);
+  f.print("fir_s1_center_ms,");   f.println(0.5f * kRowPeriodMsF, 4);
   f.print("fir_s2_center_ms,");   f.println(kFirS2CenterMs);
   // The logged series lag by the group delays above. 
   // Offline comparisons must compensate for that
