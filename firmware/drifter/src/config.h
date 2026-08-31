@@ -34,9 +34,9 @@ static constexpr uint32_t max_GPS_read_time                  {1*min_2_s*s_2_ms};
 static constexpr uint32_t max_sensor_read_time               {40*s_2_ms};
 static constexpr float    outlier_discard_tolerance          {2};
 static constexpr uint16_t GPS_baud                           {9600};
-static constexpr uint32_t minimal_measurement_period         {0*s_2_ms}; //Default 10 min
-static           uint32_t base_measurement_period            {0*s_2_ms}; //Default 10 min
-static constexpr uint32_t maximal_measurement_period         {3*min_2_s*s_2_ms}; //Default 30 min
+static constexpr uint32_t minimal_measurement_period         {10*s_2_ms}; //Default 10 min
+static           uint32_t base_measurement_period            {10*s_2_ms}; //Default 10 min
+static constexpr uint32_t maximal_measurement_period         {30*min_2_s*s_2_ms}; //Default 30 min
 static constexpr uint32_t thermometre_pause_between_readings {30};
 
 
@@ -54,6 +54,14 @@ static constexpr bool log_every_reading                     {true};
 static constexpr bool resync_RTC_using_GPS                  {true};
 static constexpr bool enable_bootloader_menu                {true};
 static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
+
+/*
+  Take the first GPS/thermistor reading and start the first wave capture on the first
+  loop iteration, rather than after one full period of silence. Set false to let both
+  gates wait out their period after boot (useful when a bench unit should not start a
+  half-hour capture the moment it is powered).
+*/
+static constexpr bool measure_immediately_after_deployment  {true};
 
 /*
   Run the transmission check before the wave capture as well as after it.
@@ -93,6 +101,16 @@ static constexpr uint32_t wave_measurement_duration       {30*min_2_s*s_2_ms}; /
 static constexpr uint32_t wave_measurement_filter_warm_up {30*s_2_ms};
 static_assert(wave_measurement_filter_warm_up < wave_measurement_duration,
               "AHRS warm-up must be shorter than the capture, or nothing is analysed");
+
+/*
+  base_measurement_period_wave_analysis is the interval between the START of one
+  capture and the start of the next (task_measure_waves anchors its timer up front),
+  so it has to leave room for the capture itself. If it does not, the gate is already
+  due when the capture returns and the buoy captures back-to-back with no GPS/temp
+  measurement or transmission in between.
+*/
+static_assert(base_measurement_period_wave_analysis > wave_measurement_duration,
+              "Wave capture period must exceed wave_measurement_duration, or captures run back-to-back");
 
 // Power parameters
 static constexpr uint32_t sleep_time                     {9*s_2_ms};

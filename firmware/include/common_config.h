@@ -69,7 +69,10 @@ static constexpr size_t welch_bins {102};
 
 // Shared wave-analysis run parameters
 static constexpr bool     base_enable_wave_analysis           {true};
-static constexpr uint32_t base_measurement_period_wave_analysis {0UL * 60UL * 1000UL}; // 0 min between wave captures
+// Interval between the START of one wave capture and the start of the next, i.e. a
+// capture every n'th minute. Must be longer than wave_measurement_duration (asserted
+// in drifter/src/config.h); the idle time between captures is n - duration.
+static constexpr uint32_t base_measurement_period_wave_analysis {120UL * 60UL * 1000UL}; // capture starts every 120 min
 
 // Watchdog
 static constexpr bool     enable_watchdog    {true};

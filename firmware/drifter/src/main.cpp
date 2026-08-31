@@ -240,8 +240,23 @@ void setup() {
   }
 
 
-  measurement_timer = millis();
-  wave_measurement_timer = millis();
+  /*
+    Arm both measurement gates so the first loop iteration runs them at once instead
+    of waiting out a whole period: a buoy that has just been thrown in the water
+    should produce a reading and start its first wave capture immediately, and the
+    wave cadence is then counted from that first capture.
+
+    The subtraction is deliberate unsigned wrap-around - the gates compare
+    millis_time_corrected() - timer against the period in uint32 modular arithmetic,
+    so a timer "before" millis() = 0 gives the correct elapsed time regardless.
+  */
+  if (measure_immediately_after_deployment){
+    measurement_timer      = millis() - LORA.measurement_period - 1;
+    wave_measurement_timer = millis() - LORA.measurement_period_wave_analysis - 1;
+  } else {
+    measurement_timer      = millis();
+    wave_measurement_timer = millis();
+  }
   if (enable_recovery_beacon){
     beacon_timer = millis();
   }
@@ -341,6 +356,18 @@ void task_measure_waves() {
     mySerial.println("Wave measurement starting");
   }
 
+  /*
+    The period is anchored to the START of the capture, not its end: a capture blocks
+    for wave_measurement_duration, so resetting the timer afterwards would give a
+    cycle of duration + period instead of the period itself. With the anchor here, a
+    capture begins every measurement_period_wave_analysis - which is exactly why that
+    period must be longer than wave_measurement_duration (static_assert in config.h);
+    otherwise the gate is already due when the capture returns and they run
+    back-to-back.
+  */
+  sleep_cycles_wave_measurement = 0;
+  wave_measurement_timer = millis();
+
   // wave_manager owns its own per-capture session directory (imu/gps/ses/spec/ana) and
   // wakes/stops the GPS itself for the drift track, so just ensure the SD card is up;
   // do NOT open a log here - takeReading/processReading manage the session.
@@ -368,9 +395,6 @@ void task_measure_waves() {
   }
 
   wave_manager.sleep();
-
-  sleep_cycles_wave_measurement = 0;
-  wave_measurement_timer = millis();
 }
 
 
@@ -532,7 +556,6 @@ void task_transmit() {
   sd_writer.closeLog();
 
   sleep_cycles_transmission = 0;
-  measurement_timer = millis();
   LORA.lastTransmission = millis();
   LORA.sleep();
 
