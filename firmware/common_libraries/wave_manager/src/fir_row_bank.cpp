@@ -21,30 +21,13 @@ void FirRowBank::push(float ax, float ay, float az,
 
 void FirRowBank::eval(ImuRow &r) const {
 
-  // Eval gives value at centre of tap, so the series are aligned
-  // for both filtered and unfiltered.
-
-  // vacc_ is the only channel the wave chain reads - StreamAnalyzer::ingest takes
-  // r.vaccFir from the row and nothing else that comes from this bank - so it is
-  // evaluated unconditionally, filtered and unfiltered alike.
+  // Eval gives value at centre of tap, i.e. aligned with center()
+  
+  // vacc_ is the only channel the wave chain currently reads.
   r.vaccFir = vacc_.eval();
   r.vacc    = vacc_.center();
 
-  /*
-    The other nine are imu.csv columns and nothing else. Each of them has exactly one
-    reader: the print run in WaveManager::onRow, behind its early return on a closed
-    file. In WaveLogMode::Raw that file is never opened, and evaluating them anyway was
-    9/10 of TIM_FIR - 210 of 234 ms/s, the largest single per-second cost in the capture
-    loop - spent on nobody.
-
-    The gate is the COMPILE-TIME mode, not the runtime imuCsvActive_. That flag is also
-    false when the file merely failed to open, and a Csv capture must not quietly lose
-    nine columns because the sd-card had a bad day; it has to fail the way it does today.
-
-    Only the convolution is skipped. push() still runs for all ten (ImuSampler::update),
-    so every delay line stays warm and this remains a change to eval() alone - see
-    fir.h on why the two are separate and which of them carries the cost.
-  */
+  // The rest of the values are written to imu.csv (if that is enabled)
   if constexpr (wave_mode_imu_csv()) {
     // Filtered
     r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();

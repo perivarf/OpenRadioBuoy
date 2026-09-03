@@ -5,27 +5,9 @@
 
 /*
   Decimating FIR low-pass, the antialias filter the wave chain decimates through.
-
-  Replaces a boxcar mean. A mean over D samples IS an FIR filter, but a poor one:
-  |sin(pi f D/fs) / (D sin(pi f/fs))| has nulls at multiples of the output rate and
-  leaks heavily between them, so everything above Nyquist folds down into the wave
-  band. A windowed-sinc filter attenuates what has to go.
-
-  Deliberately free of Arduino, LSM6DSV16X and wave_config.h dependencies (same rule
-  as madgwick.h / rotation.h), so it compiles on a host and its impulse response can
-  be checked against tools/fir.py without flashing anything. The
-  coefficients are supplied by the caller - one class covers both decimation stages.
-
-  push/eval are separate on purpose, and that separation is the whole point of a
-  DECIMATING FIR: the input side is a plain store, run at the input rate, while the
-  convolution is only evaluated at the far rarer output samples. At a decimation of
-  D that is 65 multiplies per OUTPUT sample rather than per input sample - the
-  difference between affordable and not on a soft-float 48 MHz core, and the reason
-  lowering the row rate barely helps while lowering the ODR does. Do not merge them
-  into a single filter() call.
 */
 
-static constexpr uint16_t kFirNtap = 129; // Need to run gen_fir_table.py to change this value. 129 is the default value for the drifter.
+static constexpr uint16_t kFirNtap = 31;   // Need to run gen_fir_table.py to change this value
 static constexpr uint16_t kFirHalf = (kFirNtap - 1) / 2;  // group delay, in samples
 
 static_assert(kFirNtap % 2 == 1,
@@ -43,18 +25,15 @@ class FirDecimator {
   // wave_config.h).
   void reset(void);
 
-  // One INPUT sample: a store and an index bump, nothing else.
+  // Store one input sample into the FIR - line.
   void push(float x);
 
-  // One OUTPUT sample. Does not advance the delay line, so can be called multiple
+  // Get one output sample. Does not advance the delay line, so can be called multiple
   // times after a single push() to get the same output sample
   float eval(void) const;
 
-  // The UNFILTERED input sample that eval() is centred on, i.e. the one kFirHalf
-  // pushes back. Free: the delay line already holds it. Logging it next to eval()
-  // gives a filtered/unfiltered pair on one time base, which is what makes the
-  // vacc vs vacc_fir comparison in the capture logs meaningful rather than
-  // a comparison of two different instants.
+  // The unfiltered input sample that eval() is centred on, i.e. the one kFirHalf
+  // pushes back. 
   float center(void) const { return z_[(uint16_t)((idx_ + kFirHalf) % kFirNtap)]; }
 
  private:

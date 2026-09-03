@@ -240,7 +240,7 @@ static_assert(kTaperF1 < kTaperF2 && kTaperF2 <= kWaveFMax, "need kTaperF1 < kTa
 // -----------------------------------------------------------------------------
 static constexpr bool  kSendPsd    = true;
 static constexpr float kPsdMinFreq = 0.03f;
-static constexpr float kPsdMaxFreq = 1.0f;
+static constexpr float kPsdMaxFreq = 2.0f;
 static_assert(kPsdMinFreq < kPsdMaxFreq, "the transmitted band would be empty");
 static_assert(kPsdMaxFreq <= kWaveFMax,
               "the transmitted spectrum would reach past the analysed band and be "

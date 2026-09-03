@@ -9,7 +9,7 @@ meant to go away.
 
 import numpy as np
 
-NTAP = 129                   # number of taps, as in fir.rs. MUST be odd - see below
+NTAP = 31                   # number of taps, as in fir.rs. MUST be odd - see below
 CUTOFF = None                # None => half the output rate (fs_out/2), as in fir.rs
 COMPENSATE_DELAY = True      # compensate the group delay (the firmware does not)
 
