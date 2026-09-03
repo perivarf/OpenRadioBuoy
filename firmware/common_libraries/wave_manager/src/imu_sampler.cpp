@@ -10,7 +10,7 @@ void ImuSampler::resetWindowing(uint32_t captureStartMs) {
   sessionStartMs_ = captureStartMs;
   nOverflowTotal_ = 0;       // per-capture, reported in ana.csv
   nOverflow_ = 0;
-  lastDrainMs_ = captureStartMs;  // measure the drain deadline from t=0, not from boot
+  lastDrainMs_ = sessionStartMs_;
   logStarted_ = false;
   accelIdx_ = 0;
   sampleTms_ = 0.0;

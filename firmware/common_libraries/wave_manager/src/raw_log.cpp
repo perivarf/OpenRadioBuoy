@@ -19,6 +19,7 @@ void RawLogWriter::writeHeader(uint32_t captureStartEpoch, uint16_t readingId) {
   auto put16 = [&](uint16_t v) { h[o++] = (uint8_t)v; h[o++] = (uint8_t)(v >> 8); };
   auto putf  = [&](float f) { uint32_t b; memcpy(&b, &f, 4); put32(b); };
 
+  // Header
   put32(kRawMagic);
   h[o++] = kRawFormatVersion;
   h[o++] = kRawWordBytes;
@@ -40,12 +41,12 @@ void RawLogWriter::writeHeader(uint32_t captureStartEpoch, uint16_t readingId) {
 
 void RawLogWriter::append(const uint8_t *p, uint8_t n) {
   if (!sink_) return;
-  // Safety valve, not the normal path: the buffer holds the sub-threshold remainder
-  // plus a worst-case drain, so this can only fire if the FIFO delivered more than
-  // kFifoDepthWords - i.e. if that constant is wrong again. A write mid-loop is then
-  // better than writing past the end of the buffer. force, or a call that only writes
-  // whole sectors could leave too little room to help.
+  
+  // Safety valve, not the normal path: this will only fire if the FIFO delivered more than
+  // kFifoDepthWords (i.e. if the FIFO is not properly sized)
   if (len_ + n > kRawBufBytes) flush(true);
+
+  // Sdding data to the buffer
   for (uint8_t i = 0; i < n; i++) buf_[len_++] = p[i];
 }
 
@@ -70,10 +71,8 @@ void RawLogWriter::emitSync(uint32_t tUs, uint32_t accelN, uint16_t nWords,
     rec[o++] = (uint8_t)(vals[v] >> 16);
     rec[o++] = (uint8_t)(vals[v] >> 24);
   }
-  // Fold in any block lost since the last sync. This is the only place the loss can be
-  // reported IN the stream, and it must be reported there: ana.csv can say a capture
-  // lost blocks, but not WHERE - and where is the whole question, because everything
-  // after the first loss is misaligned.
+  
+  // If writeFail, report the loss in the raw stream
   if (writeFailPending_) flags |= kRawFlagWriteFail;
   const uint16_t vals16[2] = {nWords, flags};
   for (uint8_t v = 0; v < 2; v++) {
@@ -83,14 +82,14 @@ void RawLogWriter::emitSync(uint32_t tUs, uint32_t accelN, uint16_t nWords,
 
   const uint32_t failBefore = nWriteFail_;
   append(rec, kRawSyncBytes);
-  // Clear only if appending the report did not itself lose a block. When it did, the
-  // flag stays pending and the NEXT sync carries it - one record late in the file, but
-  // never silently dropped. The decoder's job is to stop trusting the tail, and it
-  // still does.
+
+  // Clear only if appending the report did not itself lose a block
   if (nWriteFail_ == failBefore) writeFailPending_ = false;
 }
 
 uint16_t RawLogWriter::flush(bool force) {
+
+  // No need to flush if no sink or no data
   if (!sink_ || len_ == 0) return 0;
 
   // If below threshhold, delay write unless forced.
@@ -104,11 +103,10 @@ uint16_t RawLogWriter::flush(bool force) {
   // Write
   if (!sink_(buf_, n)) {
     nWriteFail_++;
-    writeFailPending_ = true;
+    writeFailPending_ = true; // That we have a write fail not written to file..
   }
 
-  // Move the remainder forward: up to 511 B a couple of times a second, negligible
-  // against the write it just waited on.
+  // Move the remainder forward. Easier than doing a ring-buffer with split of the data.
   len_ -= n;
   if (len_ > 0) memmove(buf_, buf_ + n, len_);
   return n;

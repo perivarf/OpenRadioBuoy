@@ -136,8 +136,7 @@ class KalmanAhrs {
   // number that explains why a capture came out the way it did.
   float measurementNoise(float accelNorm) const;
 
-  // Name for the capture logs. Lives on the class so the filter selected in
-  // wave_config.h and the string written to ses.csv cannot disagree.
+  // Name for the logs
   static constexpr const char *kName = "Kalman";
 
  private:

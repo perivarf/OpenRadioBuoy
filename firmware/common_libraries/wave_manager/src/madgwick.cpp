@@ -1,13 +1,7 @@
 #include "madgwick.h"
-
 #include <math.h>
-
 #include "rotation.h"
 
-/*
-  Ported from ORB_test/src/analysis.cpp (madgwickUpdateIMU / initQuatFromAccel),
-  previously inlined in wave_analysis.cpp.
-*/
 
 void Madgwick::reset(void) {
   q_[0] = 1.0f; q_[1] = q_[2] = q_[3] = 0.0f;
