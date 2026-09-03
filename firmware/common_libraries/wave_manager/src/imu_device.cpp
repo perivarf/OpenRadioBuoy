@@ -1,6 +1,6 @@
 #include "imu_device.h"
-#include "config.h"        // SPI_CS_IMU_PIN, INT1_IMU_PIN
-#include "wave_config.h"   // the choices written into the registers below
+#include "config.h"
+#include "wave_config.h"
 
 #include <math.h>
 

@@ -2,26 +2,26 @@
 #define IMU_CONFIG_H
 
 #include <Arduino.h>
-#include "imu_device.h"   // the part itself: FIFO geometry, register map, FS and LPF2
-                          // ladders, power-mode names. This file only CHOOSES from them.
+#include "imu_device.h"
 
 /*
-  Sensor tuning: rates, ranges, filters, and the FIFO timing budget everything else in
+  Sensor settings: rates, ranges, filters, and the FIFO timing budget everything else in
   the capture loop is measured against.
 
-  What the sensor IS lives in imu_device.h - depth, tags, registers, the tables. What we
-  ASK OF IT lives here, and the include goes one way only: this file reaches down into
-  imu_device.h, never the reverse.
+  Device specifics are found in imu_device.h - depth, tags, registers, the tables
 
-  THE BUDGET. Accel, gyro and the on-chip fusion are all batched into the FIFO at their
-  own rates, so it takes kFifoWordsPerSec words a second - 1200 at 480 Hz. Divided into
-  kFifoDepthWords that gives kFifoFillMs, the time a drain has before the oldest word is
-  overwritten: 213 ms at 480 Hz, 118 at 960.
+  Accel, gyro and the on-chip fusion are all batched into the FIFO at their
+  own rates, so it takes kFifoWordsPerSec words a second - 1200 at 480 Hz.
+  
+  (1s with 480Hz: 480 accel, 480 gyro, 240 fusion = 1200)
+  
+  The buffer (kFifoDepthWords) is filled up in:
+  kFifoDepthWords / kFifoWordsPerSec * 1000 = 256 / 1200 * 1000 = 213 ms.
 
   Draining is not the problem. A word is 7 bytes over the bus plus an address byte, so
-  a full FIFO is 256 * 64 bit / 6 MHz = ~2.7 ms.
+  a full FIFO is 256 * 8B * 8bit/Byte / 6 Mbit/s (6MHz) = ~2.7 ms.
 
-  The choice of AHRS and writes to SD-card are what fill the budget.
+  The choice of AHRS and write or not to SD-card (and SD-card type) are what fill the budget.
 */
 
 // Upper edge of the analysed band. An analysis quantity, but it lives here because the
@@ -38,17 +38,14 @@ static_assert(kImuOdrHz == 120 || kImuOdrHz == 240 || kImuOdrHz == 480 || kImuOd
 static_assert(!(kImuLowPower && kImuOdrHz > 240),
               "Low-power is only valid for ODR <= 240 Hz");
 
-// What this part calls the mode asked for above. auto, not the driver's enum type: the
-// name of that type is as device-specific as the values, and belongs on the other side
-// of the split with everything else the wrapper insists on.
+// Get low power mode or not
 static constexpr auto kImuAccMode = accModeFor(kImuLowPower);
 static constexpr auto kImuGyrMode = gyrModeFor(kImuLowPower);
 
 // -----------------------------------------------------------------------------
-// Accel LPF2. The cutoff is a FRACTION OF ODR, so pinning one enum would make it move
-// with kImuOdrHz - STRONG is 9.6 Hz at 960 Hz but 1.2 Hz at 120, on top of the analysed
-// band. The divisor is therefore derived, not chosen; the ladder it is picked from is
-// the part's, and lives in imu_device.h.
+// Deriving accelerator low pass filter 2 - LPF2. 
+// The cutoff is a fraction of ODR
+// STRONG is 9.6 Hz at 960 Hz but 1.2 Hz at 120
 // -----------------------------------------------------------------------------
 static constexpr bool kUseLpf2 = true;
 
@@ -56,23 +53,21 @@ static constexpr bool kUseLpf2 = true;
 // landing near the 5 Hz Nyquist of the 10 Hz series this is decimated to, so LPF2 does
 // the anti-alias work up front rather than instead of the FIR stages.
 static constexpr float kLpf2Margin = 4.0f;
-static constexpr float kLpf2MinHz  = kLpf2Margin * kWaveFMax;   // 4.0 Hz @ kWaveFMax 1.0
+static constexpr float kLpf2MinHz  = kLpf2Margin * kWaveFMax;
 
 // Strongest divisor that still clears kLpf2MinHz. At kWaveFMax 1.0 that is
 // 200/100/45/20 for ODR 960/480/240/120.
 static constexpr uint16_t kLpf2Div      = lpf2DivForOdr(kImuOdrHz, kLpf2MinHz);
 static constexpr uint8_t  kLpf2Bw       = lpf2BwForDiv(kLpf2Div);
-static constexpr float    kLpf2CutoffHz = (float)kImuOdrHz / kLpf2Div;  // 4.8 Hz @ 960 Hz
+static constexpr float    kLpf2CutoffHz = (float)kImuOdrHz / kLpf2Div;
 
 static_assert(kLpf2CutoffHz >= kLpf2MinHz,
               "no LPF2 divisor clears kWaveFMax by kLpf2Margin - raise kImuOdrHz, "
               "lower kWaveFMax, or accept a smaller margin");
 
 // -----------------------------------------------------------------------------
-// Full-scale range. The enum value IS the number passed to Set_X_FS/Set_G_FS (g / dps),
-// and the raw-FIFO sensitivity is derived from it, so range and scaling cannot drift
-// apart. A larger range captures bigger motion at coarser resolution. Ladders and
-// sensitivities: imu_device.h.
+// Accelerometer and gyro range. 
+// The enum value is the number passed to Set_X_FS/Set_G_FS (g / dps),
 // -----------------------------------------------------------------------------
 static constexpr AccelFS kAccelFS = AccelFS::G4;      // +-4 g
 static constexpr GyroFS  kGyroFS  = GyroFS::DPS500;  // +-500 dps
@@ -82,39 +77,33 @@ static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 
 // -----------------------------------------------------------------------------
 // On-chip sensor fusion (SFLP): a 6-axis AHRS in the sensor, emitting a quaternion
-// that rotates the sensor frame into the gravity frame, batched into the FIFO at its
-// own rate. Declared here and not with the analysis settings because kFifoWordsPerSec
-// below needs the rate, and the whole timing budget needs kFifoWordsPerSec.
+// that rotates the sensor frame into the gravity frame
 // -----------------------------------------------------------------------------
 static constexpr bool  kEnableSflp = true;
 static constexpr float kSflpOdrHz  = 240.0f;
 
 // Words the FIFO takes in a second: accel and gyro at kImuOdrHz, plus the rotation
-// vector at the fusion's own rate when it is batched. The denominator behind every
-// timing claim in this file.
+// vector at the fusion's own rate when it is batched. 
 static constexpr uint32_t kFifoWordsPerSec =
     2u * (uint32_t)kImuOdrHz + (kEnableSflp ? (uint32_t)kSflpOdrHz : 0u);
-
-// -----------------------------------------------------------------------------
-// Watermark and the drain triggers. The depth they are measured against is
-// kFifoDepthWords in imu_device.h.
-// -----------------------------------------------------------------------------
 
 /*
   Watermark in FIFO words: the level at which the sensor raises INT1.
   At 480 Hz and 1200 words/s:
 
-    WTM 128 -> 128 free levels = 107 ms of budget
-    WTM  64 -> 192 free levels = 160 ms
+    FIFO fills up in 
+    WTM 128 -> 128 free levels = 107 ms of budget (213 ms at 480 Hz)
+    WTM  64 -> 192 free levels = 160 ms of budget (213 ms at 480 Hz)
 
   The cost of a lower watermark is more sync records in raw log,
   but most importantly it gives less opportunity for MCU sleep and potential energy saving.
 */
 
-static constexpr uint16_t kFifoWatermark = 128; // Should not be set too close to kFifoDepthWords, or the FIFO may overrun before the drain is triggered. 128 is a good compromise between latency and energy efficiency.
+// Should not be set too close to kFifoDepthWords, or the FIFO may overrun before the drain is triggered. 
+// 128 is a good compromise between latency and energy efficiency.
+static constexpr uint16_t kFifoWatermark = 128; 
 static_assert(kFifoWatermark > 0 && kFifoWatermark < 256,
               "FIFO_CTRL1.WTM is 8 bits - a larger watermark would be truncated");
-
 /*
   Which of the two drain triggers the capture loop uses. They are a CHOICE, not a pair:
 
@@ -126,12 +115,13 @@ static_assert(kFifoWatermark > 0 && kFifoWatermark < 256,
 static constexpr bool kImuUseInt1 = true;
 
 // Time for the FIFO to go from empty to full. The whole timing budget in this project
-// is measured against this number, and ses.csv writes it out as tim_fifo_budget_us.
+// is measured against this number
 static constexpr uint32_t kFifoFillMs =
     (uint32_t)kFifoDepthWords * 1000u / kFifoWordsPerSec;   // 213 ms @ 480 Hz, 118 @ 960
 
 /*
   The longest the drain trigger may wait between drains * 60%
+  Fail safe in case interrupt is not received
 */
 static constexpr uint32_t kMaxDrainIntervalMs = 3u * kFifoFillMs / 5u;  // 127 ms @ 480 Hz
 
