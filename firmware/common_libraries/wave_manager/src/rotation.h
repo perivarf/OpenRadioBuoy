@@ -1,6 +1,8 @@
 #ifndef ROTATION_H
 #define ROTATION_H
 
+// PIF TODO
+
 /*
   Quaternion / rotation math shared by the orientation methods, so neither owns
   primitives the other needs:

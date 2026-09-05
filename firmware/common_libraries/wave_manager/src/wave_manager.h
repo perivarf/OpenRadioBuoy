@@ -11,6 +11,8 @@
 #include "wave_config.h"
 #include "gps_manager.h"     // gps_manager.update()/freshFix()/lastFix() for gps.csv
 
+// PIF TODO
+
 /*
   Internal wave result. Kept in floats (physical units) so ana.csv logs the real
   values; updateTransmitMessage scales them to the fixed-point uint32 layout that

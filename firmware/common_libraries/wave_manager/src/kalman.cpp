@@ -6,6 +6,8 @@
 #include "matrix.h"     // matMul / matMulTransposed / inv3
 #include "rotation.h"   // quatMultiplyNorm / quatFromRotationVector / skewSymmetric
 
+// PIF TODO
+
 // Error-state dimension: 3 attitude + 3 gyro bias. kN is the covariance size, not
 // the state size - the quaternion itself stays out of P, which is the whole point
 // of the multiplicative form.

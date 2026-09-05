@@ -15,7 +15,7 @@ float FirDecimator::eval(void) const {
   // samples that share a coefficient can be added before the multiply: 65 multiplies
   // instead of 129. 
 
-  //TODO -> forenkle i,j?
+  //TODO -> simplify i,j?
 
   uint16_t i = idx_ ? (uint16_t)(idx_ - 1) : (uint16_t)(kFirNtap - 1);  // newest, x[n]
   uint16_t j = idx_;                                                    // oldest, x[n-(N-1)]

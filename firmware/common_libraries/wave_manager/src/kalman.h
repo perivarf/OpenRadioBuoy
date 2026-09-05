@@ -3,14 +3,16 @@
 
 #include "constants.h"
 
-/*
-  Quaternion Kalman AHRS for a 6-axis IMU: a multiplicative / error-state EKF.
-  The attitude is carried as a unit quaternion and never enters the covariance;
-  what the filter actually estimates is a 6-element ERROR state
+// PIF TODO
 
-      [ dTheta (3) | dBias (3) ]
-        ^ small-angle attitude error, body frame (rad)
-                     ^ gyro bias error (rad/s)
+/*
+  Quaternion Kalman AHRS for a 6-axis IMU: error-state EKF.
+  
+  The attitude is carried as a unit quaternion
+  The filter estimates is a 6-element ERROR state
+
+      dTheta (3) -> small-angle attitude error, body frame (rad)
+      dBias  (3) -> gyro bias error (rad/s)
 
   which is injected into the quaternion after each correction and then reset to
   zero. That indirection is the point: a quaternion has four components but only
@@ -21,8 +23,7 @@
   accelerometer as a measurement of the GRAVITY DIRECTION - normalised, so only
   the direction is measured, exactly like the atan2 tilt it replaces.
 
-  ADAPTIVE MEASUREMENT NOISE. This is the whole reason the filter is worth
-  running, and what the first version of this file lacked:
+  Adaptive measurement noise
 
       R = r0 * (dtRef/dt) * (1 + lambdaA*((|a|-g)/g)^2 + lambdaW*(|w|/w0)^2)
 
@@ -63,33 +64,24 @@
   chi^2 innovation gate in kalman.py is deliberately not ported - it is off
   (gate = 0) in every configuration that has been run.
 
-  Deliberately free of Arduino / wave_config.h dependencies (rotation.h, matrix.h
-  and <math.h> only), so it compiles on a host next to postprocess.py. The tuning
-  is supplied by the caller - on the drifter that is kKalmanParams.
-
-  Quaternion convention is the shared one from rotation.h: q = [w,x,y,z],
-  body -> world.
+  Quaternion convention is the one from rotation.h: q = [w,x,y,z], body -> world.
 */
 
-// Tuning. Grouped in a struct rather than a constructor argument list because
-// ten positional floats cannot be read at the call site - and because the set
-// belongs together: it is one tuning, swept as a whole (see kalman.py).
 struct KalmanAhrsParams {
   float sigmaG;    // gyro noise density [rad/s/sqrt(Hz)]
   float sigmaB;    // gyro bias random walk [rad/s^2/sqrt(Hz)]
-  float r0;        // base variance of the accel DIRECTION, at dtRef
+  float r0;        // base variance of the accel direction, at dtRef
   float dtRef;     // sample interval the tuning was swept at [s]
   float lambdaA;   // weight on the |a| deviation from 1 g
   float lambdaW;   // weight on |w| - where the gain is
   float w0;        // normalisation for |w| [rad/s]
-  float gravity;   // [m/s^2]; ACCEL MUST BE IN THE SAME UNIT - see update()
+  float gravity;   // [m/s^2]; Acceleration must be in same unit - see update()
   float p0Angle;   // initial attitude uncertainty [rad]
   float p0Bias;    // initial bias uncertainty [rad/s]
 };
 
 
-// Kalman: quaternion error-state EKF with an adaptive measurement noise. See kalman.h
-// for what R's three terms do.
+// Kalman: quaternion error-state EKF with an adaptive measurement noise
 static constexpr KalmanAhrsParams kKalmanParams = {
     /* sigmaG  */ 0.005f,        // rad/s/sqrt(Hz), ~0.3 deg/s/sqrt(Hz)
     /* sigmaB  */ 1.0e-5f,       // rad/s^2/sqrt(Hz)
@@ -110,30 +102,23 @@ class KalmanAhrs {
     reset();
   }
 
-  // Identity attitude, zero bias, P = diag(p0Angle^2, p0Bias^2). A NON-zero P0
-  // is what lets the first corrections actually move the state: with P = 0 the
-  // filter would take about a second at 100 Hz to trust the accelerometer again,
-  // and would spend that second integrating raw gyro.
+  // Identity attitude, zero bias, P = diag(p0Angle^2, p0Bias^2). A non-zero P0
+  // lets the first corrections move the estimate
   void reset(void);
 
   // Seed the attitude from one accel sample (gravity -> roll/pitch, yaw = 0).
   // Leaves the bias estimate and the covariance alone.
   void initFromAccel(float ax, float ay, float az);
 
-  // One filter step. gyro in rad/s, dt in seconds, and accel in the SAME UNIT AS
-  // params.gravity (m/s^2 on the drifter) - unlike a plain normalised-gravity
-  // AHRS this filter is not scale-free, because the adaptive R measures how far
-  // |a| is from 1 g. Feed it mg and every sample looks like a 100 g slam.
-  // An all-zero accel vector carries no gravity direction, so that step predicts
-  // only.
+  // One filter step. gyro in rad/s, dt in seconds, and accel in the same unit as
+  // params.gravity (m/s^2 on the drifter)
   void update(float gx, float gy, float gz, float ax, float ay, float az, float dt);
 
   const float *quaternion(void) const { return q_; }   // [w,x,y,z], unit length
   const float *gyroBias(void) const { return b_; }     // rad/s, body frame
 
   // The adaptive measurement variance for an accel vector of this magnitude, at
-  // the rotation rate and dt of the last predict(). Public because it is the one
-  // number that explains why a capture came out the way it did.
+  // the rotation rate and dt of the last predict()
   float measurementNoise(float accelNorm) const;
 
   // Name for the logs
@@ -148,8 +133,7 @@ class KalmanAhrs {
   float b_[3] = {0.0f, 0.0f, 0.0f};
   float P_[6][6] = {};
   // |w| and dt from the last predict(). The adaptive R needs both - how fast we
-  // are rotating right now, and how long the sample averaged over - and neither
-  // is visible to correct() on its own.
+  // are rotating right now, and how long the sample averaged over
   float wNorm_ = 0.0f;
   float dt_ = 0.0f;
 };

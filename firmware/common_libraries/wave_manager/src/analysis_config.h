@@ -3,47 +3,29 @@
 
 #include <Arduino.h>
 
-#include "config.h"        // welch_bins, wave_measurement_filter_warm_up, scale_factor
-#include "imu_config.h"    // rates, units, kFifoWordsPerSec
+#include "config.h"
+#include "imu_config.h"
 #include "madgwick.h"
 #include "kalman.h"
 #include "fir.h"
 #include "fir_coeffs.h"
 
 /*
-  THE RATE CHAIN. Every rate is named for what CONSUMES it and carries no value in its
-  name - kVacc10HzBucketMs stops being true the moment someone edits it.
+  Analysis configuration
 
     kImuOdrHz            raw accel/gyro out of the FIFO
-      -> kAhrsInputOdrHz     the orientation filter (= kImuOdrHz, undivided)
+      -> kAhrsInputOdrHz     the orientation filter (= kImuOdrHz)
       -> kRowOdrHz           FIR stage 1; the rows written to imu.csv
       -> kWelchInputOdrHz    FIR stage 2; the series fed to Welch
-
-  Each stage states its ODR and DERIVES its period. The static_asserts by the FIR tables
-  make an illegal decimation a build error rather than a slow time-base drift.
 */
 
 // -----------------------------------------------------------------------------
-// Row rate: the output of FIR stage 1 and the input to stage 2, so every row feeds the
-// wave analysis whether or not imu.csv is written.
-//
-// The VALUE is chosen for the sd-card, not the analysis - stage 2 decimates to
-// kWelchInputOdrHz regardless.
-//
-// The row period does NOT have to be a whole number of ms - 120 Hz is 8.333 ms. What
-// must never happen is that a ROUNDED period gets ACCUMULATED: idx * 8 ms would make
-// the grid 125 Hz and put a 4 % error on every timestamp. The grid is therefore
-// defined by the RATE, and every boundary and centre is recomputed from the row index
-// by the three helpers below, so nothing accumulates. What is left is the +-1 ms
-// quantisation of the label itself - below the half raw period (1.04 ms at 480 Hz) the
-// window centre already jitters by, and it does not grow with capture length.
-// -----------------------------------------------------------------------------
+// Row rate: the output of FIR stage 1 and the input to stage 2 as well as imu.csv output
 static constexpr uint16_t kRowOdrHz     = 80;
+static_assert(kRowOdrHz < kImuOdrHz, "kRowOdrHz must be lower than kImuOdrHz");
 
-// NOMINAL period - cfg.csv, sizing, and prose. The grid uses the helpers, never this.
+//Imu.csv row period in ms, used for calculating center time in config.csv
 static constexpr float    kRowPeriodMsF = 1000.0f / kRowOdrHz;
-static_assert(kRowOdrHz < kImuOdrHz,
-              "kRowOdrHz must be lower than kImuOdrHz");
 
 // THE ROW GRID. Window k spans [k, k+1) / kRowOdrHz seconds; these map that to the
 // whole-ms time axis the sampler and the analyzer share.
@@ -69,64 +51,64 @@ static_assert(1000 % kWelchInputOdrHz == 0,
 // Orientation: AHRS -> vertical acceleration
 // -----------------------------------------------------------------------------
 
-// The AHRS runs on every raw sample straight off the FIFO - no divider and no FIR ahead
-// of it, so the gyro is integrated at the rate it was measured at and the quaternion
-// delay is a plain sample count. kAhrsInputOdrCapHz is where the filter stops fitting
-// the CPU budget, set for Madgwick; KalmanAhrs is ~20x dearer.
-//
-// TODO: find good values for KalmanAhrs and make the ceiling a function of filter type.
-static constexpr uint16_t kAhrsInputOdrCapHz = 960;
+// The AHRS (orientation filter) runs on every raw sample. 
+// Could also be extended to use n-sigma filter (moving average with decimation and rejection of outliers)
+// to potentially reduce cpu load
 static constexpr float    kAhrsInputOdrHz    = (float)kImuOdrHz;
-static_assert(kImuOdrHz <= kAhrsInputOdrCapHz,
-              "the AHRS runs on every raw sample - kImuOdrHz above kAhrsInputOdrCapHz does "
-              "not fit the CPU budget; lower the ODR rather than re-introducing a divider");
 
+// The orientation selection, at compile time: only the selected filter is linked
+// to reduce RAM
 
-// THE orientation selection, at compile time: only the selected filter is linked and
-// only its state occupies RAM. The two share an API, so makeWaveAhrs() - which exists
-// because the constructors differ - is the only thing that has to change with it.
-
-// Use the chip's built-in SFLP fusion instead of the software AHRS below.
+// Use the chip's built-in AHRS (SFLP) fusion instead of the software AHRS below.
 static constexpr bool wave_use_sflp = false;
 
+// The software AHRS: Madgwick or KalmanAhrs
 using WaveAhrs = Madgwick;
 inline WaveAhrs makeWaveAhrs(void) { return WaveAhrs{kMadgwickBeta}; }
+
+//using WaveAhrs = KalmanAhrs;
+//inline WaveAhrs makeWaveAhrs(void) { return WaveAhrs{kKalmanParams}; }
 
 static_assert(kEnableSflp || !wave_use_sflp,
               "wave_use_sflp feeds the wave chain from the on-chip fusion, and "
               "kEnableSflp has switched that block off - enable it, or select the "
               "software AHRS");
 
-// Which filter produced the vacc column, for ses.csv / cfg.csv.
+// Filtername (used in ses.csv / cfg.csv to show which filter produced the vacc column)
 static constexpr const char *wave_orientation_name = wave_use_sflp ? "SFLP" : WaveAhrs::kName;
 
 // -----------------------------------------------------------------------------
 // FIR decimation, two stages:
-//   stage 1: kImuOdrHz -> kRowOdrHz         480 -> 120, D = 4    (imu.csv columns)
-//   stage 2: kRowOdrHz -> kWelchInputOdrHz  120 -> 10,  D = 12   (the Welch series)
+//   stage 1: kImuOdrHz -> kRowOdrHz         480 -> 80, D = 6    (imu.csv columns)
+//   stage 2: kRowOdrHz -> kWelchInputOdrHz  80 -> 10,  D = 8    (the Welch series)
 // Taps come from fir_coeffs.h, generated by firwin_lowpass() in tools/gen_fir_table.py.
 //
-// Neither stage assumes its decimation is an integer NUMBER OF SAMPLES: both are
-// time-driven and evaluate at the first sample at or past the centre - at most half an
+// Neither stage assumes its decimation is an integer number of samples: both are
+// time-driven and evaluate at the first sample at or past the centre
+
+//- at most half an
 // input period of jitter. What stage 2 does need is a whole number of ROWS per bucket,
 // or the bucket centres slide against the row grid; that is kRowOdrHz % kWelchInputOdrHz
 // below, where the offline mirror only warns.
 //
-// Both stages use cutoff = fs_out/2, so the taps depend on D alone as 1/(2*D) - two
-// stage-1 setups with the same ratio share a table. The table key is 10*D, which keeps
-// a factor like 9.6 an exact integer comparison.
+// Both stages use cutoff = fs_out/2 (for the sinc function) as default.
+// Could be set lower, but not higher. One point of fs_out is to represent as high 
+// a frequency as possible without aliasing, so the cutoff is fs_out/2 (Nyquist)
 // -----------------------------------------------------------------------------
-static constexpr float    kFirS1CutoffHz  = 0.5f * kRowOdrHz;   // fs_out/2, fir.py's convention
+
+// Do not change kFirS1CutoffHz and kFirS2CutoffHz without changing fir_coeffs (assumes cutoff = fs_out/2)
+static constexpr float    kFirS1CutoffHz  = 0.5f * kRowOdrHz;
 static constexpr float    kFirS2CutoffHz  = 0.5f * kWelchInputOdrHz;
 
-// Rows per bucket, straight from the two RATES - the period ratio would round.
+// FIR stage 2 - rows per bucket
 static constexpr uint16_t kFirS2Decim     = kRowOdrHz / kWelchInputOdrHz;
-// fir.py's dec//2 convention, in ms: floor(dec/2) rows past the bucket start. Exact for
-// an even dec, where it is simply half the bucket.
+
+// FIR group delay in seconds, for the imu.csv rows and the Welch input series.
 static constexpr uint16_t kFirS2CenterMs  = (uint16_t)(((uint32_t)(kFirS2Decim / 2) * 1000u) / kRowOdrHz);
 static constexpr float    kFirS1DelayS    = (float)kFirHalf / (float)kImuOdrHz;
 static constexpr float    kFirS2DelayS    = (float)kFirHalf / (float)kRowOdrHz;
 
+// Decimation factors x 10 for the FIR table lookup
 static constexpr uint16_t kFirS1DecimX10 = (uint16_t)((10u * kImuOdrHz) / kRowOdrHz);
 static constexpr uint16_t kFirS2DecimX10 = (uint16_t)(10u * kFirS2Decim);
 static constexpr const float *kFirCoeffsStage1 = firTapsForDecimX10(kFirS1DecimX10);
@@ -134,39 +116,44 @@ static constexpr const float *kFirCoeffsStage2 = firTapsForDecimX10(kFirS2DecimX
 
 static_assert(10u * kImuOdrHz % kRowOdrHz == 0,
               "kImuOdrHz/kRowOdrHz must land on a whole tenth - the table key is 10*D");
+
 static_assert(kFirCoeffsStage1 != nullptr,
               "no FIR table for kImuOdrHz/kRowOdrHz - add the ratio to DEFAULT_DECIM "
               "in tools/gen_fir_table.py and regenerate fir_coeffs.h");
+
 static_assert(kFirCoeffsStage2 != nullptr,
               "no FIR table for kRowOdrHz/kWelchInputOdrHz - add the ratio to DEFAULT_DECIM "
               "in tools/gen_fir_table.py and regenerate fir_coeffs.h");
+
 static_assert(kFirNtap % 2 == 1,
               "odd tap count - the group delay must be a whole number of samples");
+
 static_assert(kRowOdrHz % kWelchInputOdrHz == 0,
               "stage 2 must decimate a whole number of rows - fir.py assumes the same");
+
 static_assert(kRowOdrHz <= kImuOdrHz,
-              "the row rate is a DECIMATION of the raw stream - it cannot exceed kImuOdrHz");
+              "the row rate is a decimation of the raw stream - it cannot exceed kImuOdrHz");
+
 static_assert(kWelchInputOdrHz <= kRowOdrHz,
-              "the Welch input is a DECIMATION of the rows - it cannot exceed kRowOdrHz");
+              "the Welch input is a decimation of the rows - it cannot exceed kRowOdrHz");
+
 static_assert(wave_measurement_filter_warm_up > ((uint32_t)kFirNtap * 1000u) / kRowOdrHz + 2000,
               "warm-up must cover FIR start-up (1.29 s) plus AHRS convergence");
 
 // ---- Orientation delay ----
-// The quaternions are NOT filtered: attitude is already the output of a heavy low-pass
-// filter, so there is nothing to alias - and a linear FIR over
-// quaternion components neither preserves |q| = 1 nor survives the +-q sign ambiguity.
+// The quaternions from built in AHRS are not filtered in firmware.
+// Need to correct for delay when using the quaternions in the analysis and outputting to imu.csv.
+// Due to FIR, ax..gz describe the signal kFirHalf raw samples earlier than the imu row's timestamp.
 //
-// Need to correct for delay. Due to FIR, ax..gz describe the signal kFirHalf raw samples earlier than the row's timestamp.
-// Holding a plain latest-quaternion would make the row describe two different instants
-//
-// The AHRS steps once per raw sample, so the delay is the FIR group delay itself - no
-// conversion, nothing that has to divide evenly, zero residual phase error.
+// The AHRS steps once per raw sample, so the delay is the FIR group delay itself
 static constexpr uint16_t kQuatDelaySteps = kFirHalf;
 static constexpr uint16_t kQuatDelaySlots = kQuatDelaySteps + 1;
 
 // -----------------------------------------------------------------------------
-// Braking wave detection: linear |a| over threshold long enough within a window.
+// Braking wave detection (test): linear |a| over threshold long enough within a window.
 // Brown et al. (2018), threshold 𝛼 = 3.25 m s−2 => 33% of G
+// Adding the possibility to require this over a minimum number of samples in a row
+// to avoid potential false positives due to noise.
 // -----------------------------------------------------------------------------
 static constexpr float  kBrakeGThreshold = 1.0/3.0f;
 static constexpr double kBrakeThresholdMg2 =
@@ -180,18 +167,20 @@ static constexpr uint16_t kBrakeMinSamples =
 // Welch spectrum -> wave parameters
 //
 // On the 10 Hz vertical-acceleration series a 1024-sample segment gives
-// df = 10/1024 = 0.009766 Hz over 102.4 s, so a 30 min capture averages 67 segments at
+// df = 10/1024 = 0.009766 Hz over 102.4 s. A 30 min capture gives 66 segments at
 // 75 % overlap. 2048 resolves finer but halves the segment count to 32, leaving a
-// noisier PSD, and costs ~14 kB more RAM (the ring + psdAcc_ + the FFT scratch buffers)
-// - which matters here. A fetch-limited fjord peaks at 0.15-0.6 Hz, and 1024 places ~31
-// bins across a 0.3 Hz peak.
+// potential noisier PSD, and costs ~14 kB more RAM (the ring + psdAcc_ + the FFT scratch buffers)
+// A fetch-limited fjord peaks at 0.15-0.6 Hz, and 1024 places ~31 bins across a 0.3 Hz peak.
 //
-// welch_bins in common_config.h is the WIRE-FORMAT capacity, so the transmitted
-// spectrum is coarser than the analysis - see the transmitted slice further down.
+// welch_bins in common_config.h is the wire-format (message) capacity, so the transmitted
+// spectrum is coarser than the analysis
 // -----------------------------------------------------------------------------
 static constexpr uint16_t kWelchSegLen     = 1024;
 static constexpr uint16_t kWelchOverlapDiv = 4;      // step = seglen/4 => 75% overlap
 static_assert((kWelchSegLen & (kWelchSegLen - 1)) == 0, "kWelchSegLen must be a power of two");
+
+// PIF TODO
+
 
 /*
   RING SLACK: why the segment buffer is 8 samples larger than a segment.
@@ -225,20 +214,31 @@ static_assert(kWelchRingSlack >= ((uint32_t)kFifoDepthWords * kWelchInputOdrHz
 
 static constexpr float kPsdDfHz = (float)kWelchInputOdrHz / kWelchSegLen;  // 0.009766 Hz per bin
 
+// Welch window type
 enum class WindowType { Hann, Hamming };
 static constexpr WindowType kWelchWindow = WindowType::Hann;
 
 // Low-frequency half-cosine taper (Kohout / Tucker & Pitt 2001) on the elevation PSD.
-static constexpr float kTaperF1 = 0.03f;   // T=0 below
-static constexpr float kTaperF2 = 0.05f;   // T=1 above
+//static constexpr float kTaperF1 = 0.03f;   // T=0 below
+//static constexpr float kTaperF2 = 0.05f;   // T=1 above
+
+// Taper in in-shore measurements based on Skjærhalden seems to be around 0.05-0.1 Hz
+// Using that so that we do not over-estimate the significant wave height
+static constexpr float kTaperF1 = 0.05f;   // T=0 below
+static constexpr float kTaperF2 = 0.1f;    // T=1 above
+
 static_assert(kTaperF1 < kTaperF2 && kTaperF2 <= kWaveFMax, "need kTaperF1 < kTaperF2 <= kWaveFMax");
 
 // -----------------------------------------------------------------------------
-// Transmitted spectrum slice. Each wire bin is the BAND AVERAGE of kSpecBinGroup PSD
+// Transmitted spectrum slice. Each wire bin is the average of kSpecBinGroup PSD
 // bins, so the moments and Tp keep the full kPsdDfHz while the message spans
 // kPsdMinFreq..kPsdMaxFreq. Averaging preserves the energy.
 // -----------------------------------------------------------------------------
+
+// If we are to send the PSD or not (TODO move to config.h?)
 static constexpr bool  kSendPsd    = true;
+
+// Min and max frequencies to transmit
 static constexpr float kPsdMinFreq = 0.03f;
 static constexpr float kPsdMaxFreq = 2.0f;
 static_assert(kPsdMinFreq < kPsdMaxFreq, "the transmitted band would be empty");
@@ -246,6 +246,8 @@ static_assert(kPsdMaxFreq <= kWaveFMax,
               "the transmitted spectrum would reach past the analysed band and be "
               "normalised against a peak that never saw it - raise kWaveFMax or lower "
               "kPsdMaxFreq");
+
+// PIF TODO
 
 // PSD bins spanned by kPsdMaxFreq. Truncated rather than rounded: 1.0 Hz is 102.4 bins,
 // and bin 102 (0.9961 Hz) is the last that still fits inside the request. Everything

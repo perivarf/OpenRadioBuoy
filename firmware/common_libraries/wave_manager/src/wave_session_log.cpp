@@ -350,7 +350,6 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("orientation_name,");   f.println(analyzer_.orientationName());
 
   f.print("ahrs_rate_hz,");       f.println(kAhrsInputOdrHz, 2);
-  f.print("ahrs_rate_cap_hz,");   f.println(kAhrsInputOdrCapHz);
 
   f.print("quat_decimation,hold"); f.println();
   f.print("quat_delay_s,");       f.println(kFirS1DelayS, 6);

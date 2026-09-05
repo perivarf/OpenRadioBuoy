@@ -6,7 +6,7 @@
 
 Lsm6dsvDevice *Lsm6dsvDevice::s_self = nullptr;
 
-// Interrupt context: set the flag and return.
+// Interrupt Service Routine: set the flag and return.
 void Lsm6dsvDevice::isrTrampoline() {
   if (s_self) s_self->fifoFlag_ = true;
 }
@@ -15,21 +15,25 @@ Lsm6dsvDevice::Lsm6dsvDevice()
     : imu_(&SPI, (int)SPI_CS_IMU_PIN, kImuSpiHz) { s_self = this; }
 
 // -----------------------------------------------------------------------------
-// Bring-up and configuration
+// Setup
 // -----------------------------------------------------------------------------
 bool Lsm6dsvDevice::begin(Print &dbg) {
+
   // Keep CS high before any bus activity
   pinMode(SPI_CS_IMU_PIN, OUTPUT);
   digitalWrite(SPI_CS_IMU_PIN, HIGH);
 
+  // Initialise the SPI bus, check that the sensor answers
   if (imu_.begin() != LSM6DSV16X_OK) {
     dbg.println("LSM6DSV: begin() failed - check SPI wiring/CS");
     return false;
   }
   dbg.println("LSM6DSV: begin() OK");
 
+  // Configure
   configure();
 
+  // Set up use of interrupt pin for FIFO watermark
   if (kImuUseInt1) {
     // pinMode before attachInterrupt, or the ISR never fires.
     pinMode(INT1_IMU_PIN, INPUT);
@@ -40,6 +44,7 @@ bool Lsm6dsvDevice::begin(Print &dbg) {
   return true;
 }
 
+// Configuration
 void Lsm6dsvDevice::configure() {
   imu_.Enable_X();      // accelerometer
   imu_.Enable_G();      // gyroscope
@@ -61,9 +66,7 @@ void Lsm6dsvDevice::configure() {
   imu_.FIFO_Set_G_BDR((float)kImuOdrHz);
 
   // SFLP is the AHRS built into the LSM6DSV16X: a quaternion rotating the sensor frame
-  // into the gravity frame, batched into the FIFO alongside accel and gyro. It can also
-  // return an estimated gyro bias, and Set_SFLP_GBIAS(x, y, z) in rad/s can inject a
-  // known one at start to speed up convergence.
+  // into the gravity frame, batched into the FIFO alongside accel and gyro. 
   if (kEnableSflp) {
     imu_.Enable_Rotation_Vector();
     imu_.Set_SFLP_ODR(kSflpOdrHz);
@@ -73,15 +76,15 @@ void Lsm6dsvDevice::configure() {
     imu_.Set_SFLP_Batch(false, false, false);
   }
 
-  // Drive INT1 high once the FIFO holds kFifoWatermark words, so the drain runs on the
-  // sensor's cadence rather than the main loop's. INT1_CTRL has no setter in the
-  // wrapper, hence the raw register write.
+  // Interrupt
+  // INT1_CTRL has no setter in the wrapper, therefore the raw register write.
   if (kImuUseInt1) {
     imu_.FIFO_Set_Watermark_Level((uint8_t)kFifoWatermark);
     imu_.Write_Reg(kInt1CtrlReg, kInt1FifoTh);
   }
 }
 
+// Method to check if the IMU is alive by reading registers
 bool Lsm6dsvDevice::checkAlive(Print &dbg) {
   uint8_t drdy = 0;
   const uint32_t deadline = millis() + 100;
@@ -106,16 +109,19 @@ bool Lsm6dsvDevice::checkAlive(Print &dbg) {
   return true;
 }
 
+// Start streaming: FIFO fills, watermark flag cleared
 void Lsm6dsvDevice::startStreaming() {
   fifoFlag_ = false;
   imu_.FIFO_Set_Mode(LSM6DSV16X_STREAM_MODE);
 }
 
+// Flush the FIFO and clear the watermark flag
 void Lsm6dsvDevice::bypassFifo() {
   imu_.FIFO_Set_Mode(LSM6DSV16X_BYPASS_MODE);
   fifoFlag_ = false;
 }
 
+// Shutdown the imu sensor by disabling the accelerometer and gyroscope.
 void Lsm6dsvDevice::shutdown() {
   imu_.Disable_G();
   imu_.Disable_X();
@@ -126,13 +132,14 @@ void Lsm6dsvDevice::shutdown() {
 // -----------------------------------------------------------------------------
 void Lsm6dsvDevice::burstRead(uint8_t startReg, uint8_t *buf, uint16_t len) {
   SPI.beginTransaction(SPISettings(kImuSpiHz, MSBFIRST, SPI_MODE3));
-  digitalWrite(SPI_CS_IMU_PIN, LOW);
+  digitalWrite(SPI_CS_IMU_PIN, LOW); // Enable receive
   SPI.transfer(startReg | 0x80);    // 0x80 = READ bit
-  SPI.transfer(nullptr, buf, len);  // len dummy bytes out, the answer straight into buf
-  digitalWrite(SPI_CS_IMU_PIN, HIGH);
+  SPI.transfer(nullptr, buf, len);
+  digitalWrite(SPI_CS_IMU_PIN, HIGH); // Disable receive
   SPI.endTransaction();
 }
 
+// Read status from IMU (number of samples in FIFO, overrun flags etc)
 ImuFifoStatus Lsm6dsvDevice::status() {
   uint8_t sb[2] = {0, 0};
   burstRead(kFifoStatus1Reg, sb, 2);
@@ -143,10 +150,13 @@ ImuFifoStatus Lsm6dsvDevice::status() {
       (sb[1] & 0x08u) != 0};
 }
 
+// Reset the burst buffer index and fill count
 void Lsm6dsvDevice::resetBurst() {
-  burstFill_ = burstIdx_ = 0;
+  burstFill_ = 0;
+  burstIdx_ = 0;
 }
 
+// Burst-fill the buffer with up to n words, or the maximum the buffer can hold.
 void Lsm6dsvDevice::fillBurst(uint16_t n) {
   burstFill_ = n < kFifoBurstWords ? n : kFifoBurstWords;
   burstIdx_  = 0;
