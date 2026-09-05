@@ -157,6 +157,9 @@ void Lsm6dsvDevice::resetBurst() {
 }
 
 // Burst-fill the buffer with up to n words, or the maximum the buffer can hold.
+// FIFO address from 0x78 to 0x7E, 7 bytes per word
+// Reading 0x7E (kFifoDataOutTagReg) is what advances the FIFO, so a continuous read past it rolls the
+// address back to the tag register and the next word follows in the same transaction
 void Lsm6dsvDevice::fillBurst(uint16_t n) {
   burstFill_ = n < kFifoBurstWords ? n : kFifoBurstWords;
   burstIdx_  = 0;
