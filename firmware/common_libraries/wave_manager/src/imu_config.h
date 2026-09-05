@@ -52,18 +52,13 @@ static constexpr bool kUseLpf2 = true;
 // How far above kWaveFMax the cutoff must sit. 4x keeps the in-band droop small while
 // landing near the 5 Hz Nyquist of the 10 Hz series this is decimated to, so LPF2 does
 // the anti-alias work up front rather than instead of the FIR stages.
-static constexpr float kLpf2Margin = 4.0f;
-static constexpr float kLpf2MinHz  = kLpf2Margin * kWaveFMax;
 
-// Strongest divisor that still clears kLpf2MinHz. At kWaveFMax 1.0 that is
-// 200/100/45/20 for ODR 960/480/240/120.
-static constexpr uint16_t kLpf2Div      = lpf2DivForOdr(kImuOdrHz, kLpf2MinHz);
-static constexpr uint8_t  kLpf2Bw       = lpf2BwForDiv(kLpf2Div);
+// Strongest divisor that still clears the bandwidth
+// Chosen bandwidth
+static constexpr float  kLpf2DivWanted = 2.0f;  // Asking for Nyquist, but can be higher if we want more filtering
+static constexpr uint16_t  kLpf2Div       = lpf2DivForOdr(kImuOdrHz, (uint16_t)((float)kImuOdrHz / kLpf2DivWanted), kImuAccMode);
+static constexpr uint16_t  kLpf2Bw       = lpf2DivEnum(kLpf2Div);
 static constexpr float    kLpf2CutoffHz = (float)kImuOdrHz / kLpf2Div;
-
-static_assert(kLpf2CutoffHz >= kLpf2MinHz,
-              "no LPF2 divisor clears kWaveFMax by kLpf2Margin - raise kImuOdrHz, "
-              "lower kWaveFMax, or accept a smaller margin");
 
 // -----------------------------------------------------------------------------
 // Accelerometer and gyro range. 

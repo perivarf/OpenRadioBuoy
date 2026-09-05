@@ -8,43 +8,21 @@
 // PIF TODO
 
 /*
-  The IMU, and the only place that knows which one it is.
-
-  Everything sensor-specific lives here: register addresses, FIFO geometry, the tag
-  numbers, the sensitivity and filter tables, the SPI transactions, the half-float
-  decoding and the INT1 watermark plumbing. ImuSampler above it deals in ImuFifoWord and
-  knows none of it, so a different sensor is a new file like this one plus the ImuDevice
-  alias at the bottom - not an edit to the sampling pipeline.
-
-  This file holds what the LSM6DSV16X IS; imu_config.h holds what we ASK OF IT - the ODR,
-  the ranges, the watermark - and the timing budget those choices produce. The split is
-  what keeps the include direction one-way: imu_config.h includes this file, so nothing
-  here may reach back up into config.
-
-  Shares the global Arduino SPI object (sd_writer brings up SPI1) rather than owning a
-  bus. NB: the bus does NOT run at kImuSpiHz. spi_init picks the fastest prescaler that
-  does not exceed the request, so 8 MHz against a 48 MHz PCLK2 lands on /8 = 6 MHz. /4
-  would be 12 MHz, past the sensor's 10 MHz rating, so 6 MHz is the ceiling and raising
-  kImuSpiHz buys nothing.
+  IMU Sensor specifics found here.
 */
 
-// =============================================================================
-// Device facts. Datasheet DS13476 - values, not choices.
-// =============================================================================
-
-// SPI clock request. The LSM6DSV16X is rated max 10 MHz - exceeding it may give corrupt
-// reads. spi_init picks the fastest supported rate on or below.
+// SPI clock request. The LSM6DSV16X is rated max 10 MHz - exceeding it may give corrupt reads
 static constexpr uint32_t kImuSpiHz = 8000000;
 
 // -----------------------------------------------------------------------------
-// FIFO geometry
+// FIFO
 // -----------------------------------------------------------------------------
 
 // FIFO depth in words: 1.5 kB of data / 6 payload bytes = 256 levels.
 static constexpr uint16_t kFifoDepthWords = 256;
 
-// One FIFO word off the bus: the tag byte plus its six payload bytes. The raw log stores
-// a word verbatim, so log_config.h's kRawWordBytes is this same number.
+// Size of one FIFO word (off the bus, ie. without address byte): 
+// the tag byte plus its six payload bytes. 
 static constexpr uint8_t kImuFifoWordBytes = 7;
 
 /*
@@ -56,18 +34,16 @@ static_assert(kFifoBurstWords > 0 && kFifoBurstWords <= kFifoDepthWords,
               "a burst cannot be empty, nor larger than the FIFO it reads from");
 
 // -----------------------------------------------------------------------------
-// Register map. Raw addresses because the Arduino wrapper either exposes no setter, or
-// exposes one that loses information - see the notes at each use.
+// Register map
 // -----------------------------------------------------------------------------
 
-// INT1_CTRL (0x0D): which events the sensor drives out on the INT1 pin. No wrapper
-// setter, only Write_Reg.
+// INT1_CTRL (0x0D): which events the sensor drives out on the INT1 pin. 
+// Found no wrapper setter for this, so must use Write_Reg.
 static constexpr uint8_t kInt1CtrlReg = 0x0D;
 static constexpr uint8_t kInt1FifoTh  = 0x08;  // bit 3: FIFO watermark reached
 
 // FIFO_STATUS1/FIFO_STATUS2. Read as a 2-byte burst rather than through the wrapper:
-// lsm6dsv16x_fifo_status_get drops FIFO_OVR_LATCHED, and that bit is reset by the very
-// read that drops it, so going through the wrapper makes it permanently unobservable.
+// lsm6dsv16x_fifo_status_get drops FIFO_OVR_LATCHED
 static constexpr uint8_t kFifoStatus1Reg = 0x1B;
 
 // FIFO_DATA_OUT_TAG. The six payload registers follow it (0x79..0x7E), and reading
@@ -75,17 +51,17 @@ static constexpr uint8_t kFifoStatus1Reg = 0x1B;
 // and payload out together, which is what makes the pairing atomic.
 static constexpr uint8_t kFifoDataOutTagReg = 0x78;
 
-// FIFO tag_sensor values (datasheet table 210 lists the rest). These are the tag byte
-// already shifted down by 3, which is what popWord compares against.
+// Relevant FIFO tag_sensor values
 static constexpr uint8_t kTagGyro          = 0x01;
 static constexpr uint8_t kTagAccel         = 0x02;
 static constexpr uint8_t kTagSflpRotation  = 0x13;   // SFLP rotation vector
 
 // -----------------------------------------------------------------------------
-// Full-scale range. The enum value IS the number passed to Set_X_FS/Set_G_FS (g / dps),
-// and the raw-FIFO sensitivity is derived from it, so range and scaling cannot drift
-// apart. A larger range captures bigger motion at coarser resolution. Which range is
-// SELECTED is imu_config.h's business; the ladder and its sensitivities are the part's.
+// List of potential ranges for accelerometer and gyroscope. 
+// The enum value is the number passed to Set_X_FS/Set_G_FS (g / dps),
+// and the raw-FIFO sensitivity is derived from it
+// A larger range captures bigger motion at coarser resolution. 
+// The range used is selected in imu_config.h
 // -----------------------------------------------------------------------------
 enum class AccelFS : uint8_t  { G2 = 2, G4 = 4, G8 = 8, G16 = 16 };
 enum class GyroFS  : uint16_t { DPS125 = 125, DPS250 = 250, DPS500 = 500,
@@ -107,27 +83,32 @@ static constexpr float gyrSensMdpsPerLsb(GyroFS fs) {
 }
 
 // -----------------------------------------------------------------------------
-// Accel LPF2. The cutoff is a FRACTION OF ODR (CTRL8.hp_lpf2_xl_bw), so pinning one
-// enum makes it move with the ODR - STRONG is 9.6 Hz at 960 Hz but 1.2 Hz at 120. The
-// hardware offers only these eight divisors, so the choice is a pick from the list.
-// minHz comes from the analysed band and therefore from imu_config.h, hence a parameter
-// rather than a constant read from file scope.
+// Accel LPF2 - Return enum value for the strongest LPF2 (largest divisor) whose cutoff still clears bandwidth.
+// From datasheet
 // -----------------------------------------------------------------------------
 
-// Strongest LPF2 (largest divisor) whose cutoff still clears minHz.
-static constexpr uint16_t lpf2DivForOdr(uint16_t odr, float minHz) {
-  return (float)odr >= 800.0f * minHz ? 800
-       : (float)odr >= 400.0f * minHz ? 400
-       : (float)odr >= 200.0f * minHz ? 200
-       : (float)odr >= 100.0f * minHz ? 100
-       : (float)odr >=  45.0f * minHz ?  45
-       : (float)odr >=  20.0f * minHz ?  20
-       : (float)odr >=  10.0f * minHz ?  10
-       :                                   4;
+// Strongest LPF2 (largest divisor) whose cutoff still clears bandwidth.
+static constexpr uint16_t lpf2DivForOdr(uint16_t odr, uint16_t bandwidth, uint16_t acc_power_mode) {
+
+  if (acc_power_mode == LSM6DSV16X_ACC_LOW_POWER_MODE1)
+    return LSM6DSV16X_XL_ULTRA_LIGHT;
+
+  const uint32_t ratio = (uint32_t)odr / bandwidth;
+
+  const uint16_t div = ratio >= 800 ? 800
+                      : ratio >= 400 ? 400
+                      : ratio >= 200 ? 200
+                      : ratio >= 100 ? 100
+                      : ratio >=  45 ?  45
+                      : ratio >=  20 ?  20
+                      : ratio >=  10 ?  10
+                      :                  4;
+
+  return div;
 }
 
-// Divisor -> CTRL8.hp_lpf2_xl_bw register value
-static constexpr uint8_t lpf2BwForDiv(uint16_t div) {
+static constexpr uint16_t lpf2DivEnum(uint16_t div) {
+
   return div ==   4 ? LSM6DSV16X_XL_ULTRA_LIGHT   // ODR/4
        : div ==  10 ? LSM6DSV16X_XL_VERY_LIGHT    // ODR/10
        : div ==  20 ? LSM6DSV16X_XL_LIGHT         // ODR/20
@@ -138,9 +119,9 @@ static constexpr uint8_t lpf2BwForDiv(uint16_t div) {
        :              LSM6DSV16X_XL_XTREME;       // ODR/800
 }
 
+
 // -----------------------------------------------------------------------------
-// Power mode. The driver's enums stay on this side of the split - config asks for
-// low-power or not, and gets back whatever this part calls it.
+// Power mode. Config asks for low-power or not
 // -----------------------------------------------------------------------------
 static constexpr LSM6DSV16X_ACC_Operating_Mode_t accModeFor(bool lowPower) {
   return lowPower ? LSM6DSV16X_ACC_LOW_POWER_MODE1 : LSM6DSV16X_ACC_HIGH_PERFORMANCE_MODE;

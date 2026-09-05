@@ -133,7 +133,7 @@ void Lsm6dsvDevice::shutdown() {
 void Lsm6dsvDevice::burstRead(uint8_t startReg, uint8_t *buf, uint16_t len) {
   SPI.beginTransaction(SPISettings(kImuSpiHz, MSBFIRST, SPI_MODE3));
   digitalWrite(SPI_CS_IMU_PIN, LOW); // Enable receive
-  SPI.transfer(startReg | 0x80);    // 0x80 = READ bit
+  SPI.transfer(startReg | 0x80);     // 0x80 = READ bit
   SPI.transfer(nullptr, buf, len);
   digitalWrite(SPI_CS_IMU_PIN, HIGH); // Disable receive
   SPI.endTransaction();
@@ -164,12 +164,18 @@ void Lsm6dsvDevice::fillBurst(uint16_t n) {
 }
 
 // -----------------------------------------------------------------------------
-// Payload decoding
+// Payload decoding 
+// TODO PIF: Consider removing and use the wrapper's FIFO_Get_X_Axes and FIFO_Get_Rotation_Vector instead
+// It is slightly slower since we then need to call the functions for each word,
+// but less complexity and less code to maintain.
 // -----------------------------------------------------------------------------
 
 // Payload -> three int16 in LSB order. The driver truncates its own conversion to
 // int32 (FIFO_Get_X_Axes returns whole mg), which throws away the sub-LSB range the
 // sensitivity actually provides; decoding here keeps it in float.
+// 
+// Example: low_byte = 0x34 (at p[2*i]) and high_byte = 0x12 (at p[2*i+1]) gives
+// uint16_t val = (uint16_t)0x34 | ((uint16_t)0x12 << 8);  // 0x34 | (0x12<<8) = 0x1234 = 4660
 static inline void payloadToAxes(const uint8_t p[6], float sens, float out[3]) {
   for (uint8_t i = 0; i < 3; i++) {
     int16_t raw = (int16_t)((uint16_t)p[2 * i] | ((uint16_t)p[2 * i + 1] << 8));
@@ -177,13 +183,15 @@ static inline void payloadToAxes(const uint8_t p[6], float sens, float out[3]) {
   }
 }
 
-// IEEE half -> float, bit for bit as the driver's npy_halfbits_to_floatbits does. The
-// SFLP words are three halves; the driver's own decoder is private, so it is mirrored
+// IEEE half -> float, bit for bit as the deriver does (LSM6DSV16XSensor.cpp - npy_halfbits_to_floatbits).
+// The SFLP words are three halves; the driver's own decoder is private, so it is implemented
 // here rather than called.
 static inline float halfToFloat(uint16_t h) {
-  union { float f; uint32_t b; } c;
+  union { float f; uint32_t b; } c; // For simpler bit access
+
   const uint32_t sgn = ((uint32_t)h & 0x8000u) << 16;
   const uint16_t exp = h & 0x7c00u;
+  
   if (exp == 0x0000u) {            // zero or subnormal
     uint16_t sig = h & 0x03ffu;
     if (sig == 0) { c.b = sgn; return c.f; }
@@ -226,7 +234,7 @@ static inline void payloadToQuat(const uint8_t p[6], float q[4]) {
   is shifted down by 3 here, and that shifted value is what the raw log stores.
 
   Decoding is unconditional: a word is exactly one kind, so the branch below does the
-  same work the caller's would have. Only Unknown skips it, having nothing to decode.
+  same work the caller's would have.
 */
 void Lsm6dsvDevice::popWord(ImuFifoWord &w, uint16_t remaining) {
   if (burstIdx_ == burstFill_) fillBurst(remaining);

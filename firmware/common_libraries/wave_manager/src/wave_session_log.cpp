@@ -304,7 +304,6 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("gyro_fs_dps,");        f.println((int)kGyroFS);
   f.print("lpf2_enabled,");       f.println(kUseLpf2 ? 1 : 0);
   f.print("lpf2_bw,");            f.println(kLpf2Bw);        // raw CTRL8 register value
-  f.print("lpf2_odr_div,");       f.println(kLpf2Div);
   f.print("lpf2_cutoff_hz,");     f.println(kLpf2CutoffHz, 2);
   // Tells a zero in the _sflp columns apart from a still buoy: 0 here means the fusion
   // block never ran, so those columns carry no information at all.

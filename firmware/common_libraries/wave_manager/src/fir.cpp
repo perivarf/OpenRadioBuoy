@@ -5,15 +5,18 @@ void FirDecimator::reset(void) {
   idx_ = 0;
 }
 
+
 void FirDecimator::push(float x) {
   z_[idx_] = x;
+
+  // z_ is a Circular buffer, so idx_ wraps around.
   idx_ = (uint16_t)(idx_ + 1 == kFirNtap ? 0 : idx_ + 1);
 }
 
 float FirDecimator::eval(void) const {
   // y[n] = sum_k c[k] * x[n-k]. A linear-phase FIR has c[k] == c[N-1-k], so the two
-  // samples that share a coefficient can be added before the multiply: 65 multiplies
-  // instead of 129. 
+  // samples that share a coefficient can be added before the multiply: 
+  // 65 multiplies instead of 129. 
 
   //TODO -> simplify i,j?
 
