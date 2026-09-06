@@ -388,7 +388,7 @@ uint8_t WaveManager::processReading(void) {
     Serial.print("[wave] processReading #"); Serial.println(readingID_);
     Serial.print("  brake_windows: ");    Serial.print(analyzer_.brakeRows());
     Serial.print(" / ");                  Serial.println(analyzer_.rows());
-    Serial.print("  vacc10Hz_samples: "); Serial.println(analyzer_.samples10Hz());
+    Serial.print("  vacc_welch_samples: "); Serial.println(analyzer_.samplesWelch());
     Serial.print("  welch_segments: ");   Serial.print(analyzer_.segments());
     Serial.print(" (seglen=");            Serial.print((int)kWelchSegLen); Serial.println(")");
     if (ok) {

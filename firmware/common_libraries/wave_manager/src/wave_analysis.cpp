@@ -120,7 +120,7 @@ static inline float lowFreqTaper(float f) {
 void StreamAnalyzer::begin(void) {
   fir2_.reset();
   curBucket_ = -1; bucketDone_ = false;
-  n10_ = nData_ = nBrake_ = nWarm_ = 0;
+  nWelch_ = nData_ = nBrake_ = nWarm_ = 0;
   head_ = tail_ = fill_ = 0; segPending_ = false;
   nSeg_ = 0; nRingFull_ = 0;
   for (int k = 0; k <= kWelchSegLen / 2; k++) psdAcc_[k] = 0.0f;
@@ -208,7 +208,7 @@ void StreamAnalyzer::ingest(const ImuRow &r) {
   if (!bucketDone_ && t >= bucket * (long)kWelchInputPeriodMs + (long)kFirS2CenterMs) {
     float s = fir2_.eval();
     pushWelch(isfinite(s) ? s : 0.0f);
-    n10_++;
+    nWelch_++;
     bucketDone_ = true;
   }
 }

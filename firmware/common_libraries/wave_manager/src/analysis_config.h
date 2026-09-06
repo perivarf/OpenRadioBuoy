@@ -63,11 +63,11 @@ static constexpr float    kAhrsInputOdrHz    = (float)kImuOdrHz;
 static constexpr bool wave_use_sflp = false;
 
 // The software AHRS: Madgwick or KalmanAhrs
-using WaveAhrs = Madgwick;
-inline WaveAhrs makeWaveAhrs(void) { return WaveAhrs{kMadgwickBeta}; }
+using AhrsFilter = Madgwick;
+inline AhrsFilter makeAhrsFilter(void) { return AhrsFilter{kMadgwickBeta}; }
 
-//using WaveAhrs = KalmanAhrs;
-//inline WaveAhrs makeWaveAhrs(void) { return WaveAhrs{kKalmanParams}; }
+//using AhrsFilter = KalmanAhrs;
+//inline AhrsFilter makeAhrsFilter(void) { return AhrsFilter{kKalmanParams}; }
 
 static_assert(kEnableSflp || !wave_use_sflp,
               "wave_use_sflp feeds the wave chain from the on-chip fusion, and "
@@ -75,7 +75,7 @@ static_assert(kEnableSflp || !wave_use_sflp,
               "software AHRS");
 
 // Filtername (used in ses.csv / cfg.csv to show which filter produced the vacc column)
-static constexpr const char *wave_orientation_name = wave_use_sflp ? "SFLP" : WaveAhrs::kName;
+static constexpr const char *wave_orientation_name = wave_use_sflp ? "SFLP" : AhrsFilter::kName;
 
 // -----------------------------------------------------------------------------
 // FIR decimation, two stages:
@@ -179,40 +179,36 @@ static constexpr uint16_t kWelchSegLen     = 1024;
 static constexpr uint16_t kWelchOverlapDiv = 4;      // step = seglen/4 => 75% overlap
 static_assert((kWelchSegLen & (kWelchSegLen - 1)) == 0, "kWelchSegLen must be a power of two");
 
-// PIF TODO
-
 
 /*
-  RING SLACK: why the segment buffer is 8 samples larger than a segment.
+  Ring overhang: why the segment buffer is kWelchRingSlack samples larger than a segment.
 
-  accumSegment() is the longest uninterruptible stretch in the capture loop - 88 ms. It
+  accumSegment() is the longest uninterruptible stretch in the capture loop. It
   is deferred out of the FIFO pop loop to the capture loop, so it starts with the drain
-  finished and the whole depth available (220 ms) instead of with up to
-  kFifoWatermark - 1 words still standing (165 ms). Same work, 55 ms more margin.
+  finished.
 
   The deferral requires that the segment is not overwritten in the meantime, and the
   slack is all that is for. Not a whole 256-sample step - only the samples that can
   arrive between the segment filling (inside the pop loop) and the deferred call running
   (right after the same update() returns). That window is the rest of one drain, and the
-  worst drain is a full FIFO:
+  worst drain is a full FIFO.
 
-    kFifoDepthWords / kFifoWordsPerSec * kWelchInputOdrHz = 256/1200 * 10 = 2.1 samples
+  Only acceleration measurements feed the Welch chain, so the worst case is a full FIFO
+  of nothing but accel and gyro words (assuming same ODR), decimated to the Welch rate:
 
-  8 covers it with margin, at 8 floats = 32 B - against 4096 B for a second copy of the
-  segment, which is why this is a ring and not a double buffer.
+    kWelchRingOverhang = kFifoDepthWords * kWelchInputOdrHz / (kImuOdrHz * 2) + 1 
+                        = 256 * 10 / (480*2) + 1 = 3 samples
+
+  kWelchRingMargin adds a fixed margin on top.
 */
-static constexpr uint16_t kWelchRingSlack = 8;
-static constexpr uint16_t kWelchRingLen   = kWelchSegLen + kWelchRingSlack;   // 1032
+static constexpr uint16_t kWelchRingOverhang =
+    (uint16_t)((uint32_t)kFifoDepthWords * kWelchInputOdrHz / (kImuOdrHz*2)) + 1;
 
-// Rounded UP: half a sample still needs a whole slot. This can break if someone lowers
-// the ODR (fewer words/s, so a longer drain) or raises kWelchInputOdrHz.
-static_assert(kWelchRingSlack >= ((uint32_t)kFifoDepthWords * kWelchInputOdrHz
-                                  + kFifoWordsPerSec - 1u) / kFifoWordsPerSec,
-              "kWelchRingSlack must cover one worst-case drain's worth of Welch "
-              "samples, or a full segment is overwritten before the deferred "
-              "accumSegment consumes it");
+static constexpr uint16_t kWelchRingMargin = 5; // Nice to have some extra margin incase the FIFO fills up with more words during drain
 
-static constexpr float kPsdDfHz = (float)kWelchInputOdrHz / kWelchSegLen;  // 0.009766 Hz per bin
+static constexpr uint16_t kWelchRingLen   = kWelchSegLen + (kWelchRingOverhang + kWelchRingMargin);
+
+static constexpr float kPsdDfHz = (float)kWelchInputOdrHz / kWelchSegLen;
 
 // Welch window type
 enum class WindowType { Hann, Hamming };
@@ -247,8 +243,6 @@ static_assert(kPsdMaxFreq <= kWaveFMax,
               "normalised against a peak that never saw it - raise kWaveFMax or lower "
               "kPsdMaxFreq");
 
-// PIF TODO
-
 // PSD bins spanned by kPsdMaxFreq. Truncated rather than rounded: 1.0 Hz is 102.4 bins,
 // and bin 102 (0.9961 Hz) is the last that still fits inside the request. Everything
 // below floors as well, so the transmitted band never exceeds kPsdMaxFreq.
@@ -256,25 +250,26 @@ static constexpr size_t kPsdMaxBin = (size_t)(kPsdMaxFreq / kPsdDfHz);
 
 // First PSD bin whose lower edge clears kPsdMinFreq
 static constexpr size_t kPsdMinBinFloor = (size_t)(kPsdMinFreq / kPsdDfHz);
-static constexpr size_t kPsdMinBin =
-    kPsdMinBinFloor + ((float)kPsdMinBinFloor * kPsdDfHz < kPsdMinFreq ? 1u : 0u);
 
-static constexpr size_t welch_bin_min {kPsdMinBin};
+// Adjusting for the fact that the bin's lower edge is at kPsdMinBinFloor * kPsdDfHz, which may be below kPsdMinFreq
+static constexpr size_t welch_bin_min =
+    kPsdMinBinFloor + ((float)kPsdMinBinFloor * kPsdDfHz < kPsdMinFreq ? 1u : 0u);
 
 static_assert(kPsdMaxBin > welch_bin_min,
               "kPsdMinFreq and kPsdMaxFreq are inside the same PSD bin - widen the "
               "band, or raise kWelchSegLen so the bins get finer");
 
-// welch_bins is the SIZE of wave_spectrum[] and the message budget,
+// welch_bins is the size of wave_spectrum[] and the message budget,
 // not the actual count. num_bins rides in the message and the spectrum is the last
 // field, so shipping fewer bins simply makes the message shorter (see readings.h).
-//
+
 // kSpecBinGroup is the smallest group that squeezes welch_bin_min..kPsdMaxBin into that
 // capacity, so the transmitted resolution is the finest the budget allows. The count is
 // then however many whole groups fit below kPsdMaxBin.
 static constexpr size_t kSpecBinGroup =
     (kPsdMaxBin - welch_bin_min + welch_bins - 1) / welch_bins;
 static constexpr size_t kSpecNBins     = (kPsdMaxBin - welch_bin_min) / kSpecBinGroup;
+
 static constexpr size_t welch_bin_max  = welch_bin_min + kSpecNBins * kSpecBinGroup;
 static constexpr float  kSpecBandMinHz = welch_bin_min * kPsdDfHz;
 static constexpr float  kSpecBandMaxHz = welch_bin_max * kPsdDfHz;

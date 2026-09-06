@@ -21,7 +21,7 @@ struct ImuRow {
   float qwSflp, qxSflp, qySflp, qzSflp; // on-chip SFLP quaternion, delay-matched to the above
   uint8_t braking;                      // 1 if linear |a| > threshold long enough
   uint8_t fifoOvf;                      // 1 if the FIFO overflowed while this window was open
-  float qw, qx, qy, qz;                 // the selected WaveAhrs (Madgwick/Kalman) quaternion,
+  float qw, qx, qy, qz;                 // the selected AhrsFilter (Madgwick/Kalman) quaternion,
                                         // delay-matched to the above
   float vacc, vaccSflp;                 // unfiltered vertical linear accel (m/s^2) at the same instant (center())
   float vaccFir, vaccSflpFir;           // the same two series, FIR-decimated (eval())

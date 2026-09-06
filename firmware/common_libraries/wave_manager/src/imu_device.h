@@ -5,8 +5,6 @@
 #include <SPI.h>
 #include <LSM6DSV16XSensor.h>
 
-// PIF TODO
-
 /*
   IMU Sensor specifics found here.
 */

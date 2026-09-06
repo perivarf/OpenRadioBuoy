@@ -5,6 +5,9 @@
 #include "IWatchdog.h"
 #include "sd_writer.h"
 
+
+// PIF TODO
+
 /*
   Everything WaveManager writes to the sd-card: the session directory and its six CSV
   files, plus the reading-ID continuity that depends on the directory count.
@@ -29,7 +32,7 @@
 
 // imu.csv column contract. Naming convention, so a capture can be read without
 // consulting the firmware to find out which orientation a column came from:
-//   unsuffixed  = the SELECTED filter (WaveAhrs, or SFLP when wave_use_sflp)
+//   unsuffixed  = the SELECTED filter (AhrsFilter, or SFLP when wave_use_sflp)
 //   _sflp       = the on-chip SFLP rotation fusion, or ZERO throughout when
 //                 kEnableSflp is false and the block never ran - cfg.csv's
 //                 sflp_enabled is what separates that from a still buoy
@@ -449,7 +452,7 @@ void WaveManager::writeAnaCsv(bool ok, const WaveParams &params) {
   af.print("imu_rows,");         af.println(analyzer_.rows());
   af.print("warmup_rows,");      af.println(analyzer_.warmupRows());
   af.print("brake_windows,");    af.println(analyzer_.brakeRows());
-  af.print("vacc10hz_samples,"); af.println(analyzer_.samples10Hz());
+  af.print("vacc_welch_samples,"); af.println(analyzer_.samplesWelch());
 
   // Windows where no raw sample landed on the centre, so the FIR was read at the window
   // edge instead. Non-zero means FIFO gaps - judge a capture by it.
@@ -603,6 +606,7 @@ void WaveManager::serviceGps(uint32_t relMs) {
                  (uint32_t)f.minute * 10000UL +
                  (uint32_t)f.second * 100UL);
   gpsFile_.print(',');
+
   // The receiver's own epoch time, ms into the GPS week. rel_ms is when the firmware got
   // round to reading the frame - up to GPS_ddc_check_ms late, and later still behind an SD
   // stall - while this is when the solution was computed. utc above resolves to a whole
