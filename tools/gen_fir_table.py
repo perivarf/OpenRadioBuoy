@@ -40,7 +40,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import fir  # noqa: E402
+import fir
 
 # kImuOdrHz in {120,240,480,960} against kOutputRateHz in {50,100} gives stage 1;
 # kOutputRateHz against kVaccFsHz = 10 gives stage 2. Unused tables are dropped by the

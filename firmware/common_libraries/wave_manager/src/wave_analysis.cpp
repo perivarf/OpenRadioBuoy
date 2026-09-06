@@ -51,14 +51,10 @@ static void fft(float *re, float *im, int n) {
 
 /*
   Sum of the squared window weights - the normalisation that gives a windowed estimate
-  the right absolute level (without it a Hann window alone would drop m0 by ~2.67).
-
-  Summed from kWelchWindowTable rather than generated alongside it, deliberately: it is
-  then consistent with the very weights it normalises by construction, and there is no
-  second place where Python and C could have computed the scale slightly differently.
-  One pass of kWelchSegLen multiply-adds, once per capture, and no transcendentals.
+  the right absolute level.
+  Only done once per boot
 */
-static void ensureS2() {
+static void sumSquaredWelchWeights() {
   if (gS2Ready) return;
   double s2 = 0.0;
   for (int i = 0; i < kWelchSegLen; i++) {
@@ -88,7 +84,14 @@ static void ensureS2() {
   two, so % would be a division per sample inside the hottest loop in the analyzer.
 */
 static void accumSegment(const float *seg, uint16_t start, float *psdAcc) {
-  ensureS2();
+  
+  // Calling sumSquaredWelchWeights() to calculate the sum of squared window weights.
+  // It is done here to ensure that it is called at least once. However, it is 
+  // also called in StreamAnalyzer::begin() to ensure that it is done outside the capture loop 
+  // and not in the FIFO loop. The sums will only be calculated once, and the result is
+  // cached for future calls.
+  sumSquaredWelchWeights();
+
   const int N = kWelchSegLen;
   uint16_t j = start;
   for (int i = 0; i < N; i++) {
@@ -121,7 +124,9 @@ void StreamAnalyzer::begin(void) {
   head_ = tail_ = fill_ = 0; segPending_ = false;
   nSeg_ = 0; nRingFull_ = 0;
   for (int k = 0; k <= kWelchSegLen / 2; k++) psdAcc_[k] = 0.0f;
-  ensureS2();
+
+  // Kaller opp sumSquaredWelchWeights() her for the first time, so it is done outside the capture loop and not in the FIF loop.
+  sumSquaredWelchWeights();
 }
 
 // Push one sample into the ring. NO FFT from here - this runs inside the FIFO pop loop,
