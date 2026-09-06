@@ -25,12 +25,12 @@
 // The length and window type are baked into the values
 // If they are changed, then the firmware's static_assert will stop the build and say which one no longer matches.
 inline constexpr uint16_t kWelchWindowTableLen  = 1024;
-inline constexpr uint8_t  kWelchWindowTableKind = 0;   // WindowType::Hann
+inline constexpr WindowType  kWelchWindowTableKind = WindowType::Hann;   // WindowType::Hann
 
 static_assert(kWelchWindowTableLen == kWelchSegLen,
               "kWelchSegLen changed - regenerate welch_window.h with "
               "tools/gen_welch_window.py --seglen <n>");
-static_assert(kWelchWindowTableKind == (uint8_t)kWelchWindow,
+static_assert(kWelchWindowTableKind == kWelchWindow,
               "kWelchWindow changed - regenerate welch_window.h with "
               "tools/gen_welch_window.py --window <hann|hamming>");
 

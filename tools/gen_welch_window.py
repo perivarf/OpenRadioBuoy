@@ -19,7 +19,7 @@ import sys
 import numpy as np
 
 # Must follow enum class WindowType { Hann, Hamming } in wave_config.h
-WINDOW_KIND = {"hann": 0, "hamming": 1}
+WINDOW_KIND = {"hann": "WindowType::Hann", "hamming": "WindowType::Hamming"}
 
 # kWelchSegLen in wave_config.h. Mirrored here rather than read out of the header
 DEFAULT_SEGLEN = 1024
@@ -113,12 +113,12 @@ def main():
 // The length and window type are baked into the values
 // If they are changed, then the firmware's static_assert will stop the build and say which one no longer matches.
 inline constexpr uint16_t kWelchWindowTableLen  = {n};
-inline constexpr uint8_t  kWelchWindowTableKind = {kind};   // WindowType::{args.window.capitalize()}
+inline constexpr WindowType  kWelchWindowTableKind = {kind};   // WindowType::{args.window.capitalize()}
 
 static_assert(kWelchWindowTableLen == kWelchSegLen,
               "kWelchSegLen changed - regenerate welch_window.h with "
               "tools/gen_welch_window.py --seglen <n>");
-static_assert(kWelchWindowTableKind == (uint8_t)kWelchWindow,
+static_assert(kWelchWindowTableKind == kWelchWindow,
               "kWelchWindow changed - regenerate welch_window.h with "
               "tools/gen_welch_window.py --window <hann|hamming>");
 
