@@ -3,27 +3,7 @@
 
 #include <math.h>
 
-// PIF TODO
-
-/*
-  Small fixed-size dense matrix helpers, split out of kalman.cpp. Nothing here is
-  attitude- or IMU-specific - it is plain linear algebra, so it does not belong in
-  the filter, and it does not belong in rotation.h either (that file holds the
-  primitives that ARE attitude-specific).
-
-  Header-only and templated on the dimension: every call site knows its size at
-  compile time, so the loops unroll and nothing is dispatched. Arrays are taken BY
-  REFERENCE rather than as pointers, so both extents stay part of the type and a
-  mismatched size is a compile error instead of a silent out-of-bounds read.
-
-  Only what the Kalman AHRS needs is here, and no more. The rectangular products
-  inside KalmanAhrs::correct() stay hand-written on purpose: they exploit the zero
-  bias block of the measurement Jacobian, which a generic multiply cannot, and
-  would otherwise do twice the work.
-
-  Free of Arduino and config dependencies, like the filters that use it, so the
-  host build keeps working.
-*/
+// Plain linear algebra
 
 // out = a * b. out must not alias a or b.
 template <int N>
@@ -50,9 +30,7 @@ void matMulTransposed(const float (&a)[N][N], const float (&b)[N][N], float (&ou
 }
 
 // Inverse of a 3x3 via its adjugate - the closed form is both faster and steadier
-// in float32 than elimination at this size. Returns false on a (near-)singular
-// matrix, which for a Kalman innovation covariance would mean a zero measurement
-// noise and a degenerate update.
+// in float32 than elimination at this size. Returns false on a singular matrix
 inline bool inv3(const float (&m)[3][3], float (&out)[3][3]) {
   const float a = m[0][0], b = m[0][1], c = m[0][2];
   const float d = m[1][0], e = m[1][1], f = m[1][2];

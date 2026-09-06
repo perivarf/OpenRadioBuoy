@@ -50,3 +50,6 @@ out/
 # Python analysis tools
 __pycache__/
 *.pyc
+
+# Hidden directories anywhere under firmware/ (machine-specific tool/editor config)
+firmware/**/.*/

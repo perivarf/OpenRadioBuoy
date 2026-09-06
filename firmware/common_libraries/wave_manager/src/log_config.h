@@ -6,8 +6,6 @@
 #include "config.h"           
 #include "analysis_config.h"
 
-// PIF TODO
-
 /*
   What a capture writes, and in what format.
 

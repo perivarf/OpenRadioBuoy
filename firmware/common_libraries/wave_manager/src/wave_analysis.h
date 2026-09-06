@@ -8,8 +8,6 @@
 #include "fir.h"
 #include "fir_coeffs.h"
 
-// PIF TODO
-
 /*
   Streaming wave analysis. Orientation method (Madgwick, Kalman, or SFLP)
   is a compile-time choice made in wave_config.h. 
@@ -84,16 +82,12 @@ class StreamAnalyzer {
   uint32_t nWelch_ = 0, nData_ = 0, nBrake_ = 0, nWarm_ = 0;
 
   // Streaming Welch: one segment ring + PSD accumulator.
-  //
-  // A ring buffer because accumSegment is deferred out of the pop loop:
-  // the samples that arrive while a full segment waits have to land somewhere, and the
-  // ring is kWelchRingSlack larger than a segment for exactly that
   float ring_[kWelchRingLen];
   uint16_t head_ = 0;      // where the next sample goes
   uint16_t tail_ = 0;      // oldest sample = start of the segment being accumulated
   uint16_t fill_ = 0;      // samples held, tail_ -> head_
   bool     segPending_ = false;   // a full segment is waiting for processPendingSegment
-  float psdAcc_[kWelchSegLen / 2 + 1];
+  float psdAcc_[kWelchSegLen / 2 + 1]; //kWelchSegLen / 2 since Nyquist.
   uint32_t nSeg_ = 0;
   uint32_t nRingFull_ = 0;
 };
