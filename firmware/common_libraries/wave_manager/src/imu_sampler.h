@@ -76,6 +76,15 @@ class ImuSampler {
 
   void debugPrintStatus(Print &dbg, uint32_t captureLeftMs, uint32_t gpsRows);
 
+  // One accel FIFO word: windowing, AHRS, brake flag, FIR push
+  void processAccelWord(const ImuFifoWord &w);
+
+  // Drain nSamples words from the FIFO, process each by kind
+  void popFifo(uint16_t nSamples);
+
+  // Post-drain bookkeeping: recalibrate the sample period, flush the raw log
+  void finishDrain();
+
   ImuDevice     dev_;
   ImuRowSink    rowSink_ = nullptr;
   RawLogWriter *rawLog_  = nullptr;
