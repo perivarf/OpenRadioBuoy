@@ -4,21 +4,15 @@
 #include <TimeLib.h>
 #include "parser_utils.h"
 
-// PIF TODO
-
 /*
-  Serialising a result for the radio, and the DEBUG_WAVE_MSG bench fixture that
+  Serialising a result for the radio, and the DEBUG_WAVE_MSG test that
   exercises the same path without a capture.
-
-  Split out of wave_manager.cpp: the wire layouts are read against readings.h and
-  message_parser.cpp on the base station, not against the capture loop.
 */
 
 // -----------------------------------------------------------------------------
-// Serialise the front result. A measurement goes out as TWO messages: the
-// parameters in msgB ('W' ... 'E') and the spectrum in psdB ('P' ... 'E'), paired
-// by ts_start. See readings.h for the layouts and for why the pair is keyed on the
-// timestamp rather than on reading_ID.
+// Serialise the front result. A measurement goes out as two messages: 
+// 1) the parameters in msgB ('W' ... 'E') and 
+// 2) the spectrum in psdB ('P' ... 'E'), paired by ts_start
 // -----------------------------------------------------------------------------
 
 // Physical value -> the uint32 fixed point the wave parameters travel in.
@@ -47,8 +41,7 @@ size_t WaveManager::updateTransmitMessage(void) {
   msg_insert_uint(msgB, waveToFixed(res.Tz), offset, wave_message_size, offset, true);
 
   // msg_insert_int so the sign survives: sign-and-magnitude, five bytes each, the same
-  // encoding the 'G' message uses. Already 1e-7 deg (gps_coord_scale) straight from the
-  // receiver, so nothing is rescaled. 0,0 means "unknown" - see readings.h.
+  // encoding the 'G' message uses. Already 1e-7 deg (gps_coord_scale)
   msg_insert_int(msgB, res.lat_start_e7, offset, wave_message_size, offset, true);
   msg_insert_int(msgB, res.lng_start_e7, offset, wave_message_size, offset, true);
   msg_insert_int(msgB, res.lat_end_e7,   offset, wave_message_size, offset, true);
@@ -57,23 +50,25 @@ size_t WaveManager::updateTransmitMessage(void) {
   msgB[offset++] = 'E';
 
   /*
-    The result is deliberately NOT popped here. The caller pops with
-    popTransmittedResult() once the radio has confirmed TxDone, and a failure
-    leaves the result at the head of the queue for the next window.
+    The result is deliberately not popped here. The caller pops with
+    popTransmittedResult() once the radio has confirmed TxDone. 
+    A failure leaves the result at the head of the queue for the next window.
   */
   return offset;
 }
 
 size_t WaveManager::updatePsdTransmitMessage(void) {
+  
+  // Return if empty queue
   if (wave_analysis_results.empty() || !kSendPsd) return 0;
+
   WaveResult res = wave_analysis_results.front();
 
   uint8_t offset = 0;
   psdB[offset++] = 'P';
   msg_insert_uint(psdB, res.reading_ID, offset, wave_spectrum_message_size, offset, true);
 
-  // The join key. Must be byte-identical to the value the 'W' message carried, so
-  // it is the same field at the same width and nothing recomputes it.
+  // The join key. Must be byte-identical to the value the 'W' message carried
   msg_insert_uint(psdB, res.timestamp_start, offset, wave_spectrum_message_size, offset, true);
 
   // max_value gets wave_psd_scale, not scale_factor. An acceleration PSD is orders of
@@ -86,21 +81,21 @@ size_t WaveManager::updatePsdTransmitMessage(void) {
     if (scaled > 4294967295.0) return 0xFFFFFFFFUL;  // clamp to uint32 range
     return (uint32_t)llround(scaled);
   };
-  msg_insert_uint(psdB, toPsdFixed(res.max_value), offset, wave_spectrum_message_size, offset, true);
 
-  // Frequency axis, so the base station can label the bins it is about to read: bin
-  // CENTRES, then the count immediately before the bins themselves, which is what tells
-  // the receiver how many to consume. wave_freq_scale, not scale_factor - see readings.h.
+  msg_insert_uint(psdB, toPsdFixed(res.max_value), offset, wave_spectrum_message_size, offset, true);
+  
   auto toFreqFixed = [](float f) -> uint32_t {
     return (uint32_t)llround((double)f * (double)wave_freq_scale);
   };
+
+  // Frequency axis, so the base station can label the bins: bin centers
   msg_insert_uint(psdB, toFreqFixed(kSpecFMinHz), offset, wave_spectrum_message_size, offset, true);
   msg_insert_uint(psdB, toFreqFixed(kSpecFMaxHz), offset, wave_spectrum_message_size, offset, true);
   msg_insert_uint(psdB, (uint16_t)kSpecTxBins,    offset, wave_spectrum_message_size, offset, true);
 
-  // Last field: it is the only variable-length one, so stopping short here shortens
-  // the message without moving anything the receiver has already read. kSpecTxBins is
-  // at most welch_bins - the capacity wave_spectrum_message_size was budgeted for - and
+  // Wave spectrum is the last field. It is variable length, so that we can send as short
+  // messages as possible over the wire
+  // kSpecTxBins is at most welch_bins - the capacity of wave_spectrum_message_size, and
   // is smaller whenever kPsdMaxFreq does not divide evenly into the bin grid.
   for (size_t i = 0; i < kSpecTxBins; i++) {
     msg_insert_uint(psdB, res.wave_spectrum[i], offset, wave_spectrum_message_size, offset, true);
@@ -119,20 +114,15 @@ void WaveManager::enqueueFakeResult(void) {
   WaveResult res{};
   res.reading_ID = ++readingID_;
 
-  // Deliberately NOT round numbers, and all distinct: if the fixed-point scaling or
-  // the field ORDER is wrong on the receiving side, distinct odd values say so
-  // immediately, where 1.0/2.0/3.0 could line up plausibly after a swap.
+  // Synthetic result for bench testing - see DEBUG_WAVE_MSG in wave_config.h.
   res.Hs        = 1.37f;   // m
   res.Tc        = 2.53f;   // s
   res.Tp        = 6.91f;   // s
   res.Tz        = 4.29f;   // s
   res.max_value = 0.0842f; // peak acceleration PSD ((m/s^2)^2/Hz)
 
-  // A single smooth peak, encoded exactly as finalize() does: sqrt(binAcc/peakAcc) *
-  // 65535, so the far side reconstructs (value/65535)^2 * max_value. The sqrt has to be
-  // here too - a fixture that encoded linearly would still decode to a plausible
-  // gaussian and stop testing the one thing it exists to test. The peak sits off-centre
-  // so a mirrored or off-by-one bin axis is visible.
+  // A single smooth peak, sqrt(binAcc/peakAcc) * 65535
+  // so the receiving side reconstructs (value/65535)^2 * max_value
   const float peakBin = 0.35f * (float)kSpecNBins;
   const float width   = 0.12f * (float)kSpecNBins;
   for (size_t j = 0; j < kSpecNBins; j++) {
@@ -147,15 +137,14 @@ void WaveManager::enqueueFakeResult(void) {
 
   // A short synthetic drift with both signs present: a receiver that drops the sign
   // character, or reads the pair in the wrong order, cannot produce these four numbers
-  // by accident. One is west of Greenwich on purpose - all-positive coordinates would
-  // never exercise the sign branch.
+  // by accident
   res.lat_start_e7 =  599578000;   //  59.9578 N
   res.lng_start_e7 =  110686000;   //  11.0686 E
   res.lat_end_e7   =  599601000;   //  59.9601 N, drifted north
   res.lng_end_e7   =  -110701000;  // -11.0701, i.e. W: exercises the sign byte
 
   // Same bound handling as processReading: the deque is fixed-size, and dropping the
-  // OLDEST keeps the freshest results when transmit cannot keep up.
+  // oldest keeps the freshest results when transmit cannot keep up.
   if (wave_analysis_results.full()) wave_analysis_results.pop_back();
   wave_analysis_results.push_front(res);
 }
@@ -176,17 +165,13 @@ void WaveManager::printPendingResult(Print &out) const {
   out.print(F(" (m/s^2)^2/Hz   span "));
   out.print((uint32_t)(r.timestamp_end - r.timestamp_start));  out.println(F(" s"));
 
-  // sprintf, not out.print(float): an epoch near 1.77e9 does not survive a float
-  // round trip (24-bit mantissa -> rounded to the nearest 128 s), and these are the
-  // fields that wrap if the RTC was never set, so they must be exact to be useful.
-  char ts[64];  // "    window " + two 10-digit values + " .. " is 39; leave margin
+  char ts[64];
   sprintf(ts, "    window %lu .. %lu",
           (unsigned long)r.timestamp_start, (unsigned long)r.timestamp_end);
   out.println(ts);
 
   // Position at each end of the window, printed as the receiver will read it:
-  // 1e-7 deg back to degrees. 0,0 is what a window without a fix sends, and it is
-  // labelled rather than printed as a coordinate off West Africa.
+  // 1e-7 deg back to degrees. 0,0 is what a window without a fix sends
   auto printPos = [&out](const __FlashStringHelper *label, int32_t lat, int32_t lng) {
     out.print(label);
     if (lat == 0 && lng == 0) { out.println(F(" no fix (0,0)")); return; }
@@ -197,16 +182,10 @@ void WaveManager::printPendingResult(Print &out) const {
   printPos(F("    pos end  "), r.lat_end_e7,   r.lng_end_e7);
 
   // Raw uint16 and decoded value side by side, so the payload can be checked without
-  // doing (value/65535)^2 * max_value by hand. Must stay identical to
-  // print_wave_analysis_reading() in message_parser.cpp - disagreement between the two
-  // is what would reveal a half-finished format change.
+  // doing (value/65535)^2 * max_value by hand
   //
-  // The frequency is built from kSpecFMinHz and kSpecBinWidthHz, the two values the
-  // message actually carries, rather than from welch_bin_min and the group size - so
-  // this is the receiver's arithmetic and not a parallel derivation that could agree
-  // here and disagree over the air.
-  if (!kSendPsd) {
-    out.println(F("    PSD not transmitted (kSendPsd off) - num_bins 0"));
+  // The frequency is built from kSpecFMinHz and kSpecBinWidthHz
+  if (!kSendPsd) ("    PSD not transmitted (kSendPsd off) - num_bins 0"));
     return;
   }
 

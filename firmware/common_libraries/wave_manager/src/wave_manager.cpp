@@ -4,8 +4,6 @@
 #include "IWatchdog.h"
 #include "sd_writer.h"
 
-// PIF TODO
-
 /*
   Manager lifecycle and the capture loop. WaveManager is split across three files, all
   of them members of this one class:
@@ -20,10 +18,12 @@
 WaveManager wave_manager;
 WaveManager *WaveManager::s_self = nullptr;
 
+// Begin capture mode, initialize the IMU. Called once at boot and again from wake() before each capture
 void WaveManager::begin(void) {
   s_self = this;
   seedReadingId();
   imu_.setRowSink(&WaveManager::rowSinkTrampoline);
+
   imuOk_ = imu_.begin(Serial);
   if (imuOk_) {
     imuOk_ = imu_.checkImu(Serial);
@@ -40,6 +40,7 @@ void WaveManager::wake(void) {
   // Restart the GNSS engine
   gps_manager.begin();
 
+  // Restart the IMU and reset its FIFO buffer
   imuOk_ = imu_.begin(Serial);
   if (imuOk_) {
     imu_.resetFifo();
@@ -48,24 +49,18 @@ void WaveManager::wake(void) {
   }
 }
 
+// Put the system to sleep, shutting down the IMU and GNSS.
 void WaveManager::sleep(void) {
   if (imuOk_) imu_.shutdownIMU();
   gps_manager.shutdownGPS();
 }
 
-// Wait for the receiver to produce a valid solution, and report whether it did.
-// Reports ONLY that - whether a missing fix ends the capture is
-// wave_measurement_require_gps, and that decision belongs to takeReading. This
-// function is also what fills gps_fix_at_start in ses.csv, so it must answer the
-// factual question even in the builds that carry on without one.
-//
-// Called before any file is opened, so an abort leaves no session directory, no
-// reading ID and no ~28 MB reservation behind.
-//
-// "Valid" is a FRESH gnssFixOK solution (UBX_PVT::valid, i.e. fixType >= 2): pvt
-// survives across captures, so lastFix() alone would pass instantly on a stale fix
+// Wait for the GNSS receiver to produce a fresh and valid fix
+// PVT (position, velocity, time) solution survives across captures, 
+// so lastFix() alone would pass instantly on a stale fix
 // from the previous measurement.
 bool WaveManager::waitForGpsFix(void) {
+  
   // No receiver in this build - there is nothing to wait for and nothing to report.
   if (!enable_GPS) return false;
 
@@ -87,7 +82,7 @@ bool WaveManager::waitForGpsFix(void) {
       return true;
     }
     IWatchdog.reload();
-    delay(10);  // the poll is rate-limited to GPS_nav_period_ms; do not spin
+    delay(10);  // do not spin the CPU at 100% while waiting for a fix
   }
 
   if (debug_serial) {
@@ -98,11 +93,7 @@ bool WaveManager::waitForGpsFix(void) {
   return false;
 }
 
-// The current solution in the receiver's own 1e-7 deg, or 0,0 if there is none to
-// give. Not freshFix(): that flag is about whether a NEW solution arrived since the
-// last poll, and here the question is only "where are we", for which the last valid
-// solution is the right answer. valid is still required - an invalid pvt holds
-// whatever was last decoded, which may be a fix from the previous deployment.
+// The latest PVT solution in the receiver's own 1e-7 deg, or 0,0 if there is none 
 WaveManager::FixE7 WaveManager::currentFixE7(void) const {
   FixE7 p;
   if (enable_GPS && gps_manager.lastFix().valid) {
@@ -113,9 +104,9 @@ WaveManager::FixE7 WaveManager::currentFixE7(void) const {
   return p;
 }
 
-// -----------------------------------------------------------------------------
-// Row sink: analyse the window, then (optionally) append it to imu.csv.
-// -----------------------------------------------------------------------------
+// -------------------------------------------------------------------------------
+// Row sink: analyse the window, then (optionally) append it to imu.csv / raw.bin
+// -------------------------------------------------------------------------------
 void WaveManager::rowSinkTrampoline(const ImuRow &r) {
   if (s_self) s_self->onRow(r);
 }
@@ -124,25 +115,15 @@ bool WaveManager::rawSinkTrampoline(const uint8_t *data, uint16_t len) {
   return s_self ? s_self->onRawBlock(data, len) : false;
 }
 
-// One drain's worth of the raw log. No sync() here on purpose: SdFat's own buffering
-// plus the sync in stopSession is enough - a capture cut by a reset loses the tail of
-// the raw file, which is the same bargain imu.csv makes.
-//
-// This does not run inside the FIFO pop loop: RawLogWriter buffers a whole drain and
-// calls the sink once the FIFO is empty (kRawBufBytes in wave_config.h). The write can
-// still stall the card - it just no longer does so with words waiting.
-//
-// The return value is not decoration. write() reports a SHORT write (sd-card full, I/O
-// error) by returning fewer bytes, and discarding that was the difference between a
-// file that is missing a block and a file that LOOKS fine while every byte after the
-// gap is misparsed. RawLogWriter turns a false into kRawFlagWriteFail on the next sync.
+// Write data to raw-file
+// Returns true if the write succeded, false if the write failed (disk full, etc)
 bool WaveManager::onRawBlock(const uint8_t *data, uint16_t len) {
   if (!rawFile_) return false;
   return rawFile_.write(data, len) == (int)len;
 }
 
-// Runs inside the FIFO pop loop (from ImuSampler::closeWindow), so everything here is
-// on the drain's clock.
+// Runs inside the FIFO pop loop (from ImuSampler::closeWindow)
+// Push the row into the analyzer, then (optionally) append it to imu.csv
 void WaveManager::onRow(const ImuRow &r) {
   analyzer_.ingest(r);  // the row arrives complete; the analyzer only consumes it
   rowCount_++;
@@ -150,23 +131,14 @@ void WaveManager::onRow(const ImuRow &r) {
   if (!imuFile_) return;   // Raw-only mode: the analyzer above still ran
   appendImuCsvRow(r);           // see wave_session_log.cpp
 
-  // Only a flag here: sync() is the one call in the csv path that is not a plain block
-  // write, and it is deferred to syncImuCsvIfPending() below. The prints stay - they
-  // land in SdFat's 512-byte cache and cost an ordinary single-block write, which is
-  // not the stall worth moving.
+  // Flag if we should sync the file after this row
+  // Sync happens later outside the FIFO pop loop when the FIFO is empty.
   if (++rowsSinceSync_ >= wave_csv_sync_rows) {
     imuSyncPending_ = true;
     rowsSinceSync_ = 0;
   }
 }
 
-// The deferred half of the cadence above. Called from the capture loop right after
-// imu_.update() returns, i.e. with the FIFO just drained - the same reasoning that
-// moved the raw-log write out of the pop loop (kRawBufBytes in wave_config.h).
-//
-// A stall here can still overrun the FIFO; what it cannot do any more is start with
-// half the budget already spent. FIFO_OVR is latched, so the loss is picked up by the
-// next drain's status read either way and nothing goes unreported.
 void WaveManager::syncImuCsvIfPending(void) {
   if (!imuSyncPending_) return;
   imuSyncPending_ = false;
@@ -179,7 +151,23 @@ void WaveManager::syncImuCsvIfPending(void) {
 // -----------------------------------------------------------------------------
 uint8_t WaveManager::takeReading(void) {
 
-  // Return if IMU not working
+  if (uint8_t err = checkPreconditions()) return err;
+
+  beginCapture();
+  runCaptureLoop();
+  closeSessionFiles();
+
+  // End capture timestamp, for ses.csv and WaveResult
+  captureEnd_ = now();
+
+  resolveEndPosition();
+  return 0;
+}
+
+// 0 if the capture may proceed, else the code takeReading() should return without
+// having captured anything.
+uint8_t WaveManager::checkPreconditions(void) {
+  // No IMU
   if (!imuOk_) return 1;
 
   // Wait for gps fix to set start location for measurements
@@ -190,10 +178,14 @@ uint8_t WaveManager::takeReading(void) {
     if (debug_serial) {
       Serial.println("WaveManager: capture skipped - wave_measurement_require_gps");
     }
-
     return 2;
   }
 
+  return 0;
+}
+
+// Reading ID, per-capture counters, start position, and the analyzer/session start.
+void WaveManager::beginCapture(void) {
   // Get reading ID
   seedReadingId();
   readingID_++;
@@ -210,11 +202,7 @@ uint8_t WaveManager::takeReading(void) {
   captureEndPos_ = FixE7{}; // Initialize end position as start, will be overwritten at the end if successful logging
   IWatchdog.reload();
 
-  // Without a drift track the receiver has nothing left to do until the end position,
-  // so stop it here rather than let it draw current through the whole window. It is
-  // started again - and stopped again - around the end fix at the bottom of this
-  // function. Compiled out when the track is on: that path needs the receiver awake
-  // for the entire capture loop.
+  // Turning off GPS if not needed in capture.
   if constexpr (!wave_gps_track_in_capture) {
     gps_manager.shutdownGPS();
     if (debug_serial) Serial.println("WaveManager: GPS off for the capture (no drift track)");
@@ -233,110 +221,105 @@ uint8_t WaveManager::takeReading(void) {
   }
 
   IWatchdog.reload();
+}
 
-  // Init done. Flush whatever the FIFO holds, THEN start the stream: from here on the
-  // loop below is what keeps it drained, and it is the only thing that does. The two
-  // calls belong together and in this order - resetFifo leaves the FIFO idle, so
-  // starting the stream anywhere but immediately before the drain loop reopens the
-  // window this split was made to close.
+// Resets and starts the IMU FIFO stream, then drains it for wave_measurement_duration.
+void WaveManager::runCaptureLoop(void) {
   imu_.resetWindowing(millis());
   imu_.resetFifo();
   imu_.startStreaming();
 
   uint32_t start = millis();
   while (millis() - start < wave_measurement_duration) {
+
     const uint32_t elapsed = millis() - start;
-    // TIM_LOOP covers the body but NOT the delay below
+
+    // TIM_LOOP covers the body (except the delay(2))
     const uint32_t tLoop = timeStart();
-    // The countdown rides along on the IMU report rather than printing on its own:
-    // the two answer one question together - whether the capture is still running,
-    // and whether the drain is keeping up while it does.
-    imu_.update(Serial, wave_measurement_duration - elapsed,
-                gpsRowsWritten_);   // drain the FIFO (stay tight)
+
+    // Fetch IMU data, process it, and write it to raw log and/or imu.csv
+    // The FIFO is drained in update() until it is empty, and the FIR is evaluated for each window
+    imu_.update(Serial, wave_measurement_duration - elapsed, gpsRowsWritten_);
+
+    // Sync IMU-file if pending
     const uint32_t tSync = timeStart();
-    syncImuCsvIfPending();          // deferred from onRow: never with the FIFO half full
+    syncImuCsvIfPending();
     timeAdd(TIM_SYNCCSV, tSync);
-    // Third of the three deferrals, and the largest: ~88 ms of FFT once every 25.6 s.
-    // Same placement argument as the two above and as the raw-log flush - update() has
-    // just returned, so the FIFO is empty and the whole depth is available. A no-op on
-    // the ~99.9 % of iterations with nothing pending.
-    //
-    // Timed only when it RAN: charging every flag test to the bucket would report
-    // thousands of 2 us calls instead of the one 88 ms segment it exists to show. n is
-    // the segment count, and it must equal welch_segments in ana.csv.
+
+    // The full segment is accumulated in the analyzer by imu_.update() -> onRow() -> analyzer_.ingest(). 
+    // The analyzer's processPendingSegment() is called here to finalise the segment and accumulate the PSD sums. 
+    // It is a no-op if no segment is pending.
     const uint32_t tWelch = timeStart();
     if (analyzer_.processPendingSegment()) timeAdd(TIM_WELCH, tWelch);
-    // The drift track, and the only GPS work inside the loop. Compiled out entirely
-    // when wave_gps_track_in_capture is off, which leaves tim_gps at n = 0; the
-    // positions at each end of the capture come from outside this loop either way.
+
+    // The GNSS tracking, and the only GPS work inside the loop. 
+    // Compiled out entirely when wave_gps_track_in_capture is off
+    // the positions at each end of the capture come from outside this loop either way.
+    // Not guaranteed to produce uniformly spacing, but with 480Hz IMU field tests
+    // show that when we set GPS to 10Hz, we get around 9.5 Hz of actual capture 
+    // (due to FIFO pop loop / SD-card-operations sometimes taking longer than 100ms)
     if constexpr (wave_gps_track_in_capture) {
       const uint32_t tGps = timeStart();
       serviceGps(elapsed);          // non-blocking GPS poll -> one gps.csv row per fix
       timeAdd(TIM_GPS, tGps);
     }
+
     IWatchdog.reload();
     timeAdd(TIM_LOOP, tLoop);
-    delay(2);  // let the FIFO refill; keeps the drain loop from spinning hot
+
+    // let the FIFO refill; keeps the drain loop from spinning hot
+    // TODO: If not using GNSS, we could let the FIFO fill up more (and subsequently sleep more)
+    delay(2);  
+  }
+}
+
+// Truncate/sync/close imu, gps and raw files 
+// No-op unless a session was actually started.
+void WaveManager::closeSessionFiles(void) {
+  if (!sessionActive_) return;
+
+  // Timed per file
+  const uint32_t tStop = timeStart();
+
+  // truncate() at the current position hands back the clusters pre-allocation
+  // reserved but the capture did not use, and sets the directory entry to the real
+  // length. Without it every session folder would claim its full reservation and
+  // the tail would read as garbage. Safe to call whether or not preAllocate
+  // succeeded: with no reservation the position already is the end of the file.
+  if (imuFile_) {
+    const uint32_t t0 = timeStart();
+    imuFile_.truncate();  IWatchdog.reload();
+    imuFile_.sync();      IWatchdog.reload();
+    imuFile_.close();     IWatchdog.reload();
+    if (wave_timing_enabled) wave_timing.stopImuUs = micros() - t0;}
+
+  if (gpsFile_) {
+    const uint32_t tStopGps = timeStart();
+    gpsFile_.truncate();  IWatchdog.reload();
+    gpsFile_.sync();      IWatchdog.reload();
+    gpsFile_.close();     IWatchdog.reload();
+    if (wave_timing_enabled) wave_timing.stopGpsUs = micros() - tStopGps;
   }
 
-  if (sessionActive_) {
-    // Timed per FILE, not as one total: handing back a reservation is the expensive part,
-    // and the three files hold wildly different ones (the raw log reserves tens of MB, the
-    // gps log a couple). A single number would say that shutdown was slow without saying
-    // which file made it so. Same reason these are plain values and not a TimeStat: one
-    // sample each, and a max across all three would answer the wrong question.
-    const uint32_t tStop = timeStart();
-
-    // truncate() at the current position hands back the clusters pre-allocation
-    // reserved but the capture did not use, and sets the directory entry to the real
-    // length. Without it every session folder would claim its full reservation and
-    // the tail would read as garbage. Safe to call whether or not preAllocate
-    // succeeded: with no reservation the position already is the end of the file.
-    if (imuFile_) {
-      const uint32_t t0 = timeStart();
-      imuFile_.truncate();  IWatchdog.reload();
-      imuFile_.sync();      IWatchdog.reload();
-      imuFile_.close();     IWatchdog.reload();
-      if (wave_timing_enabled) wave_timing.stopImuUs = micros() - t0;}
-
-    if (gpsFile_) {
-      const uint32_t tStopGps = timeStart();
-      gpsFile_.truncate();  IWatchdog.reload();
-      gpsFile_.sync();      IWatchdog.reload();
-      gpsFile_.close();     IWatchdog.reload();
-      if (wave_timing_enabled) wave_timing.stopGpsUs = micros() - tStopGps;
-    }
-
-    // The raw log's partial block has to be pushed BEFORE truncate(), or the tail is
-    // cut at the last full block and the final records are lost. Detaching the sink
-    // first stops a late drain from appending past the truncation point.
-    if (rawFile_) {
-      // Flush BEFORE detaching, not after: flush() writes through the sink and does
-      // nothing without one, so the other order would silently discard the last
-      // partial buffer - up to kRawBufBytes, a drain's worth of data plus the sync
-      // record describing it. No drain can slip in between the two lines: the INT1
-      // routine only sets a flag, it drains nothing.
-      const uint32_t tStopRaw = timeStart();
-      rawLog_.flush(true);      IWatchdog.reload();
-      imu_.setRawLog(nullptr);  IWatchdog.reload();
-      rawLog_.setSink(nullptr); IWatchdog.reload();
-      rawFile_.truncate();      IWatchdog.reload();
-      rawFile_.sync();          IWatchdog.reload();
-      rawFile_.close();         IWatchdog.reload();
-      if (wave_timing_enabled) wave_timing.stopRawUs = micros() - tStopRaw;
-    }
-    if (wave_timing_enabled) wave_timing.stopTotalUs = micros() - tStop;
-    // sessionFile_ stays open: the summary is appended in processReading.
+  // The raw log's partial block has to be pushed before truncate()
+  if (rawFile_) {
+    const uint32_t tStopRaw = timeStart();
+    rawLog_.flush(true);      IWatchdog.reload();
+    imu_.setRawLog(nullptr);  IWatchdog.reload();
+    rawLog_.setSink(nullptr); IWatchdog.reload();
+    rawFile_.truncate();      IWatchdog.reload();
+    rawFile_.sync();          IWatchdog.reload();
+    rawFile_.close();         IWatchdog.reload();
+    if (wave_timing_enabled) wave_timing.stopRawUs = micros() - tStopRaw;
   }
+  if (wave_timing_enabled) wave_timing.stopTotalUs = micros() - tStop;
+  // sessionFile_ stays open: the summary is appended in processReading.
+}
 
-  // Taken here, before the fix below: this is when the capture actually ended, and it is
-  // what ses.csv and the 'W' message carry.
-  captureEnd_ = now();
-
-  /* The end position. With the drift track the receiver ran through the whole capture
-     and already holds a current solution. Without it, it was shut down after the start
-     fix, so bring it back up, wait the same wave_gps_fix_timeout as at the start, and
-     shut it down again - the capture is over, and the next wake() starts it anew. */
+/* The end position. With the GNSS on during the capture, we already have a position.
+   If not, bring it back up, wait the same wave_gps_fix_timeout as at the start, and
+   shut it down again */
+void WaveManager::resolveEndPosition(void) {
   if constexpr (wave_gps_track_in_capture) {
     captureEndPos_ = currentFixE7();
   } else {
@@ -347,7 +330,6 @@ uint8_t WaveManager::takeReading(void) {
     }
     gps_manager.shutdownGPS();
   }
-  return 0;
 }
 
 

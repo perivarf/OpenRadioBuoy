@@ -109,6 +109,13 @@ class WaveManager {
   uint16_t countSessionDirs(void);  // session folders already under waves/
   void     seedReadingId(void);     // readingID_ = countSessionDirs()
 
+  // The phases of takeReading(), split out in call order.
+  uint8_t checkPreconditions(void); // 0 = proceed, else the code takeReading() should return
+  void beginCapture(void);          // reading ID, counters, start pos, analyzer/session start
+  void runCaptureLoop(void);        // reset+start the FIFO stream, then drain it for wave_measurement_duration
+  void closeSessionFiles(void);     // truncate/sync/close imu, gps and raw files
+  void resolveEndPosition(void);    // captureEndPos_, with or without the drift track
+
   ImuSampler imu_;
   StreamAnalyzer analyzer_;
   RawLogWriter rawLog_;
