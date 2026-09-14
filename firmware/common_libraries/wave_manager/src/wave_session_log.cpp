@@ -321,7 +321,6 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("kalman_sigma_b,");     f.println(kKalmanParams.sigmaB, 8);
   f.print("kalman_r0,");          f.println(kKalmanParams.r0, 8);
   f.print("kalman_dt_ref,");      f.println(kKalmanParams.dtRef, 4);
-  f.print("kalman_lambda_a,");    f.println(kKalmanParams.lambdaA, 3);
   f.print("kalman_lambda_w,");    f.println(kKalmanParams.lambdaW, 3);
   f.print("kalman_w0,");          f.println(kKalmanParams.w0, 3);
   f.print("kalman_p0_angle,");    f.println(kKalmanParams.p0Angle, 5);
@@ -339,6 +338,8 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("welch_overlap_div,");  f.println(kWelchOverlapDiv);
   f.print("welch_step,");         f.println(kWelchSegLen / kWelchOverlapDiv);
   f.print("welch_window,");       f.println(kWelchWindow == WindowType::Hann ? "Hann" : "Hamming");
+  f.print("welch_detrend,");      f.println(kWelchDetrend == DetrendMode::None ? "none"
+                                          : kWelchDetrend == DetrendMode::Mean ? "mean" : "linear");
   f.print("psd_df_hz,");          f.println(kPsdDfHz, 6);
   f.print("wave_fmax_hz,");       f.println(kWaveFMax, 3);
   f.print("psd_min_freq_hz,");    f.println(kPsdMinFreq, 3);

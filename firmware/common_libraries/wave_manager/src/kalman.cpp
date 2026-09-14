@@ -42,13 +42,12 @@ void KalmanAhrs::update(float gx, float gy, float gz,
   correct(ax, ay, az);
 }
 
-float KalmanAhrs::measurementNoise(float accelNorm) const {
-  const float dev = (accelNorm - p_.gravity) / p_.gravity;
+float KalmanAhrs::measurementNoise(void) const {
   const float wn = wNorm_ / p_.w0;
   // dtRef/dt: see RATE INVARIANCE in kalman.h. Without it the filter bandwidth
   // would follow the logging rate and two captures could not be compared.
   const float rate = dt_ > 0.0f ? p_.dtRef / dt_ : 1.0f;
-  return p_.r0 * rate * (1.0f + p_.lambdaA * dev * dev + p_.lambdaW * wn * wn);
+  return p_.r0 * rate * (1.0f + p_.lambdaW * wn * wn);
 }
 
 // Propagate the nominal quaternion with the bias-corrected rate, and the error
@@ -114,9 +113,9 @@ void KalmanAhrs::correct(float ax, float ay, float az) {
   float H[3][3];
   skewSymmetric(h, H);
 
-  // The adaptive part. r is measured HERE, from this sample's |a| and the
-  // rotation rate predict() just saw - not a constant.
-  const float r = measurementNoise(norm);
+  // The adaptive part. r follows the rotation rate and dt predict() just recorded,
+  // so it is a per-sample value, not a constant.
+  const float r = measurementNoise();
 
   // PHt = P * H^T  (6x3), using that the bias block of H is zero.
   float PHt[kN][3];
@@ -166,11 +165,15 @@ void KalmanAhrs::correct(float ax, float ay, float az) {
   b_[0] += dx[3]; b_[1] += dx[4]; b_[2] += dx[5];
 
   // Joseph form: P = (I-KH) P (I-KH)^T + K R K^T, rather than the short
-  // P = (I-KH) P. The short form is only valid for the OPTIMAL gain, and with an
-  // adaptive R the gain is far from optimal every time R has just inflated -
-  // there the short form can drive P indefinite and the filter with it. Joseph
-  // stays symmetric positive definite for any K, which is exactly the insurance
-  // an adaptive filter needs.
+  // P = (I-KH) P. The short form is only valid for the OPTIMAL gain, and it holds
+  // no symmetry of its own - it just trusts that P stays what it should be.
+  //
+  // H has rank 2 (see above), so two directions of the state - yaw, and the gyro
+  // bias along gravity - are never touched by a measurement. Their covariance only
+  // ever grows through F P F^T + Q, and no innovation pulls float32 rounding back
+  // out of it. At 480 Hz a half-hour session is ~860k updates through that path.
+  // Joseph is symmetric positive definite for ANY K, which is the property worth
+  // paying for where the filter is structurally blind.
   float IKH[kN][kN] = {};
   for (int i = 0; i < kN; i++) IKH[i][i] = 1.0f;
   for (int i = 0; i < kN; i++) {

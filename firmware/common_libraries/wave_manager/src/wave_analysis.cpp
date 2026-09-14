@@ -100,8 +100,13 @@ static void sumSquaredWelchWeights() {
   gS2Ready = true;
 }
 
+// Least-squares fit about the segment centre: sum (i - iMid)^2 = N(N^2-1)/12.
+static constexpr double kDetrendSxx =
+    (double)kWelchSegLen * ((double)kWelchSegLen * kWelchSegLen - 1.0) / 12.0;
+static constexpr float  kDetrendIMid = 0.5f * (kWelchSegLen - 1);
+
 /*
-  Window one segment, FFT, accumulate one-sided PSD into psdAcc[0..N/2].
+  Detrend one segment, window it, FFT, accumulate one-sided PSD into psdAcc[0..N/2].
 
   Runs once every kWelchSegLen / kWelchOverlapDiv samples - 25.6 s at 10 Hz - and is the
   longest uninterruptible stretch in the capture loop. Its cost is therefore a
@@ -133,10 +138,31 @@ static void accumSegment(const float *seg, uint16_t start, float *psdAcc) {
 
   // Welch: "Modified periodogram"
   // - the window is applied to each segment before FFT, and the PSD is averaged over segments.
+
+  // Pass 1: ring -> gRe unwindowed, summing what the fit needs. The ring wrap is
+  // walked once; pass 2 is contiguous.
+  double sx = 0.0, six = 0.0;
   for (int i = 0; i < N; i++) {
-    gRe[i] = seg[j] * kWelchWindowTable[i];
-    gIm[i] = 0.0f;
+    const float v = seg[j];
+    gRe[i] = v;
+    if constexpr (kWelchDetrend != DetrendMode::None) sx += (double)v;
+    if constexpr (kWelchDetrend == DetrendMode::Linear)
+      six += (double)(((float)i - kDetrendIMid) * v);
     if (++j == kWelchRingLen) j = 0;
+  }
+
+  // Centred x-axis, so sum(i - iMid) = 0 and the mean drops out of the slope.
+  float mean = 0.0f, slope = 0.0f;
+  if constexpr (kWelchDetrend != DetrendMode::None)   mean  = (float)(sx / N);
+  if constexpr (kWelchDetrend == DetrendMode::Linear) slope = (float)(six / kDetrendSxx);
+
+  // Pass 2: subtract the fit, then window. Detrend before the window, as Welch assumes.
+  for (int i = 0; i < N; i++) {
+    float v = gRe[i];
+    if constexpr (kWelchDetrend == DetrendMode::Mean)   v -= mean;
+    if constexpr (kWelchDetrend == DetrendMode::Linear) v -= mean + slope * ((float)i - kDetrendIMid);
+    gRe[i] = v * kWelchWindowTable[i];
+    gIm[i] = 0.0f;
   }
 
   // Perform the FFT
@@ -336,8 +362,8 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
 
         const int k = (int)welch_bin_min + (int)(j * kSpecBinGroup + g);
         
-        // k == 0 is DC. The segment mean is removed before the FFT, so that bin holds
-        // no wave information - only whatever offset survived detrending
+        // k == 0 is DC, no wave information - and nothing at all once kWelchDetrend
+        // removes the mean.
         if (k == 0) continue;
 
         // Calculate the PSD-acceleration for this bin

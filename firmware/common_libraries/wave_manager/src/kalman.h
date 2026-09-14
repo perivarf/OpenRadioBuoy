@@ -1,7 +1,7 @@
 #ifndef KALMAN_H
 #define KALMAN_H
 
-#include "constants.h"
+#include "math.h"
 
 // PIF TODO
 
@@ -21,25 +21,25 @@
 
   Prediction integrates the bias-corrected gyro. Correction treats the
   accelerometer as a measurement of the GRAVITY DIRECTION - normalised, so only
-  the direction is measured, exactly like the atan2 tilt it replaces.
+  the direction is measured, exactly like the atan2 tilt it replaces. The length
+  never enters, which makes the filter scale-free in the accel: mg and m/s^2 give
+  the same attitude.
 
   Adaptive measurement noise
 
-      R = r0 * (dtRef/dt) * (1 + lambdaA*((|a|-g)/g)^2 + lambdaW*(|w|/w0)^2)
+      R = r0 * (dtRef/dt) * (1 + lambdaW*(|w|/w0)^2)
 
-  The accelerometer is a gravity reference only while |a| ~ g. On this buoy |a|
-  reaches ~3 g, and gravity is least trustworthy exactly when the buoy rotates
-  fast, since the attitude then changes within one sample. R inflates during
-  slams and fast rolling, leaving attitude to the gyro; in calm stretches it
-  drops back and the accel anchors the slow drift.
+  Gravity is least trustworthy when the buoy rotates fast, since the attitude then
+  changes within one sample. R inflates during fast rolling, leaving attitude to the
+  gyro; in calm stretches it drops back and the accel anchors the slow drift.
 
-  MEASURED, on Skjaerhalden 20260731_110314 through tools/postprocess.py:
-  with a FIXED R this filter left a flat 8.5e-4 (m/s^2)^2/Hz tilt-leakage floor
-  below 0.25 Hz and reported Hs 0.222 m where Madgwick and SFLP both said 0.097 m.
-  The same filter WITH the adaptive R lands at 0.135 m. lambdaW carries essentially
-  all of that (-34 % on the noise floor); lambdaA measured as a no-op, since slams
-  are too brief to land in the 0.08-0.20 Hz band, and is kept only because it costs
-  two multiplies and documents the intent.
+  MEASURED AT r0 = 1e-5, on Skjaerhalden 20260731_110314 through tools/postprocess.py:
+  a fixed R left a flat 8.5e-4 (m/s^2)^2/Hz tilt-leakage floor below 0.25 Hz and read
+  Hs 0.222 m where Madgwick and SFLP both said 0.097 m; lambdaW brought the same filter
+  to 0.135 m, -34 % on the noise floor. Those numbers do not carry to the r0 = 1e-3
+  shipped below, two decades above the tuning they were taken at: there the floor moves
+  under 2 % between lambdaW 0 and 4, so the term is not known to earn its place at this
+  r0. The sweep that would settle it has not been run.
 
   RATE INVARIANCE. The dtRef/dt factor keeps the filter bandwidth independent of
   the logging rate. Process noise is Q = sigmaG^2*dt, so a fixed R would give a
@@ -72,10 +72,8 @@ struct KalmanAhrsParams {
   float sigmaB;    // gyro bias random walk [rad/s^2/sqrt(Hz)]
   float r0;        // base variance of the accel direction, at dtRef
   float dtRef;     // sample interval the tuning was swept at [s]
-  float lambdaA;   // weight on the |a| deviation from 1 g
   float lambdaW;   // weight on |w| - where the gain is
   float w0;        // normalisation for |w| [rad/s]
-  float gravity;   // [m/s^2]; Acceleration must be in same unit - see update()
   float p0Angle;   // initial attitude uncertainty [rad]
   float p0Bias;    // initial bias uncertainty [rad/s]
 };
@@ -87,10 +85,8 @@ static constexpr KalmanAhrsParams kKalmanParams = {
     /* sigmaB  */ 1.0e-5f,       // rad/s^2/sqrt(Hz)
     /* r0      */ 1.0e-3f,
     /* dtRef   */ 0.020f,        // s - the rate the original parameter sweep was run at
-    /* lambdaA */ 0.0f,
     /* lambdaW */ 2.0f,
     /* w0      */ 1.0f,          // rad/s
-    /* gravity */ kGravity,
     /* p0Angle */ 5.0f * (float)M_PI / 180.0f,    // 5 deg
     /* p0Bias  */ 1.0f * (float)M_PI / 180.0f,    // 1 deg/s
 };
@@ -110,16 +106,12 @@ class KalmanAhrs {
   // Leaves the bias estimate and the covariance alone.
   void initFromAccel(float ax, float ay, float az);
 
-  // One filter step. gyro in rad/s, dt in seconds, and accel in the same unit as
-  // params.gravity (m/s^2 on the drifter)
+  // One filter step. Gyro in rad/s, dt in seconds. The accel is normalised
+  // internally, so its unit is free - only its direction is read.
   void update(float gx, float gy, float gz, float ax, float ay, float az, float dt);
 
   const float *quaternion(void) const { return q_; }   // [w,x,y,z], unit length
   const float *gyroBias(void) const { return b_; }     // rad/s, body frame
-
-  // The adaptive measurement variance for an accel vector of this magnitude, at
-  // the rotation rate and dt of the last predict()
-  float measurementNoise(float accelNorm) const;
 
   // Name for the logs
   static constexpr const char *kName = "Kalman";
@@ -127,6 +119,9 @@ class KalmanAhrs {
  private:
   void predict(float gx, float gy, float gz, float dt);
   void correct(float ax, float ay, float az);
+
+  // The measurement variance at the rotation rate and dt of the last predict()
+  float measurementNoise(void) const;
 
   KalmanAhrsParams p_;
   float q_[4] = {1.0f, 0.0f, 0.0f, 0.0f};
