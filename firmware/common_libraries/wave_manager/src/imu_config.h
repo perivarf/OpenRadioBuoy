@@ -24,10 +24,6 @@
   The choice of AHRS and write or not to SD-card (and SD-card type) are what fill the budget.
 */
 
-// Upper edge of the analysed band. An analysis quantity, but it lives here because the
-// LPF2 divisor below is derived from it and has to come after it.
-static constexpr float kWaveFMax = 2.0f;
-
 // -----------------------------------------------------------------------------
 // Data rate and power mode, accel AND gyro
 // -----------------------------------------------------------------------------

@@ -19,6 +19,10 @@
       -> kWelchInputOdrHz    FIR stage 2; the series fed to Welch
 */
 
+// Upper edge of the analysed band. An analysis quantity, but it lives here because the
+// LPF2 divisor below is derived from it and has to come after it.
+static constexpr float kWaveFMax = 2.0f;
+
 // -----------------------------------------------------------------------------
 // Row rate: the output of FIR stage 1 and the input to stage 2 as well as imu.csv output
 static constexpr uint16_t kRowOdrHz     = 80;
@@ -240,7 +244,7 @@ static constexpr bool  kSendPsd    = true;
 
 // Min and max frequencies to transmit
 static constexpr float kPsdMinFreq = 0.03f;
-static constexpr float kPsdMaxFreq = 2.0f;
+static constexpr float kPsdMaxFreq = 1.0f;
 static_assert(kPsdMinFreq < kPsdMaxFreq, "the transmitted band would be empty");
 static_assert(kPsdMaxFreq <= kWaveFMax,
               "the transmitted spectrum would reach past the analysed band and be "
