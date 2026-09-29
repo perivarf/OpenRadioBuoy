@@ -155,7 +155,7 @@ uint8_t WaveManager::takeReading(void) {
 
   beginCapture();
   runCaptureLoop();
-  closeSessionFiles();
+  closeSessionDataFiles();
 
   // End capture timestamp, for ses.csv and WaveResult
   captureEnd_ = now();
@@ -275,7 +275,7 @@ void WaveManager::runCaptureLoop(void) {
 
 // Truncate/sync/close imu, gps and raw files 
 // No-op unless a session was actually started.
-void WaveManager::closeSessionFiles(void) {
+void WaveManager::closeSessionDataFiles(void) {
   if (!sessionActive_) return;
 
   // Timed per file

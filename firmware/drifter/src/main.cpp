@@ -30,7 +30,7 @@ static uint32_t sleep_cycles_beacon       = 0;
 static uint32_t iterations_counter = 0;
 
 
-uint32_t millis_time_corrected(uint32_t sleep_cycles){
+uint32_t millisTimeCorrected(uint32_t sleep_cycles){
   return millis() + sleep_cycles*sleep_time;
 }
 
@@ -154,7 +154,7 @@ void setup() {
     Bench mode: the GPS is never brought up. A unit on a desk gets no fix, so the
     wait-for-fix loop below would spin forever and the message path under test
     would never be reached. Nothing in this build reads a position: the wave
-    capture is replaced by a synthetic result and task_measure_gps_temp is not
+    capture is replaced by a synthetic result and measurePositionTemperature is not
     called, so timestamps stay boot-relative and that is fine.
   */
   sd_writer.logString("DEBUG_WAVE_MSG: GPS not started");
@@ -247,7 +247,7 @@ void setup() {
     wave cadence is then counted from that first capture.
 
     The subtraction is deliberate unsigned wrap-around - the gates compare
-    millis_time_corrected() - timer against the period in uint32 modular arithmetic,
+    millisTimeCorrected() - timer against the period in uint32 modular arithmetic,
     so a timer "before" millis() = 0 gives the correct elapsed time regardless.
   */
   if (measure_immediately_after_deployment){
@@ -293,7 +293,7 @@ void setup() {
 
 }
 
-void task_measure_gps_temp() {
+void measurePositionTemperature() {
 
   // Measure time!
   unsigned long measurement_start = millis();
@@ -343,14 +343,14 @@ void task_measure_gps_temp() {
   }
   // Turning off remaining sensors
   sleep_cycles_measurement = 0;
-  measurement_timer = millis_time_corrected(sleep_cycles_measurement);
+  measurement_timer = millisTimeCorrected(sleep_cycles_measurement);
   thermo_manager.sleep();
   sd_writer.closeLog();
   IWatchdog.reload();
 }
   
 
-void task_measure_waves() {
+void waveCapture() {
 
   if (debug_serial){
     mySerial.println("Wave measurement starting");
@@ -398,7 +398,7 @@ void task_measure_waves() {
 }
 
 
-void task_transmit() {
+void transmit() {
 
   if (debug_serial){
     mySerial.println("Looking for base station");
@@ -561,7 +561,7 @@ void task_transmit() {
 
 }
 
-void task_beacon(){
+void sendBeacon(){
     LORA.wakeUp();
     gps_manager.updateBeaconMsg(LORA.WiO_ID);
     LORA.transmitBeaconMessage(gps_manager.beaconMsg, beaconMsgSize);
@@ -571,17 +571,22 @@ void task_beacon(){
 }
 
 /*
-  Transmit if the radio is due and either queue has something in it
+  Transmit if the radio is due and either queue has something in it.
+
+  lookahead_ms is added to the time since the last transmission, so a transmission that
+  would fall due within the next lookahead_ms counts as due now. Callers about to block
+  the loop pass the length of that block; everyone else passes 0.
 */
-static bool transmit_if_due(void){
+static bool transmitIfDue(uint32_t lookahead_ms){
   const bool transmission_due =
-      millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period;
+      millisTimeCorrected(sleep_cycles_transmission) - LORA.lastTransmission + lookahead_ms
+          > minimal_transmission_period;
   const bool have_payload =
       gps_manager.GPSReadings.size() > packet_count_send_treshold
       || !wave_manager.wave_analysis_results.empty();
 
   if (transmission_due && have_payload){
-    task_transmit();
+    transmit();
     return true;
   }
   return false;
@@ -604,19 +609,10 @@ void loop() {
   // Measurement loop (temperature and GPS). Skipped entirely in the bench build:
   // the GPS was never started, and a wave-message test has no use for either sensor.
 #if !DEBUG_WAVE_MSG
-  if (millis_time_corrected(sleep_cycles_measurement) - measurement_timer > LORA.measurement_period){
-      task_measure_gps_temp();
+  if (millisTimeCorrected(sleep_cycles_measurement) - measurement_timer > LORA.measurement_period){
+      measurePositionTemperature();
   }
 #endif
-
-  /*
-    Early transmission window. Require handshake etc (radio uptime), so use for debugging purposes.
-  */
-  if (transmit_before_wave_capture){
-    if (transmit_if_due() && debug_serial){
-      mySerial.println(F("Transmitted before wave capture (transmit_before_wave_capture)"));
-    }
-  }
 
   // Wave measurement loop (IMU): independent gate, own enable flag and period.
   //Debug print enable wave analysis and measurement period, and time since last measurement
@@ -638,17 +634,27 @@ void loop() {
   }
 #else
   if (LORA.enable_wave_analysis &&
-      millis_time_corrected(sleep_cycles_wave_measurement) - wave_measurement_timer > LORA.wave_capture_period){
-      task_measure_waves();
+      millisTimeCorrected(sleep_cycles_wave_measurement) - wave_measurement_timer > LORA.wave_capture_period){
+      /*
+        The capture blocks loop() for wave_capture_duration, so anything already queued
+        is sent first rather than waiting it out. Only here: on every other iteration
+        the transmission check below the gate covers it.
+      */
+      if (transmit_before_wave_capture){
+        if (transmitIfDue(wave_capture_duration) && debug_serial){
+          mySerial.println(F("Transmitted before wave capture (transmit_before_wave_capture)"));
+        }
+      }
+      waveCapture();
   }
 #endif
 
   // Transmission protocol
-  transmit_if_due();
+  transmitIfDue(0);
 
   // Recovery protocol
-  if ((millis_time_corrected(sleep_cycles_beacon) - beacon_timer > beacon_ping_period) && (enable_recovery_beacon)){
-    task_beacon();
+  if ((millisTimeCorrected(sleep_cycles_beacon) - beacon_timer > beacon_ping_period) && (enable_recovery_beacon)){
+    sendBeacon();
   }
 
   if (debug_serial){

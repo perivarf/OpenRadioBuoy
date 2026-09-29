@@ -57,10 +57,10 @@ static constexpr bool wave_timing_enabled {true};
 enum class WaveLogMode : uint8_t { Csv = 0, Raw = 1, Both = 2 };
 static constexpr WaveLogMode wave_log_mode = WaveLogMode::Raw;
 
-static constexpr bool wave_mode_imu_csv(void) {
+static constexpr bool waveModeImuCsv(void) {
   return wave_log_mode == WaveLogMode::Csv || wave_log_mode == WaveLogMode::Both;
 }
-static constexpr bool wave_mode_imu_raw(void) {
+static constexpr bool waveModeImuRaw(void) {
   return wave_log_mode == WaveLogMode::Raw || wave_log_mode == WaveLogMode::Both;
 }
 

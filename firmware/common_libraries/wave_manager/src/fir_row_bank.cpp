@@ -28,7 +28,7 @@ void FirRowBank::eval(ImuRow &r) const {
   r.vacc    = vacc_.center();
 
   // The rest of the values are written to imu.csv (if that is enabled)
-  if constexpr (wave_mode_imu_csv()) {
+  if constexpr (waveModeImuCsv()) {
     // Filtered
     r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
     r.axnSflp = nx_.eval(); r.aynSflp = ny_.eval(); r.aznSflp = nz_.eval();

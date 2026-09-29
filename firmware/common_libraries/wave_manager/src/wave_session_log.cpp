@@ -115,7 +115,7 @@ bool WaveManager::startSession(void) {
 
   // imu.csv opened if wave_log_mode is Csv or Both
   char nm[64];
-  if (wave_mode_imu_csv()) {
+  if (waveModeImuCsv()) {
     snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_IMU_PREFIX);
     imuFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
   }
@@ -129,14 +129,14 @@ bool WaveManager::startSession(void) {
   // ses.csv opened always, for session anchors and timing
   snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_SESSION_PREFIX);
   sessionFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
-  if ((wave_mode_imu_csv() && !imuFile_) ||
+  if ((waveModeImuCsv() && !imuFile_) ||
       (wave_gps_track_in_capture && !gpsFile_) || !sessionFile_) {
     if (debug_serial) Serial.println("WaveManager: could not open session files");
     return false;
   }
 
-  // raw.bin opened if wave_mode_imu_raw
-  if (wave_mode_imu_raw()) {
+  // raw.bin opened if waveModeImuRaw
+  if (waveModeImuRaw()) {
     snprintf(nm, sizeof(nm), "%s/%s_%s.bin", sessionDir_, logStamp_, WAVE_RAW_PREFIX);
     rawFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
     if (!rawFile_ && debug_serial) {
@@ -319,8 +319,7 @@ void WaveManager::writeSessionConfig(File &f) {
   // Kalman
   f.print("kalman_sigma_g,");     f.println(kKalmanParams.sigmaG, 6);
   f.print("kalman_sigma_b,");     f.println(kKalmanParams.sigmaB, 8);
-  f.print("kalman_r0,");          f.println(kKalmanParams.r0, 8);
-  f.print("kalman_dt_ref,");      f.println(kKalmanParams.dtRef, 4);
+  f.print("kalman_r0_density,");  f.println(kKalmanParams.r0Density, 8);
   f.print("kalman_lambda_w,");    f.println(kKalmanParams.lambdaW, 3);
   f.print("kalman_w0,");          f.println(kKalmanParams.w0, 3);
   f.print("kalman_p0_angle,");    f.println(kKalmanParams.p0Angle, 5);

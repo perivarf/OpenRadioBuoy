@@ -113,7 +113,7 @@ class WaveManager {
   uint8_t checkPreconditions(void); // 0 = proceed, else the code takeReading() should return
   void beginCapture(void);          // reading ID, counters, start pos, analyzer/session start
   void runCaptureLoop(void);        // reset+start the FIFO stream, then drain it for wave_capture_duration
-  void closeSessionFiles(void);     // truncate/sync/close imu, gps and raw files
+  void closeSessionDataFiles(void);     // truncate/sync/close imu, gps and raw files
   void resolveEndPosition(void);    // captureEndPos_, with or without the drift track
 
   ImuSampler imu_;

@@ -74,7 +74,7 @@ static constexpr bool measure_immediately_after_deployment  {true};
   came up at all.
 
   Diagnostic convenience, not a measurement requirement: it costs one extra handshake
-  per loop whenever something is queued (connectToBaseStation is up to
+  per capture whenever something is queued (connectToBaseStation is up to
   max_radio_fix_look_time + max_radio_wait_time). Set false for a deployment where
   radio power matters more than seeing the buoy quickly.
 */
@@ -104,7 +104,7 @@ static_assert(wave_capture_warmup < wave_capture_duration,
 
 /*
   base_wave_capture_period is the interval between the START of one
-  capture and the start of the next (task_measure_waves anchors its timer up front),
+  capture and the start of the next (wave_capture anchors its timer up front),
   so it has to leave room for the capture itself. If it does not, the gate is already
   due when the capture returns and the buoy captures back-to-back with no GPS/temp
   measurement or transmission in between.
