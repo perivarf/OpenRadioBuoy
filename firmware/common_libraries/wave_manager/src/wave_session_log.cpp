@@ -148,7 +148,7 @@ bool WaveManager::startSession(void) {
   // A failure here is not fatal: the file falls back to growing cluster by cluster
   // The preallocation must cover the whole capture, otherwise FIFO may overflow
   // due to SD card takes too long to allocate a new cluster.
-  const uint32_t durationS = wave_measurement_duration / s_2_ms;
+  const uint32_t durationS = wave_capture_duration / s_2_ms;
   const uint32_t imuBytes  = (uint32_t)kRowOdrHz * durationS * wave_imu_row_bytes_max;
   const uint32_t gpsBytes  = GPS_nav_rate_hz *     durationS * wave_gps_row_bytes_max;
 
@@ -249,12 +249,12 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("build_branch,");       f.println(BUILD_STR(REPO_GIT_BRANCH));
 
   // Capture duration etc
-  f.print("duration_ms,");        f.println(wave_measurement_duration);
-  f.print("period_ms,");          f.println(base_measurement_period_wave_analysis);
+  f.print("duration_ms,");        f.println(wave_capture_duration);
+  f.print("period_ms,");          f.println(base_wave_capture_period);
   
   // AHRS settling window: logged to imu.csv/gps.csv but excluded from Welch/PSD, so
   // postprocess must skip the same leading rows to reproduce the on-device Hs.
-  f.print("filter_warm_up_ms,");  f.println(wave_measurement_filter_warm_up);
+  f.print("filter_warm_up_ms,");  f.println(wave_capture_warmup);
 
   // GNSS
   // The nav rate the receiver is SET to against which the achieved fix rate from the track is read
@@ -286,7 +286,7 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("window_ms,");          f.println(kRowPeriodMsF, 4);
   f.print("csv_sync_rows,");      f.println(wave_csv_sync_rows);
   f.print("imu_prealloc_bytes,");
-  f.println((uint32_t)kRowOdrHz * (wave_measurement_duration / s_2_ms) *
+  f.println((uint32_t)kRowOdrHz * (wave_capture_duration / s_2_ms) *
             wave_imu_row_bytes_max);
 
   // --- decimation ---
@@ -435,7 +435,7 @@ void WaveManager::writeSessionSummary(void) {
 
   sessionFile_.print("stop_utc_epoch,"); sessionFile_.println((uint32_t)captureEnd_);
   writePosition("stop", captureEndPos_);
-  sessionFile_.print("duration_ms,");    sessionFile_.println(wave_measurement_duration);
+  sessionFile_.print("duration_ms,");    sessionFile_.println(wave_capture_duration);
   // Rows in gps.csv, not an analysis count - the on-board chain never reads the drift
   // track, so this says what was LOGGED and stays on the session side.
   sessionFile_.print("gps_rows,");       sessionFile_.println(gpsRowsWritten_);

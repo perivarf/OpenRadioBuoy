@@ -252,7 +252,7 @@ void StreamAnalyzer::ingest(const ImuRow &r) {
 
   // Warm-up: the AHRS has not converged yet (and the FIR is still filling), so the
   // vertical accel is less reliable. The rows are kept out of the Welch segment
-  if (t < (long)wave_measurement_filter_warm_up) {
+  if (t < (long)wave_capture_warmup) {
     nWarm_++;
     return;
   }

@@ -54,8 +54,8 @@ class LoRa_Transceiver{
     // Wave analysis is gated by its own runtime enable + period, kept on the LoRa
     // object so the base station can re-tune them like measurement_period. Defaults
     // come from common_config.h (shared by both targets).
-    bool     enable_wave_analysis            = base_enable_wave_analysis;
-    uint32_t measurement_period_wave_analysis = base_measurement_period_wave_analysis;
+    bool     enable_wave_analysis = base_enable_wave_analysis;
+    uint32_t wave_capture_period  = base_wave_capture_period;
 
     // Setup functions
     void getWiOID(void);

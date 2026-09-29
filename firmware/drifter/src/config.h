@@ -66,7 +66,7 @@ static constexpr bool measure_immediately_after_deployment  {true};
 /*
   Run the transmission check before the wave capture as well as after it.
 
-  A capture blocks loop() for wave_measurement_duration - half an hour as configured
+  A capture blocks loop() for wave_capture_duration - half an hour as configured
   - so with the check only after it, a freshly booted buoy shows no sign of life at
   the base station, and hence on Notehub, until the first capture has finished.
   Checking first as well gets whatever is already queued out the door immediately,
@@ -90,7 +90,7 @@ static uint32_t target_reading_distance                  {30};
 // live in common_config.h; this is the length of one blocking capture window).
 // -----------------------------------------------------------------------------
 static constexpr uint8_t  max_number_of_wave_measurements {5};
-static constexpr uint32_t wave_measurement_duration       {30*min_2_s*s_2_ms}; // 30 min capture
+static constexpr uint32_t wave_capture_duration           {30*min_2_s*s_2_ms}; // 30 min capture
 
 // AHRS settling time at the start of a capture. The filter (Madgwick/Kalman) starts
 // from a single accel sample and needs a while to converge on the true orientation;
@@ -98,19 +98,19 @@ static constexpr uint32_t wave_measurement_duration       {30*min_2_s*s_2_ms}; /
 // PSD. Rows inside the warm-up are still fed to the filter (that is the point) and
 // still logged to imu.csv/gps.csv - they are only kept out of the 10 Hz bucketing,
 // the Welch accumulation and hence Hs/Tz/Tc/Tp. Set to 0 to disable.
-static constexpr uint32_t wave_measurement_filter_warm_up {30*s_2_ms};
-static_assert(wave_measurement_filter_warm_up < wave_measurement_duration,
+static constexpr uint32_t wave_capture_warmup             {30*s_2_ms};
+static_assert(wave_capture_warmup < wave_capture_duration,
               "AHRS warm-up must be shorter than the capture, or nothing is analysed");
 
 /*
-  base_measurement_period_wave_analysis is the interval between the START of one
+  base_wave_capture_period is the interval between the START of one
   capture and the start of the next (task_measure_waves anchors its timer up front),
   so it has to leave room for the capture itself. If it does not, the gate is already
   due when the capture returns and the buoy captures back-to-back with no GPS/temp
   measurement or transmission in between.
 */
-static_assert(base_measurement_period_wave_analysis > wave_measurement_duration,
-              "Wave capture period must exceed wave_measurement_duration, or captures run back-to-back");
+static_assert(base_wave_capture_period > wave_capture_duration,
+              "Wave capture period must exceed wave_capture_duration, or captures run back-to-back");
 
 // Power parameters
 static constexpr uint32_t sleep_time                     {9*s_2_ms};

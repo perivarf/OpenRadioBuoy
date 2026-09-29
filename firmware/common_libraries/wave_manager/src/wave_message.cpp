@@ -133,7 +133,7 @@ void WaveManager::enqueueFakeResult(void) {
 
   res.timestamp_end   = now();
   res.timestamp_start = res.timestamp_end -
-                        (time_t)(wave_measurement_duration / s_2_ms);
+                        (time_t)(wave_capture_duration / s_2_ms);
 
   // A short synthetic drift with both signs present: a receiver that drops the sign
   // character, or reads the pair in the wrong order, cannot produce these four numbers

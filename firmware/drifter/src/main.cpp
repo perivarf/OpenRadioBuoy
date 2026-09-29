@@ -252,7 +252,7 @@ void setup() {
   */
   if (measure_immediately_after_deployment){
     measurement_timer      = millis() - LORA.measurement_period - 1;
-    wave_measurement_timer = millis() - LORA.measurement_period_wave_analysis - 1;
+    wave_measurement_timer = millis() - LORA.wave_capture_period - 1;
   } else {
     measurement_timer      = millis();
     wave_measurement_timer = millis();
@@ -358,10 +358,10 @@ void task_measure_waves() {
 
   /*
     The period is anchored to the START of the capture, not its end: a capture blocks
-    for wave_measurement_duration, so resetting the timer afterwards would give a
+    for wave_capture_duration, so resetting the timer afterwards would give a
     cycle of duration + period instead of the period itself. With the anchor here, a
-    capture begins every measurement_period_wave_analysis - which is exactly why that
-    period must be longer than wave_measurement_duration (static_assert in config.h);
+    capture begins every wave_capture_period - which is exactly why that
+    period must be longer than wave_capture_duration (static_assert in config.h);
     otherwise the gate is already due when the capture returns and they run
     back-to-back.
   */
@@ -378,7 +378,7 @@ void task_measure_waves() {
   IWatchdog.reload();
   wave_manager.wake();  // restarts the GNSS engine for the drift track
 
-  // Blocking capture over wave_measurement_duration; the watchdog is reloaded inside.
+  // Blocking capture over wave_capture_duration; the watchdog is reloaded inside.
   // Waits up to wave_gps_fix_timeout for a fix first and returns 2 if none arrives -
   // a capture with no position is skipped outright, so nothing was sampled and there
   // is no spectrum to finalise.
@@ -638,7 +638,7 @@ void loop() {
   }
 #else
   if (LORA.enable_wave_analysis &&
-      millis_time_corrected(sleep_cycles_wave_measurement) - wave_measurement_timer > LORA.measurement_period_wave_analysis){
+      millis_time_corrected(sleep_cycles_wave_measurement) - wave_measurement_timer > LORA.wave_capture_period){
       task_measure_waves();
   }
 #endif

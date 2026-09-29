@@ -147,7 +147,7 @@ void WaveManager::syncImuCsvIfPending(void) {
 
 
 // -----------------------------------------------------------------------------
-// Capture: stream the IMU FIFO for wave_measurement_duration.
+// Capture: stream the IMU FIFO for wave_capture_duration.
 // -----------------------------------------------------------------------------
 uint8_t WaveManager::takeReading(void) {
 
@@ -223,14 +223,14 @@ void WaveManager::beginCapture(void) {
   IWatchdog.reload();
 }
 
-// Resets and starts the IMU FIFO stream, then drains it for wave_measurement_duration.
+// Resets and starts the IMU FIFO stream, then drains it for wave_capture_duration.
 void WaveManager::runCaptureLoop(void) {
   imu_.resetWindowing(millis());
   imu_.resetFifo();
   imu_.startStreaming();
 
   uint32_t start = millis();
-  while (millis() - start < wave_measurement_duration) {
+  while (millis() - start < wave_capture_duration) {
 
     const uint32_t elapsed = millis() - start;
 
@@ -239,7 +239,7 @@ void WaveManager::runCaptureLoop(void) {
 
     // Fetch IMU data, process it, and write it to raw log and/or imu.csv
     // The FIFO is drained in update() until it is empty, and the FIR is evaluated for each window
-    imu_.update(Serial, wave_measurement_duration - elapsed, gpsRowsWritten_);
+    imu_.update(Serial, wave_capture_duration - elapsed, gpsRowsWritten_);
 
     // Sync IMU-file if pending
     const uint32_t tSync = timeStart();

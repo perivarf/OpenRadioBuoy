@@ -141,7 +141,7 @@ static_assert(kRowOdrHz <= kImuOdrHz,
 static_assert(kWelchInputOdrHz <= kRowOdrHz,
               "the Welch input is a decimation of the rows - it cannot exceed kRowOdrHz");
 
-static_assert(wave_measurement_filter_warm_up > ((uint32_t)kFirNtap * 1000u) / kRowOdrHz + 2000,
+static_assert(wave_capture_warmup > ((uint32_t)kFirNtap * 1000u) / kRowOdrHz + 2000,
               "warm-up must cover FIR start-up (1.29 s) plus AHRS convergence");
 
 // ---- Orientation delay ----

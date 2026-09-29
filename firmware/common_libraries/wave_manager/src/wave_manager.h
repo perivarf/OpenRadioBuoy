@@ -51,7 +51,7 @@ class WaveManager {
   void wake(void);
   void sleep(void);
 
-  // Capture IMU data for wave_measurement_duration, streaming each window into the
+  // Capture IMU data for wave_capture_duration, streaming each window into the
   // analyzer (and, when logging is enabled, to imu.csv).
   //   0 = capture ran
   //   1 = no IMU (begin() failed) - nothing was sampled
@@ -112,7 +112,7 @@ class WaveManager {
   // The phases of takeReading(), split out in call order.
   uint8_t checkPreconditions(void); // 0 = proceed, else the code takeReading() should return
   void beginCapture(void);          // reading ID, counters, start pos, analyzer/session start
-  void runCaptureLoop(void);        // reset+start the FIFO stream, then drain it for wave_measurement_duration
+  void runCaptureLoop(void);        // reset+start the FIFO stream, then drain it for wave_capture_duration
   void closeSessionFiles(void);     // truncate/sync/close imu, gps and raw files
   void resolveEndPosition(void);    // captureEndPos_, with or without the drift track
 
