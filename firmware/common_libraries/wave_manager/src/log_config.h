@@ -86,7 +86,7 @@ static constexpr uint16_t kRawWorstDrainBytes =
   Flush threshold: how much accumulates before the raw log is written to the sd card
   Should be at least kRawBlockBytes. 
 */
-static constexpr uint16_t kRawFlushThreshold = 1 * kRawBlockBytes; //TODO PIF check if 1 is enough, used 2 for field experiments
+static constexpr uint16_t kRawFlushThreshold = 1 * kRawBlockBytes;
 
 // The buffer must hold whatever can be left over when a drain starts (kRawFlushThreshold-1), 
 // plus the worst drain on top of that (kRawWorstDrainBytes)

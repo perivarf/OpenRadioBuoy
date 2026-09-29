@@ -10,11 +10,6 @@
 #include "IWatchdog.h"
 #include "STM32LowPower.h"
 #include "TimeLib.h"
-/*
-  TODO: 
-  Get a good algorithm for getting a date stamp from GPS.
-  This feature is currently disabled. 
-*/
 
 HardwareSerial mySerial{DEBUG_SERIAL_RX_PIN, DEBUG_SERIAL_TX_PIN};
 
@@ -370,7 +365,7 @@ void waveCapture() {
 
   // wave_manager owns its own per-capture session directory (imu/gps/ses/spec/ana) and
   // wakes/stops the GPS itself for the drift track, so just ensure the SD card is up;
-  // do NOT open a log here - takeReading/processReading manage the session.
+  // do NOT open a log here - takeReading/processCapture manage the session.
   if (!sd_writer.active){
     sd_writer.begin();
   }
@@ -384,17 +379,16 @@ void waveCapture() {
   // is no spectrum to finalise.
   uint8_t wave_status = wave_manager.takeReading();
   IWatchdog.reload();
+  wave_manager.sleep();
 
   if (wave_status == 0){
     // Finalise the Welch spectrum -> wave parameters and enqueue a result for transmit.
-    wave_manager.processReading();
+    wave_manager.processCapture();
     IWatchdog.reload();
   } else if (debug_serial){
     mySerial.print("Wave measurement skipped, takeReading status ");
     mySerial.println(wave_status);
   }
-
-  wave_manager.sleep();
 }
 
 

@@ -143,7 +143,7 @@ void WaveManager::enqueueFakeResult(void) {
   res.lat_end_e7   =  599601000;   //  59.9601 N, drifted north
   res.lng_end_e7   =  -110701000;  // -11.0701, i.e. W: exercises the sign byte
 
-  // Same bound handling as processReading: the deque is fixed-size, and dropping the
+  // Same bound handling as processCapture: the deque is fixed-size, and dropping the
   // oldest keeps the freshest results when transmit cannot keep up.
   if (wave_analysis_results.full()) wave_analysis_results.pop_back();
   wave_analysis_results.push_front(res);

@@ -38,14 +38,10 @@ struct BeaconOutgoingMessage{
     time_t timestamp;
 };
 
-
-
 struct StringMessage{
   String msg; // TODO: replace more meaningful struct
   bool success;
 };
-
-
 
 /*
   Signal quality of a link, in units of 1e4 * dB. Zero-initialised on purpose:

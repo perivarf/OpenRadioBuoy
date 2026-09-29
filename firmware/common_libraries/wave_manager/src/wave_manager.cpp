@@ -9,7 +9,7 @@
   of them members of this one class:
 
     wave_manager.cpp      this file - begin/wake/sleep, the GPS fix wait, the row and
-                          raw sinks, takeReading and processReading
+                          raw sinks, takeReading and processCapture
     wave_session_log.cpp  everything written to the sd-card: the session directory and
                           its six CSV files, plus reading-ID continuity
     wave_message.cpp      serialising a result for the radio, and the bench fixture
@@ -313,7 +313,7 @@ void WaveManager::closeSessionDataFiles(void) {
     if (wave_timing_enabled) wave_timing.stopRawUs = micros() - tStopRaw;
   }
   if (wave_timing_enabled) wave_timing.stopTotalUs = micros() - tStop;
-  // sessionFile_ stays open: the summary is appended in processReading.
+  // sessionFile_ stays open: the summary is appended in processCapture.
 }
 
 /* The end position. With the GNSS on during the capture, we already have a position.
@@ -336,7 +336,7 @@ void WaveManager::resolveEndPosition(void) {
 // -----------------------------------------------------------------------------
 // Finalise the spectrum -> wave parameters, push a result, write spec/ana CSV.
 // -----------------------------------------------------------------------------
-uint8_t WaveManager::processReading(void) {
+uint8_t WaveManager::processCapture(void) {
   WaveParams params;
   WaveResult res;
   res.reading_ID = readingID_;
@@ -367,7 +367,7 @@ uint8_t WaveManager::processReading(void) {
 
   // Summary to the console (mirrors ORB_test StreamAnalyzer::finalize).
   if (debug_serial) {
-    Serial.print("[wave] processReading #"); Serial.println(readingID_);
+    Serial.print("[wave] processCapture #"); Serial.println(readingID_);
     Serial.print("  brake_windows: ");    Serial.print(analyzer_.brakeRows());
     Serial.print(" / ");                  Serial.println(analyzer_.rows());
     Serial.print("  vacc_welch_samples: "); Serial.println(analyzer_.samplesWelch());

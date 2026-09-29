@@ -36,7 +36,7 @@ struct WaveResult {
 /*
   Owns the IMU sampler and the streaming wave analyzer, and follows the same manager
   contract as thermo_manager / gps_manager
-  (begin/wake/sleep/takeReading/processReading/updateTransmitMessage + msgB).
+  (begin/wake/sleep/takeReading/processCapture/updateTransmitMessage + msgB).
 
   Implemented across three files: 
   * wave_manager.cpp (lifecycle and the capture loop),
@@ -61,7 +61,7 @@ class WaveManager {
 
   // Finalise the Welch spectrum -> wave params, push a WaveResult, write spec/ana.
   // Returns 0 on success, non-zero if no usable spectrum was produced.
-  uint8_t processReading(void);
+  uint8_t processCapture(void);
 
   // Serialise the (front of queue) parameters into msgB ('W' ... 'E') and return the
   // length, or 0 if the queue is empty. Does not pop - see popTransmittedResult.
@@ -75,7 +75,7 @@ class WaveManager {
   void popTransmittedResult(void);
 
 #if DEBUG_WAVE_MSG
-  // Test: push a synthetic result onto the same deque processReading uses, so everything downstream runs unmodified.
+  // Test: push a synthetic result onto the same deque processCapture uses, so everything downstream runs unmodified.
   void enqueueFakeResult(void);
 
   // Dump the result about to be transmitted. Takes the stream as an argument because

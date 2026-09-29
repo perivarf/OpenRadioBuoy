@@ -228,7 +228,6 @@ void LoRa_Transceiver::listenByteArray(uint32_t max_wait_time)
   if (operationDone)
   {
     operationDone = false;
-    // TODO: this might only work for temp
     int numBytes = radio.getPacketLength();
     state = radio.readData(byte_msg.byteMsg, numBytes);
     if (state == RADIOLIB_ERR_NONE)
@@ -663,9 +662,6 @@ void LoRa_Transceiver::transmitBeaconMessage(byte * beaconMsg, uint8_t msgSize){
   }
 }
 
-/*
-Todo: Use parser utils
-*/
 void LoRa_Transceiver::create_update_message(FrequencyMessage frequency_message)
 {
   uint8_t offset = 0;
