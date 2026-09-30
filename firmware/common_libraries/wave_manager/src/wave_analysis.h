@@ -70,6 +70,10 @@ class StreamAnalyzer {
  private:
   void pushWelch(float sample);  // push one Welch-rate sample into the segment
 
+  // Spectral moments m0/m2/m4 -> Hs/Tz/Tc/Tp, from the elevation PSD (acc PSD /
+  // omega^4 * taper^2). invSeg = 1/nSeg_, passed in since finalize() already has it.
+  void computeSeaStateParams(WaveParams &params, float invSeg);
+
   // Second decimation stage: kRowOdrHz -> kWelchInputOdrHz into Welch.
   // Applied on every reading including the warm-up ones
   // - otherwise the delay line is still half full of zeros when the

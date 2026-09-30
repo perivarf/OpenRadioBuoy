@@ -243,10 +243,10 @@ void WaveManager::runCaptureLoop(void) {
     timeAdd(TIM_SYNCCSV, tSync);
 
     // The full segment is accumulated in the analyzer by imu_.update() -> onRow() -> analyzer_.ingest(). 
-    // The analyzer's processPendingSegment() is called here to finalise the segment and accumulate the PSD sums. 
+    // The analyzer's accumulateSegment() is called here to finalise the segment and accumulate the PSD sums. 
     // It is a no-op if no segment is pending.
     const uint32_t tWelch = timeStart();
-    if (analyzer_.processPendingSegment()) timeAdd(TIM_WELCH, tWelch);
+    if (analyzer_.accumulateSegment()) timeAdd(TIM_WELCH, tWelch);
 
     // The GNSS tracking, and the only GPS work inside the loop. 
     // Compiled out entirely when wave_gps_track_in_capture is off

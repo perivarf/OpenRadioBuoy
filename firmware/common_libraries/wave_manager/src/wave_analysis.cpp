@@ -206,13 +206,13 @@ void StreamAnalyzer::begin(void) {
 }
 
 // Push one sample into the ring. No FFT from here - this runs inside the FIFO pop loop.
-// A full segment only raises the flag; processPendingSegment() below does the work.
+// A full segment only raises the flag; accumulateSegment() below does the work.
 void StreamAnalyzer::pushWelch(float sample) {
   // Safety valve, not the normal path. If the ring is full, the FFT has to run inside the pop loop after all
   // However, should not be possible with the kWelchRingLen since it includes margin.
   if (fill_ == kWelchRingLen) {
     nRingFull_++;
-    processPendingSegment();
+    accumulateSegment();
   }
 
   ring_[head_] = sample;
@@ -224,7 +224,7 @@ void StreamAnalyzer::pushWelch(float sample) {
 // The deferred half of pushWelch: FFT + accumulate PSD, then release one step of the
 // ring (1-1/kWelchOverlapDiv => 75% overlap keeps the rest). 
 // Called from the capture loop with the FIFO just drained
-bool StreamAnalyzer::processPendingSegment(void) {
+bool StreamAnalyzer::accumulateSegment(void) {
   if (!segPending_) return false;
   segPending_ = false;
 
@@ -277,23 +277,12 @@ void StreamAnalyzer::ingest(const ImuRow &r) {
   }
 }
 
-bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
-
-  // If any pending segments, process them now
-  processPendingSegment();
-
-
-  // Parameters are initialized to -1.0f for the wave parameters and 0.0 for the spectral moments.
-  params = {-1.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0, 0.0, 0.0};
-
-  // Reset the spectrum output
-  for (size_t j = 0; j < welch_bins; j++) spectrumOut[j] = 0;
-  if (nSeg_ == 0) return false;
-
+// Spectral moments m0/m2/m4 -> Hs/Tz/Tc/Tp, over the elevation PSD (acc PSD / omega^4 *
+// taper^2). Called from finalize() once nSeg_ > 0 has been confirmed.
+void StreamAnalyzer::computeSeaStateParams(WaveParams &params, float invSeg) {
 
   const int N = kWelchSegLen;
   const float df = (float)kWelchInputOdrHz / N;
-  const float invSeg = 1.0f / (float)nSeg_;
 
   // Spectral moments + peak, over the elevation PSD (acc PSD / omega^4 * taper^2).
   float peakEta = 0.0f, peakF = 0.0f;
@@ -307,7 +296,7 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
     // Skip frequencies above the maximum wave frequency
     if (f > kWaveFMax) break;
 
-    // Get low-frequency taper for the current frequency. 
+    // Get low-frequency taper for the current frequency.
     // If the taper is zero or negative, skip this bin.
     float taper = lowFreqTaper(f);
     if (taper <= 0.0f) continue;
@@ -330,6 +319,24 @@ bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
   if (params.m0 > 0 && params.m2 > 0) params.tz = sqrtf((float)(params.m0 / params.m2));  // Tz = sqrt(m0/m2)
   if (params.m2 > 0 && params.m4 > 0) params.tc = sqrtf((float)(params.m2 / params.m4));  // Tc = sqrt(m2/m4)
   if (peakF > 0) params.tp = 1.0f / peakF;                                                // peak period from the spectral peak
+}
+
+bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
+
+  // If any pending segments, process them now
+  accumulateSegment();
+
+
+  // Parameters are initialized to -1.0f for the wave parameters and 0.0 for the spectral moments.
+  params = {-1.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0, 0.0, 0.0};
+
+  // Reset the spectrum output
+  for (size_t j = 0; j < welch_bins; j++) spectrumOut[j] = 0;
+  if (nSeg_ == 0) return false;
+
+  const float invSeg = 1.0f / (float)nSeg_;
+
+  computeSeaStateParams(params, invSeg);
 
   /*
     The spectrum sent on wire is acceleration with no taper. 
