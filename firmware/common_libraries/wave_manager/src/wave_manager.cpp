@@ -156,11 +156,7 @@ uint8_t WaveManager::takeReading(void) {
   beginCapture();
   runCaptureLoop();
   closeSessionDataFiles();
-
-  // End capture timestamp, for ses.csv and WaveResult
-  captureEnd_ = now();
-
-  resolveEndPosition();
+  setCaptureEndTimeLocation();
   return 0;
 }
 
@@ -320,10 +316,14 @@ void WaveManager::closeSessionDataFiles(void) {
   // sessionFile_ stays open: the summary is appended in processCapture.
 }
 
-/* The end position. With the GNSS on during the capture, we already have a position.
+/* The end position and time. With the GNSS on during the capture, we already have a position.
    If not, bring it back up, wait the same wave_gps_fix_timeout as at the start, and
    shut it down again */
-void WaveManager::resolveEndPosition(void) {
+void WaveManager::setCaptureEndTimeLocation(void) {
+
+    // End capture timestamp, for ses.csv and WaveResult
+  captureEnd_ = now();
+
   if constexpr (wave_gps_track_in_capture) {
     captureEndPos_ = currentFixE7();
   } else {

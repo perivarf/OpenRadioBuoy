@@ -39,12 +39,12 @@ class StreamAnalyzer {
   void ingest(const ImuRow &r);  // per row: decimate to kWelchInputOdrHz, accumulate Welch
 
   // The Welch FFT. ingest() decimate to kWelchInputOdrHz, fills the ring and raises a flag
-  // processPendingSegment() runs accumSegment. 
+  // accumulateSegment() runs accumSegment. 
   // Should be called from the capture loop right after FIFO drain.
   // A no-op when no segment is pending, so calling it every iteration is free.
   //
   // Returns whether a segment was actually accumulated
-  bool processPendingSegment(void);
+  bool accumulateSegment(void);
 
   // Finalise: average the PSD-sums, derive wave parameters from the elevation spectrum, and
   // fill the quantised spectrum bins (welch_bin_min..welch_bin_max) from the
@@ -86,7 +86,7 @@ class StreamAnalyzer {
   uint16_t head_ = 0;      // where the next sample goes
   uint16_t tail_ = 0;      // oldest sample = start of the segment being accumulated
   uint16_t fill_ = 0;      // samples held, tail_ -> head_
-  bool     segPending_ = false;   // a full segment is waiting for processPendingSegment
+  bool     segPending_ = false;   // a full segment is waiting for accumulateSegment
   float psdAcc_[kWelchSegLen / 2 + 1]; //kWelchSegLen / 2 since Nyquist.
   uint32_t nSeg_ = 0;
   uint32_t nRingFull_ = 0;
