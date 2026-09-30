@@ -105,7 +105,7 @@ WaveManager::FixE7 WaveManager::currentFixE7(void) const {
 }
 
 // -------------------------------------------------------------------------------
-// Row sink: analyse the window, then (optionally) append it to imu.csv / raw.bin
+// Row sink: analyse the window, then (optionally) append it to imu.csv / imu.bin
 // -------------------------------------------------------------------------------
 void WaveManager::rowSinkTrampoline(const ImuRow &r) {
   if (s_self) s_self->onRow(r);
@@ -268,7 +268,11 @@ void WaveManager::runCaptureLoop(void) {
     timeAdd(TIM_LOOP, tLoop);
 
     // let the FIFO refill; keeps the drain loop from spinning hot
-    // TODO: If not using GNSS, we could let the FIFO fill up more (and subsequently sleep more)
+    /**
+     * TODO: If not using GNSS, we could let the FIFO fill up more (and subsequently sleep more)
+     * TODO: Calculate how much we can delay / sleep here based on FIFO fill level/ODR
+     * Consider changing to low power mode.
+     * */
     delay(2);  
   }
 }

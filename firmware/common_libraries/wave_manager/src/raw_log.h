@@ -5,7 +5,7 @@
 #include "wave_config.h"
 
 /*
-  Writer for <stamp>_raw.bin: the 6-byte payload of every FIFO word verbatim
+  Writer for <stamp>_imu.bin: the 6-byte payload of every FIFO word verbatim
 
   LAYOUT, little-endian (kRaw* in wave_config.h):
     header  kRawHeaderBytes, once at the top

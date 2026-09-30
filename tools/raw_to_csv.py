@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""<stamp>_raw.bin -> <stamp>_imu_from_raw.csv: decoding, and nothing more.
+"""<stamp>_imu.bin -> <stamp>_imu_from_raw.csv: decoding, and nothing more.
 
 The file is every FIFO word exactly as the sensor produced it, where imu.csv is the
 FIR-decimated row. This runs no FIR, no AHRS and no analysis - it writes out what the
@@ -25,7 +25,7 @@ is 2.08 ms, and a whole millisecond would be coarser than the data. Word ORDER i
 time axis, and the sync records pin it to the clock with t_us and the cumulative accel
 counter. The times here are interpolated between those pairs.
 
-    python3 raw_to_csv.py <capture>_raw.bin
+    python3 raw_to_csv.py <capture>_imu.bin
     python3 raw_to_csv.py <session dir> -o /somewhere/else.csv
 """
 
@@ -59,7 +59,7 @@ def read_header(buf):
         sys.exit("raw: the file is shorter than the header")
     magic, ver = struct.unpack_from("<IB", buf, 0)
     if magic != MAGIC:
-        sys.exit(f"raw: bad magic 0x{magic:08X} - not a _raw.bin")
+        sys.exit(f"raw: bad magic 0x{magic:08X} - not a _imu.bin")
     if ver != 2:
         sys.exit(f"raw: format v{ver}. This decoder follows the firmware in the repo, "
                  f"and that writes v2.")
@@ -89,7 +89,7 @@ def parse(buf, hdr):
 
     # THE TAIL. An interrupted capture never reaches truncate(), so the file is left at
     # its full preallocated length, and what lies past the last written block is
-    # whatever was in those clusters before - usually an earlier capture's raw.bin.
+    # whatever was in those clusters before - usually an earlier capture's imu.bin.
     # That tail has valid tags and decodes into perfectly clean samples. Two things give
     # it away, and the capture's own stream never does either: a sync record where the
     # clock or the accel counter goes BACKWARDS, and a long run of unknown tags.
@@ -217,9 +217,9 @@ def drop_nan_quats(q):
 def resolve(path):
     """Accept a .bin, or a session directory holding one."""
     if os.path.isdir(path):
-        cand = sorted(glob(os.path.join(path, "*_raw.bin")))
+        cand = sorted(glob(os.path.join(path, "*_imu.bin")))
         if not cand:
-            sys.exit(f"found no *_raw.bin in {path}")
+            sys.exit(f"found no *_imu.bin in {path}")
         return cand[0]
     if not os.path.isfile(path):
         sys.exit(f"found no {path}")
@@ -266,7 +266,7 @@ def summarise(hdr, d, t_acc):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("path", help="<stamp>_raw.bin or the session directory")
+    ap.add_argument("path", help="<stamp>_imu.bin or the session directory")
     ap.add_argument("-o", "--out",
                     help="write here (default: <stamp>_imu_from_raw.csv beside the .bin)")
     ap.add_argument("--allow-damaged", action="store_true",
@@ -318,7 +318,7 @@ def main():
         if 0 <= a_n < n_acc:
             ovf[a_n] = 1
 
-    out = args.out or binpath.replace("_raw.bin", "_imu_from_raw.csv")
+    out = args.out or binpath.replace("_imu.bin", "_imu_from_raw.csv")
     with open(out, "w", newline="") as f:
         f.write(",".join(COLUMNS) + "\n")
         for i in range(n_acc):

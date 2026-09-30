@@ -6,7 +6,7 @@
 #   <stamp>_device/   the device's own imu.csv, that is the numbers the onboard
 #                     chain actually computed on (FIR + AHRS in firmware, float32,
 #                     in real time)
-#   <stamp>_raw/      imu.csv reconstructed from raw.bin by raw_to_csv.py (the same
+#   <stamp>_raw/      imu.csv reconstructed from imu.bin by raw_to_csv.py (the same
 #                     chain over again offline, float64, AHRS on the 480 Hz stream)
 #
 # Each run is its own rawplot.py, in its own directory, with the same analysis
@@ -88,8 +88,8 @@ for sess in "${SESSIONS[@]}"; do
       device) [ -f "$sess/${stamp}_imu.csv" ] || {
                 echo; echo ">>> skipping device: no ${stamp}_imu.csv "\
 "(the session was logged without WaveLogMode::Both)"; continue; } ;;
-      raw)    [ -f "$sess/${stamp}_raw.bin" ] || {
-                echo; echo ">>> skipping raw: no ${stamp}_raw.bin"; continue; } ;;
+      raw)    [ -f "$sess/${stamp}_imu.bin" ] || {
+                echo; echo ">>> skipping raw: no ${stamp}_imu.bin"; continue; } ;;
     esac
     echo
     echo ">>> $src"

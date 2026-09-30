@@ -18,9 +18,9 @@
 #define WAVE_SESSION_PREFIX  "ses" // ses.csv - session file, including length of session
 #define WAVE_SPEC_PREFIX     "spec" // spec.csv - PSD
 #define WAVE_ANA_PREFIX      "ana"  // ana.csv - Statistics calculated basesd on PSD (Significant Wave Height etc)
-#define WAVE_CFG_PREFIX      "cfg" // cfg.csv - Most relevant config parameters. Can be used to recreate output together with raw.bin
+#define WAVE_CFG_PREFIX      "cfg" // cfg.csv - Most relevant config parameters. Can be used to recreate output together with imu.bin
 #define WAVE_IMU_PREFIX      "imu" // imu.csv - imu-readings (depending on log format) 
-#define WAVE_RAW_PREFIX      "raw" // raw.bin - imu-readings, binary format, see raw_log.h
+#define WAVE_RAW_PREFIX      "raw" // imu.bin - imu-readings, binary format, see raw_log.h
 
 
 // Master switch for sd-logging
