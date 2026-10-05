@@ -15,19 +15,24 @@ void quatFromRollPitch(float q[4], float roll, float pitch) {
   q[0] = cp * cr; q[1] = cp * sr; q[2] = sp * cr; q[3] = -sp * sr;
 }
 
-// p = p * q (Hamilton product)
-// normalised to unit length, because the quaternion is a rotation
+// r = p * q (Hamilton product)
 // https://arxiv.org/abs/1711.02508 (eq. 12 and 26)
+void quatMultiply(const float p[4], const float q[4], float r[4]) {
+  r[0] = p[0] * q[0] - p[1] * q[1] - p[2] * q[2] - p[3] * q[3];
+  r[1] = p[0] * q[1] + p[1] * q[0] + p[2] * q[3] - p[3] * q[2];
+  r[2] = p[0] * q[2] - p[1] * q[3] + p[2] * q[0] + p[3] * q[1];
+  r[3] = p[0] * q[3] + p[1] * q[2] - p[2] * q[1] + p[3] * q[0];
+}
+
+// p = p * q, normalised to unit length, because the quaternion is a rotation
 void quatMultiplyNorm(float p[4], const float q[4]) {
-  const float r0 = p[0] * q[0] - p[1] * q[1] - p[2] * q[2] - p[3] * q[3];
-  const float r1 = p[0] * q[1] + p[1] * q[0] + p[2] * q[3] - p[3] * q[2];
-  const float r2 = p[0] * q[2] - p[1] * q[3] + p[2] * q[0] + p[3] * q[1];
-  const float r3 = p[0] * q[3] + p[1] * q[2] - p[2] * q[1] + p[3] * q[0];
-  const float n = 1.0f / sqrtf(r0 * r0 + r1 * r1 + r2 * r2 + r3 * r3);
-  p[0] = r0 * n; 
-  p[1] = r1 * n; 
-  p[2] = r2 * n; 
-  p[3] = r3 * n;
+  float r[4];
+  quatMultiply(p, q, r);
+  const float n = 1.0f / sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3]);
+  p[0] = r[0] * n;
+  p[1] = r[1] * n;
+  p[2] = r[2] * n;
+  p[3] = r[3] * n;
 }
 
 // Rotation vector v = th * u to quaternion

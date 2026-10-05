@@ -20,6 +20,12 @@ void rotateBodyToWorld(const float q[4], float ax, float ay, float az, float w[3
 // gravity
 float verticalAccel(const float q[4], float ax, float ay, float az, float gravity);
 
+// r = p * q (Hamilton product), no normalisation.
+// r may alias neither p nor q.
+// Used where the product is not a rotation and must not be rescaled, e.g. the
+// quaternion derivative 0.5 * q (x) [0, w], where the length carries the rate.
+void quatMultiply(const float p[4], const float q[4], float r[4]);
+
 // p = p * q (Hamilton product), renormalised
 void quatMultiplyNorm(float p[4], const float q[4]);
 
