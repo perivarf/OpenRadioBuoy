@@ -220,7 +220,7 @@ static constexpr WindowType kWelchWindow = WindowType::Hann;
 
 // Per-segment detrending, applied before the window.
 enum class DetrendMode { None, Mean, Linear };
-static constexpr DetrendMode kWelchDetrend = DetrendMode::None;
+static constexpr DetrendMode kWelchDetrend = DetrendMode::Mean;
 
 // Low-frequency half-cosine taper (Kohout / Tucker & Pitt 2001) on the elevation PSD.
 //static constexpr float kTaperF1 = 0.03f;   // T=0 below

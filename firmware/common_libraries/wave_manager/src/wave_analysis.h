@@ -33,7 +33,7 @@ struct WaveParams {
   double m0, m2, m4;
 };
 
-class StreamAnalyzer {
+class WaveSpectrumAnalyzer {
  public:
   void begin(void);              // reset all state for a new capture
   void ingest(const ImuRow &r);  // per row: decimate to kWelchInputOdrHz, accumulate Welch

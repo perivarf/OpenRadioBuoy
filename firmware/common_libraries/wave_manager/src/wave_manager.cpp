@@ -369,7 +369,7 @@ uint8_t WaveManager::processCapture(void) {
     stopSession();
   }
 
-  // Summary to the console (mirrors ORB_test StreamAnalyzer::finalize).
+  // Summary to the console (mirrors ORB_test WaveSpectrumAnalyzer::finalize).
   if (debug_serial) {
     Serial.print("[wave] processCapture #"); Serial.println(readingID_);
     Serial.print("  brake_windows: ");    Serial.print(analyzer_.brakeRows());

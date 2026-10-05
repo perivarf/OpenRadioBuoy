@@ -117,7 +117,7 @@ class WaveManager {
   void setCaptureEndTimeLocation(void); // captureEnd_, captureEndPos_, with or without the drift track
 
   ImuSampler imu_;
-  StreamAnalyzer analyzer_;
+  WaveSpectrumAnalyzer analyzer_;
   RawLogWriter rawLog_;
 
   // File states

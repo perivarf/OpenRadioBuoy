@@ -43,7 +43,7 @@ static constexpr auto kImuGyrMode = gyrModeFor(kImuLowPower);
 // The cutoff is a fraction of ODR
 // STRONG is 9.6 Hz at 960 Hz but 1.2 Hz at 120
 // -----------------------------------------------------------------------------
-static constexpr bool kUseLpf2 = true;
+static constexpr bool kUseLpf2 = false;
 
 // How far above kWaveFMax the cutoff must sit. 4x keeps the in-band droop small while
 // landing near the 5 Hz Nyquist of the 10 Hz series this is decimated to, so LPF2 does
@@ -110,18 +110,13 @@ static constexpr bool kImuUseInt1 = true;
 static constexpr uint32_t kFifoFillMs =
     (uint32_t)kFifoDepthWords * 1000u / kFifoWordsPerSec;   // 213 ms @ 480 Hz, 118 @ 960
 
-/*
-  The longest the drain trigger may wait between drains * 60%
-  Fail safe in case interrupt is not received
-*/
-static constexpr uint32_t kMaxDrainIntervalMs = 3u * kFifoFillMs / 5u;  // 127 ms @ 480 Hz
-
 // The chosen deadline, as a share of the maximum above
-static constexpr uint32_t kDrainIntervalPct = 100;
-static constexpr uint32_t kDrainIntervalMs  = kDrainIntervalPct * kMaxDrainIntervalMs / 100u;
+// Not too high, or the FIFO may overrun. Needs to be tested before deploy.
+static constexpr uint32_t kDrainIntervalPct = 60;
+static constexpr uint32_t kDrainIntervalMs  = kDrainIntervalPct * kFifoFillMs / 100u;
 
-// Asserting that kDrainIntervalMs <= kMaxDrainIntervalMs
-static_assert(kDrainIntervalMs <= kMaxDrainIntervalMs,
+// Asserting that kDrainIntervalMs <= kFifoFillMs
+static_assert(kDrainIntervalMs <= kFifoFillMs,
               "the chosen drain deadline exceeds what the FIFO depth allows - "
               "kDrainIntervalPct must not go above 100");
 

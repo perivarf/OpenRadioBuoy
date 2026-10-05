@@ -191,9 +191,9 @@ static inline float lowFreqTaper(float f) {
 }
 
 // -----------------------------------------------------------------------------
-// StreamAnalyzer
+// WaveSpectrumAnalyzer
 // -----------------------------------------------------------------------------
-void StreamAnalyzer::begin(void) {
+void WaveSpectrumAnalyzer::begin(void) {
   fir2_.reset();
   curBucket_ = -1; bucketDone_ = false;
   nWelch_ = nData_ = nBrake_ = nWarm_ = 0;
@@ -207,7 +207,7 @@ void StreamAnalyzer::begin(void) {
 
 // Push one sample into the ring. No FFT from here - this runs inside the FIFO pop loop.
 // A full segment only raises the flag; accumulateSegment() below does the work.
-void StreamAnalyzer::pushWelch(float sample) {
+void WaveSpectrumAnalyzer::pushWelch(float sample) {
   // Safety valve, not the normal path. If the ring is full, the FFT has to run inside the pop loop after all
   // However, should not be possible with the kWelchRingLen since it includes margin.
   if (fill_ == kWelchRingLen) {
@@ -224,7 +224,7 @@ void StreamAnalyzer::pushWelch(float sample) {
 // The deferred half of pushWelch: FFT + accumulate PSD, then release one step of the
 // ring (1-1/kWelchOverlapDiv => 75% overlap keeps the rest). 
 // Called from the capture loop with the FIFO just drained
-bool StreamAnalyzer::accumulateSegment(void) {
+bool WaveSpectrumAnalyzer::accumulateSegment(void) {
   if (!segPending_) return false;
   segPending_ = false;
 
@@ -238,7 +238,7 @@ bool StreamAnalyzer::accumulateSegment(void) {
   return true;
 }
 
-void StreamAnalyzer::ingest(const ImuRow &r) {
+void WaveSpectrumAnalyzer::ingest(const ImuRow &r) {
   nData_++;
   if (r.braking) nBrake_++;
 
@@ -279,7 +279,7 @@ void StreamAnalyzer::ingest(const ImuRow &r) {
 
 // Spectral moments m0/m2/m4 -> Hs/Tz/Tc/Tp, over the elevation PSD (acc PSD / omega^4 *
 // taper^2). Called from finalize() once nSeg_ > 0 has been confirmed.
-void StreamAnalyzer::computeSeaStateParams(WaveParams &params, float invSeg) {
+void WaveSpectrumAnalyzer::computeSeaStateParams(WaveParams &params, float invSeg) {
 
   const int N = kWelchSegLen;
   const float df = (float)kWelchInputOdrHz / N;
@@ -321,7 +321,7 @@ void StreamAnalyzer::computeSeaStateParams(WaveParams &params, float invSeg) {
   if (peakF > 0) params.tp = 1.0f / peakF;                                                // peak period from the spectral peak
 }
 
-bool StreamAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
+bool WaveSpectrumAnalyzer::finalize(WaveParams &params, uint16_t *spectrumOut) {
 
   // If any pending segments, process them now
   accumulateSegment();
