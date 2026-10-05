@@ -2,7 +2,6 @@
 #include <math.h>
 #include "rotation.h"
 
-
 void Madgwick::reset(void) {
   q_[0] = 1.0f; q_[1] = q_[2] = q_[3] = 0.0f;
 }
@@ -13,45 +12,61 @@ void Madgwick::initFromAccel(float ax, float ay, float az) {
   quatFromRollPitch(q_, roll, pitch);
 }
 
+// One filter step. The equation numbers are from section 3 of the report above.
 void Madgwick::update(float gx, float gy, float gz,
                       float ax, float ay, float az, float dt) {
-  float q0 = q_[0], q1 = q_[1], q2 = q_[2], q3 = q_[3];
+  // (12) the gyro's contribution: qDot = 0.5 * q (x) [0, w]
+  const float omega[4] = {0.0f, gx, gy, gz};
+  float qDot[4];
+  quatMultiply(q_, omega, qDot);
+  for (int i = 0; i < 4; ++i) qDot[i] *= 0.5f;
 
-  // Quaternion rate from the gyro alone.
-  float qDot1 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
-  float qDot2 = 0.5f * (q0 * gx + q2 * gz - q3 * gy);
-  float qDot3 = 0.5f * (q0 * gy - q1 * gz + q3 * gx);
-  float qDot4 = 0.5f * (q0 * gz + q1 * gy - q2 * gx);
+  const float n2 = ax * ax + ay * ay + az * az;
+  
+  if (n2 > 0.0f) {
+    // Only the DIRECTION of the accel is used, so the unit does not matter.
+    const float invLen = 1.0f / sqrtf(n2);
+    ax *= invLen; ay *= invLen; az *= invLen;
 
-  if (!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
-    // Gradient-descent correction towards the measured gravity direction.
-    float recipNorm = 1.0f / sqrtf(ax * ax + ay * ay + az * az);
-    ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
+    const float qw = q_[0], qx = q_[1], qy = q_[2], qz = q_[3];
 
-    float _2q0 = 2.0f * q0, _2q1 = 2.0f * q1, _2q2 = 2.0f * q2, _2q3 = 2.0f * q3;
-    float _4q0 = 4.0f * q0, _4q1 = 4.0f * q1, _4q2 = 4.0f * q2;
-    float _8q1 = 8.0f * q1, _8q2 = 8.0f * q2;
-    float q0q0 = q0 * q0, q1q1 = q1 * q1, q2q2 = q2 * q2, q3q3 = q3 * q3;
+    // (25) the error: measured gravity direction against the one the current
+    // attitude predicts
+    const float f[3] = {
+      2.0f * (qx * qz - qw * qy) - ax,
+      2.0f * (qw * qx + qy * qz) - ay,
+      2.0f * (0.5f - qx * qx - qy * qy) - az
+    };
 
-    float s0 = _4q0 * q2q2 + _2q2 * ax + _4q0 * q1q1 - _2q1 * ay;
-    float s1 = _4q1 * q3q3 - _2q3 * ax + 4.0f * q0q0 * q1 - _2q0 * ay - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az;
-    float s2 = 4.0f * q0q0 * q2 + _2q0 * ax + _4q2 * q3q3 - _2q3 * ay - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az;
-    float s3 = 4.0f * q1q1 * q3 - _2q1 * ax + 4.0f * q2q2 * q3 - _2q2 * ay;
-    recipNorm = 1.0f / sqrtf(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);
-    s0 *= recipNorm; s1 *= recipNorm; s2 *= recipNorm; s3 *= recipNorm;
+    // (26) the Jacobian df/dq, 3x4
+    const float J[3][4] = {
+      {-2.0f * qy,  2.0f * qz, -2.0f * qw, 2.0f * qx},
+      { 2.0f * qx,  2.0f * qw,  2.0f * qz, 2.0f * qy},
+      { 0.0f,      -4.0f * qx, -4.0f * qy, 0.0f     }
+    };
 
-    qDot1 -= beta_ * s0;
-    qDot2 -= beta_ * s1;
-    qDot3 -= beta_ * s2;
-    qDot4 -= beta_ * s3;
+    // (34) grad = J^T f (first branch with acceleration only)
+    float grad[4];
+    for (int c = 0; c < 4; ++c) {
+      grad[c] = J[0][c] * f[0] + J[1][c] * f[1] + J[2][c] * f[2];
+    }
+
+    // (43) step beta along the error direction
+    const float gn = sqrtf(grad[0] * grad[0] + grad[1] * grad[1] +
+                           grad[2] * grad[2] + grad[3] * grad[3]);
+    if (gn > 0.0f) {
+      const float s = beta_ / gn;
+      for (int i = 0; i < 4; ++i) qDot[i] -= s * grad[i];
+    }
   }
 
-  q0 += qDot1 * dt;
-  q1 += qDot2 * dt;
-  q2 += qDot3 * dt;
-  q3 += qDot4 * dt;
+  // (42) integrate
+  float q[4];
+  for (int i = 0; i < 4; ++i) q[i] = q_[i] + qDot[i] * dt;
+  
+  // Renormalise because q is a rotation
+  const float invLen = 1.0f / sqrtf(q[0] * q[0] + q[1] * q[1] +
+                                    q[2] * q[2] + q[3] * q[3]);
 
-  float recipNorm = 1.0f / sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-  q_[0] = q0 * recipNorm; q_[1] = q1 * recipNorm;
-  q_[2] = q2 * recipNorm; q_[3] = q3 * recipNorm;
+  for (int i = 0; i < 4; ++i) q_[i] = q[i] * invLen;
 }

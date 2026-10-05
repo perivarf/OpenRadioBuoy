@@ -6,6 +6,11 @@
 
   Quaternion q = [w,x,y,z],
   body -> world, yaw unobservable without a magnetometer and left at whatever the initialisation set it to.
+
+  S. O. H. Madgwick, "An efficient orientation filter for inertial and
+  inertial/magnetic sensor arrays", internal report, University of Bristol,
+  30 April 2010. update() is written out from section 3: eq. (12), (25), (26),
+  (34) and (42)-(44).
 */
 
 static constexpr float kMadgwickBeta = 0.05f;
