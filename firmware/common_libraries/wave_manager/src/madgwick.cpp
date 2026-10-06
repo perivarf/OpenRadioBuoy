@@ -32,6 +32,8 @@ void Madgwick::update(float gx, float gy, float gz,
 
     // (25) the error: measured gravity direction against the one the current
     // attitude predicts
+    // assumes buoy acceleration is zero, i.e. only gravity affects accelerometer
+    // Only valid when the buoy accelerometer is small compared to gravity
     const float f[3] = {
       2.0f * (qx * qz - qw * qy) - ax,
       2.0f * (qw * qx + qy * qz) - ay,
