@@ -319,9 +319,7 @@ void WaveManager::writeSessionConfig(File &f) {
   // Kalman
   f.print("kalman_sigma_g,");     f.println(kKalmanParams.sigmaG, 6);
   f.print("kalman_sigma_b,");     f.println(kKalmanParams.sigmaB, 8);
-  f.print("kalman_r0_density,");  f.println(kKalmanParams.r0Density, 8);
-  f.print("kalman_lambda_w,");    f.println(kKalmanParams.lambdaW, 3);
-  f.print("kalman_w0,");          f.println(kKalmanParams.w0, 3);
+  f.print("kalman_sigma_a,");     f.println(kKalmanParams.sigmaA, 6);
   f.print("kalman_p0_angle,");    f.println(kKalmanParams.p0Angle, 5);
   f.print("kalman_p0_bias,");     f.println(kKalmanParams.p0Bias, 5);
   f.print("gravity,");            f.println(kGravity, 5);

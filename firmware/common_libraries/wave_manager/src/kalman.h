@@ -3,66 +3,34 @@
 
 #include "math.h"
 
-// PIF TODO
-
 /*
-  Quaternion Kalman AHRS for a 6-axis IMU: error-state EKF.
-  
-  The attitude is carried as a unit quaternion
-  The filter estimates is a 6-element ERROR state
+  EKF with orientation deviation states and gyro bias, accel + gyro only.
 
-      dTheta (3) -> small-angle attitude error, body frame (rad)
-      dBias  (3) -> gyro bias error (rad/s)
+  Follows Kok, Hol & Schön, "Using Inertial Sensors for Position and Orientation
+  Estimation", Foundations and Trends in Signal Processing 11(1-2), 2017:
+  Algorithm 4 with the gyro bias extension in Appendix C.4. Equation numbers in
+  kalman.cpp refer to that text. The magnetometer rows are dropped.
 
-  which is injected into the quaternion after each correction and then reset to
-  zero. That indirection is the point: a quaternion has four components but only
-  three degrees of freedom, so filtering it directly gives a singular covariance
-  and fights its own normalisation.
+  State: x = [eta^n, delta_w]
+      eta^n   (3) -> orientation deviation, NAVIGATION frame (rad)
+      delta_w (3) -> gyro bias (rad/s), kept in the state (not reset)
 
-  Prediction integrates the bias-corrected gyro. Correction treats the
-  accelerometer as a measurement of the GRAVITY DIRECTION - normalised, so only
-  the direction is measured, exactly like the atan2 tilt it replaces. The length
-  never enters, which makes the filter scale-free in the accel: mg and m/s^2 give
-  the same attitude.
+  The attitude estimate q~ is the linearisation point. After each measurement
+  update eta^n is moved into q~ (4.56) and reset to zero.
 
-  Adaptive measurement noise
+  The accel is NOT normalised: the measurement model (4.51) is the accel vector
+  in m/s², and wave acceleration is covered by the measurement noise Sigma_a.
 
-      R = r0 * (dtRef/dt) * (1 + lambdaW*(|w|/w0)^2)
+  NOISE AS DENSITIES. Kok gives Sigma_w, Sigma_dw and Sigma_a per sample. They
+  are set from noise densities here, so the filter bandwidth does not depend on
+  the sample rate:
+      Sigma_w  = sigmaG^2 / dt,  Sigma_dw = sigmaB^2 * dt,  Sigma_a = sigmaA^2 / dt
 
-  Gravity is least trustworthy when the buoy rotates fast, since the attitude then
-  changes within one sample. R inflates during fast rolling, leaving attitude to the
-  gyro; in calm stretches it drops back and the accel anchors the slow drift.
-
-  MEASURED AT r0 = 1e-5, on Skjaerhalden 20260731_110314 through tools/postprocess.py:
-  a fixed R left a flat 8.5e-4 (m/s^2)^2/Hz tilt-leakage floor below 0.25 Hz and read
-  Hs 0.222 m where Madgwick and SFLP both said 0.097 m; lambdaW brought the same filter
-  to 0.135 m, -34 % on the noise floor. Those numbers do not carry to the r0 = 1e-3
-  shipped below, two decades above the tuning they were taken at: there the floor moves
-  under 2 % between lambdaW 0 and 4, so the term is not known to earn its place at this
-  r0. The sweep that would settle it has not been run.
-
-  RATE INVARIANCE. The dtRef/dt factor keeps the filter bandwidth independent of
-  the logging rate. Process noise is Q = sigmaG^2*dt, so a fixed R would give a
-  steady-state gain K ~ sqrt(sigmaG^2*dt/R) and a time constant dt/K proportional
-  to sqrt(dt) - two captures logged at different rates would then be compared
-  through two different filters. Scaling R with 1/dt cancels it exactly. R is then
-  a noise DENSITY rather than a per-sample variance, which is also the honest
-  reading: each ImuRow is a window average, and a shorter window averages away
-  less noise.
-
-  Two consequences of measuring gravity alone, both inherent and not worth
-  fighting on this hardware:
-    - yaw is unobservable, so it holds whatever the seed left it at;
-    - the gyro bias component ALONG gravity is unobservable too, so bias about the
-      vertical axis is never corrected. Roll/pitch bias, the part that matters for
-      vertical acceleration, converges normally.
-
-  Ported from tools/kalman.py, which holds the parameter sweeps behind
-  the defaults in wave_config.h. The two are meant to stay the same estimator:
-  tools/mekf.py mirrors THIS file, so postprocess.py's MEKF column and
-  its Kalman column diverging is the signal that they have drifted apart. The
-  chi^2 innovation gate in kalman.py is deliberately not ported - it is off
-  (gate = 0) in every configuration that has been run.
+  Consequences of measuring gravity alone (Kok, Example 5.3):
+    - yaw is unobservable; the third column of H is zero;
+    - the gyro bias component along gravity is not identifiable while the buoy
+      is level. Roll/pitch bias, the part that matters for vertical acceleration,
+      converges.
 
   Quaternion convention is the one from rotation.h: q = [w,x,y,z], body -> world.
 */
@@ -70,44 +38,33 @@
 struct KalmanAhrsParams {
   float sigmaG;    // gyro noise density [rad/s/sqrt(Hz)]
   float sigmaB;    // gyro bias random walk [rad/s^2/sqrt(Hz)]
-  float r0;        // base variance of the accel direction, at dtRef
-  float dtRef;     // sample interval the tuning was swept at [s]
-  float lambdaW;   // weight on |w| - where the gain is
-  float w0;        // normalisation for |w| [rad/s]
-  float p0Angle;   // initial attitude uncertainty [rad]
-  float p0Bias;    // initial bias uncertainty [rad/s]
+  float sigmaA;    // accel noise density [m/s^2/sqrt(Hz)]
+  float p0Angle;   // initial orientation uncertainty [rad]
+  float p0Bias;    // prior on the gyro bias [rad/s]
 };
 
-
-// Kalman: quaternion error-state EKF with an adaptive measurement noise
+// sigmaA = sqrt(2e-5) * g: the accel noise that gave the lowest low-frequency
+// noise floor on the Skjærhalden sessions (variant B).
 static constexpr KalmanAhrsParams kKalmanParams = {
     /* sigmaG  */ 0.005f,        // rad/s/sqrt(Hz), ~0.3 deg/s/sqrt(Hz)
     /* sigmaB  */ 1.0e-5f,       // rad/s^2/sqrt(Hz)
-    /* r0      */ 1.0e-3f,
-    /* dtRef   */ 0.020f,        // s - the rate the original parameter sweep was run at
-    /* lambdaW */ 2.0f,
-    /* w0      */ 1.0f,          // rad/s
+    /* sigmaA  */ 0.0438567f,    // m/s^2/sqrt(Hz)
     /* p0Angle */ 5.0f * (float)M_PI / 180.0f,    // 5 deg
     /* p0Bias  */ 1.0f * (float)M_PI / 180.0f,    // 1 deg/s
 };
 
 class KalmanAhrs {
  public:
-  explicit KalmanAhrs(const KalmanAhrsParams &p) : p_(p) {
-    if (p_.w0 < 1.0e-9f) p_.w0 = 1.0e-9f;   // w0 divides in measurementNoise()
-    reset();
-  }
+  explicit KalmanAhrs(const KalmanAhrsParams &p) : p_(p) { reset(); }
 
-  // Identity attitude, zero bias, P = diag(p0Angle^2, p0Bias^2). A non-zero P0
-  // lets the first corrections move the estimate
+  // Identity attitude, zero bias, P = diag(p0Angle^2, p0Bias^2).
   void reset(void);
 
   // Seed the attitude from one accel sample (gravity -> roll/pitch, yaw = 0).
   // Leaves the bias estimate and the covariance alone.
   void initFromAccel(float ax, float ay, float az);
 
-  // One filter step. Gyro in rad/s, dt in seconds. The accel is normalised
-  // internally, so its unit is free - only its direction is read.
+  // One filter step. Gyro in rad/s, accel in m/s^2, dt in seconds.
   void update(float gx, float gy, float gz, float ax, float ay, float az, float dt);
 
   const float *quaternion(void) const { return q_; }   // [w,x,y,z], unit length
@@ -120,17 +77,11 @@ class KalmanAhrs {
   void predict(float gx, float gy, float gz, float dt);
   void correct(float ax, float ay, float az);
 
-  // The measurement variance at the rotation rate and dt of the last predict()
-  float measurementNoise(void) const;
-
   KalmanAhrsParams p_;
   float q_[4] = {1.0f, 0.0f, 0.0f, 0.0f};
   float b_[3] = {0.0f, 0.0f, 0.0f};
   float P_[6][6] = {};
-  // |w| and dt from the last predict(). The adaptive R needs both - how fast we
-  // are rotating right now, and how long the sample averaged over
-  float wNorm_ = 0.0f;
-  float dt_ = 0.0f;
+  float dt_ = 0.0f;   // dt of the last predict(), for Sigma_a
 };
 
 #endif  // KALMAN_H
