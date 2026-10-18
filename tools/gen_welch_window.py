@@ -22,7 +22,7 @@ import numpy as np
 WINDOW_KIND = {"hann": "WindowType::Hann", "hamming": "WindowType::Hamming"}
 
 # kWelchSegLen in wave_config.h. Mirrored here rather than read out of the header
-DEFAULT_SEGLEN = 1024
+DEFAULT_SEGLEN = 512
 
 # Window type in wave_config.h. Mirrored here rather than read out of the header
 DEFAULT_WINDOW = "hann"

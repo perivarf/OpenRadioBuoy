@@ -3,6 +3,8 @@
 #include "constants.h"
 #include "wave_config.h"
 
+// Channels that are compiled out (CsvFir<false>) make these calls no-ops.
+
 void FirRowBank::reset(void) {
   ax_.reset(); ay_.reset(); az_.reset();
   nx_.reset(); ny_.reset(); nz_.reset();
@@ -27,24 +29,13 @@ void FirRowBank::eval(ImuRow &r) const {
   r.vaccFir = vacc_.eval();
   r.vacc    = vacc_.center();
 
-  // The rest of the values are written to imu.csv (if that is enabled)
-  if constexpr (waveModeImuCsv()) {
-    // Filtered
-    r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
-    r.axnSflp = nx_.eval(); r.aynSflp = ny_.eval(); r.aznSflp = nz_.eval();
-    r.gx = gx_.eval(); r.gy = gy_.eval(); r.gz = gz_.eval();
-    r.vaccSflpFir = r.aznSflp * kMg2Ms2;
+  // The rest are written to imu.csv only. A channel that is off (not writing imu.csv, or
+  // switched off in analysis_config.h) evaluates to 0, so every field of the reused
+  // pendingRow_ is defined either way.
+  r.ax = ax_.eval(); r.ay = ay_.eval(); r.az = az_.eval();
+  r.axnSflp = nx_.eval(); r.aynSflp = ny_.eval(); r.aznSflp = nz_.eval();
+  r.gx = gx_.eval(); r.gy = gy_.eval(); r.gz = gz_.eval();
+  r.vaccSflpFir = r.aznSflp * kMg2Ms2;   // filtered
 
-    // Unfiltered
-    r.vaccSflp = nz_.center() * kMg2Ms2;
-  } else {
-    // Zeroed rather than left alone: pendingRow_ is reused across rows, so a field
-    // nothing writes would carry an indeterminate value under a real column name. No
-    // file can ever receive these - their only writer is gated on the same constant -
-    // but the row leaves here fully defined either way.
-    r.ax = r.ay = r.az = 0.0f;
-    r.axnSflp = r.aynSflp = r.aznSflp = 0.0f;
-    r.gx = r.gy = r.gz = 0.0f;
-    r.vaccSflpFir = r.vaccSflp = 0.0f;
-  }
+  r.vaccSflp = nz_.center() * kMg2Ms2;   // unfiltered
 }

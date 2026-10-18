@@ -3,6 +3,8 @@
 
 #include "fir.h"      // FirDecimator - one per channel
 #include "imu_row.h"  // ImuRow - what eval() fills
+#include "log_config.h"       // waveModeImuCsv()
+#include "analysis_config.h"  // kFirAx ... kFirGz
 
 /*
   The ten series decimated per row - everything imu.csv logs, all through the same
@@ -13,6 +15,27 @@
   gx,gy,gz: gyro in mdps, body frame
   vacc: vertical linear accel in m/s^2, gravity frame, gravity removed, rotated
 */
+
+// One imu.csv channel. On = false is an empty type: no delay line, no code, eval() = 0.
+template <bool On> struct CsvFir {
+  explicit CsvFir(const float *c) : f(c) {}
+  void  reset() { f.reset(); }
+  void  push(float x) { f.push(x); }
+  float eval() const { return f.eval(); }
+  float center() const { return f.center(); }
+  FirDecimator f;
+};
+template <> struct CsvFir<false> {
+  explicit CsvFir(const float *) {}
+  void  reset() {}
+  void  push(float) {}
+  float eval() const { return 0.0f; }
+  float center() const { return 0.0f; }
+};
+
+// Enabled only when imu.csv is written AND the channel is switched on in analysis_config.h
+template <bool Flag> using CsvChan = CsvFir<waveModeImuCsv() && Flag>;
+
 class FirRowBank {
  public:
   explicit FirRowBank(const float *coeffs)
@@ -34,9 +57,9 @@ class FirRowBank {
   void eval(ImuRow &r) const;
 
  private:
-  FirDecimator ax_, ay_, az_;
-  FirDecimator nx_, ny_, nz_;
-  FirDecimator gx_, gy_, gz_;
+  CsvChan<kFirAx> ax_; CsvChan<kFirAy> ay_; CsvChan<kFirAz> az_;
+  CsvChan<kFirNx> nx_; CsvChan<kFirNy> ny_; CsvChan<kFirNz> nz_;
+  CsvChan<kFirGx> gx_; CsvChan<kFirGy> gy_; CsvChan<kFirGz> gz_;
   FirDecimator vacc_;
 };
 

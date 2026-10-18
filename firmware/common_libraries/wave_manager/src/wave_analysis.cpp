@@ -108,7 +108,7 @@ static constexpr float  kDetrendIMid = 0.5f * (kWelchSegLen - 1);
 /*
   Detrend one segment, window it, FFT, accumulate one-sided PSD into psdAcc[0..N/2].
 
-  Runs once every kWelchSegLen / kWelchOverlapDiv samples - 25.6 s at 10 Hz - and is the
+  Runs once every kWelchSegLen / kWelchOverlapDiv samples - 25.6 s at 5 Hz - and is the
   longest uninterruptible stretch in the capture loop. Its cost is therefore a
   FIFO question. It should be called when the FIFO is drained.
 
