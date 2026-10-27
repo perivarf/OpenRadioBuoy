@@ -60,7 +60,6 @@ class ScopeUs {
   Measurements nest:
 
       loop  >  update  >  pop ( > spi, ahrs, fir, rowsink ) + flush + dbgprint + status
-      loop  >  synccsv
       loop  >  welch
       loop  >  gps
 
@@ -85,7 +84,6 @@ enum TimingBucket : uint8_t {
   TIM_ROWSINK,     // analyzer ingest + the imu.csv row, once per row
   TIM_FLUSH,       // RawLogWriter::flush -> the raw log's SD write.
                    // only counts the drains that actually wrote
-  TIM_SYNCCSV,     // the periodic imu.csv sync()
   TIM_WELCH,       // welch - PSD - estimation
   TIM_GPS,         // serviceGps: the receiver poll and one gps.csv row
   TIM_LOOP,        // one capture-loop iteration, delay() excluded
@@ -96,7 +94,7 @@ enum TimingBucket : uint8_t {
 // Short enough for one serial line, and used verbatim as the ses.csv key
 inline constexpr const char *kTimingNames[TIM_COUNT] = {
     "update", "status", "pop", "spi", "ahrs", "fir",
-    "rowsink", "flush", "synccsv", "welch", "gps", "loop", "dbgprint"};
+    "rowsink", "flush", "welch", "gps", "loop", "dbgprint"};
 
 
 struct WaveTiming {

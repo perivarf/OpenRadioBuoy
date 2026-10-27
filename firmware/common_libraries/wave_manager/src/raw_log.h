@@ -34,7 +34,7 @@ class RawLogWriter {
 
   // Header with most of the necessary information, so a capcture can be decoded without
   // the firmware that wrote it. kRawHeaderBytes is fixed; the tail is zeroed, and a reader
-  // must skip to kRawHeaderBytes. 
+  // must skip to kRawHeaderBytes. Buffered like every other record; call after reset().
   void writeHeader(uint32_t captureStartEpoch, uint16_t readingId);
 
   // One per drain, written before that drain's words. Pins the sample axis to the

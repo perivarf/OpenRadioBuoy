@@ -205,6 +205,12 @@ bool WaveManager::startSession(void) {
     rawLog_.setSink(&WaveManager::rawSinkTrampoline);
     rawLog_.writeHeader((uint32_t)captureStart_, readingID_);
     imu_.setRawLog(&rawLog_);
+
+    // Commit the preAllocate (directory entry with the full size, FAT chain) now, so a
+    // power loss mid-capture leaves the data on the card reachable. No sync during the
+    // capture: every sector lands in the reserved clusters regardless, and a sync
+    // there only adds a directory write.
+    rawFile_.sync();
   }
 
   // IMU, GPS, Session headers
@@ -229,8 +235,6 @@ bool WaveManager::startSession(void) {
     Serial.println("WaveManager: could not open cfg.csv");
   }
 
-  rowsSinceSync_ = 0;
-  imuSyncPending_ = false;
   if (debug_serial) { Serial.print("WaveManager: logging session to ");Serial.println(sessionDir_); }
   return true;
 }
@@ -309,7 +313,6 @@ void WaveManager::writeSessionConfig(File &f) {
   // --- IMU.csv - windowing (raw ODR -> imu.csv rows) ---
   f.print("output_rate_hz,");     f.println(kRowOdrHz);
   f.print("window_ms,");          f.println(kRowPeriodMsF, 4);
-  f.print("csv_sync_rows,");      f.println(wave_csv_sync_rows);
   f.print("imu_prealloc_bytes,");
   f.println((uint32_t)kRowOdrHz * (wave_capture_duration / s_2_ms) *
             wave_imu_row_bytes_max);

@@ -31,12 +31,11 @@ void RawLogWriter::writeHeader(uint32_t captureStartEpoch, uint16_t readingId) {
   put16(readingId);
   put16(kRawSyncBytes);
 
-  // Straight to the sink, not through buf_: the header is written before any word and
-  // is not part of the sector-alignment budget the buffer is sized for.
-  if (!sink_(h, kRawHeaderBytes)) {
-    nWriteFail_++;
-    writeFailPending_ = true;
-  }
+  // Through buf_, not straight to the sink: a direct write would leave the file
+  // position kRawHeaderBytes into a sector, and every later flush would be unaligned and
+  // go through SdFat's shared cache. The header (< kRawFlushThreshold) fits in the
+  // sub-threshold remainder kRawBufBytes already allows for.
+  append(h, kRawHeaderBytes);
 }
 
 void RawLogWriter::append(const uint8_t *p, uint8_t n) {

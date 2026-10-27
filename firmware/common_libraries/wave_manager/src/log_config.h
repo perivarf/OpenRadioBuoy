@@ -25,7 +25,6 @@
 
 // Master switch for sd-logging
 static constexpr bool     wave_log_to_sd     {true};
-static constexpr uint16_t wave_csv_sync_rows {1024}; // How often to call sd sync
 
 // Row widths for preAllocate(). 
 // Too low, and time is spent on increasing file size during measurements, may lead to 
@@ -56,7 +55,7 @@ static constexpr bool wave_timing_enabled {true};
 //   None - No IMU log. gps/ses/spec/ana/cfg are still written.
 // -----------------------------------------------------------------------------
 enum class WaveLogMode : uint8_t { Csv = 0, Raw = 1, Both = 2, None = 3 };
-static constexpr WaveLogMode wave_log_mode = WaveLogMode::None;
+static constexpr WaveLogMode wave_log_mode = WaveLogMode::Raw;
 
 static constexpr bool waveModeImuCsv(void) {
   return wave_log_mode == WaveLogMode::Csv || wave_log_mode == WaveLogMode::Both;
@@ -95,6 +94,8 @@ static constexpr uint16_t kRawBufBytes = kRawFlushThreshold - 1 + kRawWorstDrain
 
 static_assert(kRawSyncTag > 0x1F,
               "the sync tag must not collide with a FIFO tag_sensor (top 5 bits)");
+static_assert(kRawHeaderBytes < kRawFlushThreshold,
+              "the header is buffered in buf_ and must fit in the sub-threshold remainder");
 static_assert(kRawBlockBytes >= kRawSyncBytes + kRawWordBytes,
               "raw block must hold at least a sync record plus one word");
 static_assert(kRawFlushThreshold % kRawBlockBytes == 0 && kRawFlushThreshold > 0,

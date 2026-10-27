@@ -185,7 +185,8 @@ void WaveManager::printPendingResult(Print &out) const {
   // doing (value/65535)^2 * max_value by hand
   //
   // The frequency is built from kSpecFMinHz and kSpecBinWidthHz
-  if (!kSendPsd) ("    PSD not transmitted (kSendPsd off) - num_bins 0"));
+  if (!kSendPsd) {
+    out.println(F("    PSD not transmitted (kSendPsd off) - num_bins 0"));
     return;
   }
 

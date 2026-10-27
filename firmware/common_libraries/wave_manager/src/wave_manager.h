@@ -91,7 +91,6 @@ class WaveManager {
   static WaveManager *s_self;
   static void rowSinkTrampoline(const ImuRow &r);
   void onRow(const ImuRow &r);
-  void syncImuCsvIfPending(void);   // the imu.csv sync
   static bool rawSinkTrampoline(const uint8_t *data, uint16_t len);
   bool onRawBlock(const uint8_t *data, uint16_t len);
 
@@ -127,8 +126,6 @@ class WaveManager {
   File     rawFile_;
 
   bool     sessionActive_ = false;
-  uint16_t rowsSinceSync_ = 0;
-  bool     imuSyncPending_ = false;
 
   // Log timestamp and session directory
   char     logStamp_[16]   = "00000000_000000";  // YYYYMMDD_HHMMSS

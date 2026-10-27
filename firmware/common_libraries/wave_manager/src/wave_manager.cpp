@@ -130,19 +130,6 @@ void WaveManager::onRow(const ImuRow &r) {
 
   if (!imuFile_) return;   // Raw-only mode: the analyzer above still ran
   appendImuCsvRow(r);           // see wave_session_log.cpp
-
-  // Flag if we should sync the file after this row
-  // Sync happens later outside the FIFO pop loop when the FIFO is empty.
-  if (++rowsSinceSync_ >= wave_csv_sync_rows) {
-    imuSyncPending_ = true;
-    rowsSinceSync_ = 0;
-  }
-}
-
-void WaveManager::syncImuCsvIfPending(void) {
-  if (!imuSyncPending_) return;
-  imuSyncPending_ = false;
-  if (imuFile_) imuFile_.sync();
 }
 
 
@@ -236,11 +223,6 @@ void WaveManager::runCaptureLoop(void) {
     // Fetch IMU data, process it, and write it to raw log and/or imu.csv
     // The FIFO is drained in update() until it is empty, and the FIR is evaluated for each window
     imu_.update(Serial, wave_capture_duration - elapsed, gpsRowsWritten_);
-
-    // Sync IMU-file if pending
-    const uint32_t tSync = timeStart();
-    syncImuCsvIfPending();
-    timeAdd(TIM_SYNCCSV, tSync);
 
     // The full segment is accumulated in the analyzer by imu_.update() -> onRow() -> analyzer_.ingest(). 
     // The analyzer's accumulateSegment() is called here to finalise the segment and accumulate the PSD sums. 
