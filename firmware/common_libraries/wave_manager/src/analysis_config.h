@@ -104,37 +104,64 @@ static constexpr const char *wave_orientation_name = wave_use_sflp ? "SFLP" : Ah
 static constexpr float    kFirS1CutoffHz  = 0.5f * kRowOdrHz;
 static constexpr float    kFirS2CutoffHz  = 0.5f * kWelchInputOdrHz;
 
+// Filter per stage: the kind, and the tap count for the sinc kinds. Mean ignores the
+// tap count - it spans one output period (firMeanNtap). Each kind/count/D needs a table
+// in fir_coeffs.h; the asserts below name the one that is missing.
+static constexpr FirKind  kFirS1Kind     = FirKind::Hamming;
+static constexpr uint16_t kFirS1SincNtap = 31;
+static constexpr FirKind  kFirS2Kind     = FirKind::Hamming;
+static constexpr uint16_t kFirS2SincNtap = 129;
+
+// FIR stage 1 - raw samples per row. Not necessarily whole (480 -> 50 Hz is 9.6),
+// so a float; the table lookup uses kFirS1DecimX10.
+static constexpr float    kFirS1Decim     = (float)kImuOdrHz / (float)kRowOdrHz;
+
 // FIR stage 2 - rows per bucket
 static constexpr uint16_t kFirS2Decim     = kRowOdrHz / kWelchInputOdrHz;
 
+// Decimation factors x 10 for the FIR table lookup
+static constexpr uint16_t kFirS1DecimX10 = (uint16_t)((10u * kImuOdrHz) / kRowOdrHz);
+static constexpr uint16_t kFirS2DecimX10 = (uint16_t)(10u * kFirS2Decim);
+
+static constexpr uint16_t kFirS1Ntap =
+    kFirS1Kind == FirKind::Mean ? firMeanNtap(kFirS1DecimX10) : kFirS1SincNtap;
+static constexpr uint16_t kFirS2Ntap =
+    kFirS2Kind == FirKind::Mean ? firMeanNtap(kFirS2DecimX10) : kFirS2SincNtap;
+static constexpr uint16_t kFirS1Half = (kFirS1Ntap - 1) / 2;  // group delay, raw samples
+static constexpr uint16_t kFirS2Half = (kFirS2Ntap - 1) / 2;  // group delay, rows
+
+static constexpr const float *kFirCoeffsStage1 = firTaps(kFirS1Kind, kFirS1Ntap, kFirS1DecimX10);
+static constexpr const float *kFirCoeffsStage2 = firTaps(kFirS2Kind, kFirS2Ntap, kFirS2DecimX10);
+
 // FIR group delay in seconds, for the imu.csv rows and the Welch input series.
 static constexpr uint16_t kFirS2CenterMs  = (uint16_t)(((uint32_t)(kFirS2Decim / 2) * 1000u) / kRowOdrHz);
-static constexpr float    kFirS1DelayS    = (float)kFirHalf / (float)kImuOdrHz;
-static constexpr float    kFirS2DelayS    = (float)kFirHalf / (float)kRowOdrHz;
+static constexpr float    kFirS1DelayS    = (float)kFirS1Half / (float)kImuOdrHz;
+static constexpr float    kFirS2DelayS    = (float)kFirS2Half / (float)kRowOdrHz;
 
 static constexpr bool kFirAx  = true,  kFirAy  = true,  kFirAz  = true;   // accel, body frame
 static constexpr bool kFirNx  = true,  kFirNy  = true,  kFirNz  = true;   // linear accel, SFLP gravity frame
 static constexpr bool kFirGx  = true,  kFirGy  = true,  kFirGz  = true;   // gyro, body frame
 
-// Decimation factors x 10 for the FIR table lookup
-static constexpr uint16_t kFirS1DecimX10 = (uint16_t)((10u * kImuOdrHz) / kRowOdrHz);
-static constexpr uint16_t kFirS2DecimX10 = (uint16_t)(10u * kFirS2Decim);
-static constexpr const float *kFirCoeffsStage1 = firTapsForDecimX10(kFirS1DecimX10);
-static constexpr const float *kFirCoeffsStage2 = firTapsForDecimX10(kFirS2DecimX10);
-
 static_assert(10u * kImuOdrHz % kRowOdrHz == 0,
               "kImuOdrHz/kRowOdrHz must land on a whole tenth - the table key is 10*D");
 
+static_assert(kFirS1Kind != FirKind::Mean || kFirS1Ntap != 0,
+              "the stage 1 mean needs a whole kImuOdrHz/kRowOdrHz");
+static_assert(kFirS2Kind != FirKind::Mean || kFirS2Ntap != 0,
+              "the stage 2 mean needs a whole kRowOdrHz/kWelchInputOdrHz");
+
+static_assert(kFirS1Ntap % 2 == 1 && kFirS2Ntap % 2 == 1,
+              "odd tap count - the group delay must be a whole number of samples");
+
 static_assert(kFirCoeffsStage1 != nullptr,
-              "no FIR table for kImuOdrHz/kRowOdrHz - add the ratio to DEFAULT_DECIM "
-              "in tools/gen_fir_table.py and regenerate fir_coeffs.h");
+              "no FIR table for stage 1 (kFirS1Kind, kFirS1Ntap, kImuOdrHz/kRowOdrHz) - add "
+              "it to DEFAULT_DECIM / DEFAULT_NTAP in tools/gen_fir_table.py and regenerate "
+              "fir_coeffs.h");
 
 static_assert(kFirCoeffsStage2 != nullptr,
-              "no FIR table for kRowOdrHz/kWelchInputOdrHz - add the ratio to DEFAULT_DECIM "
-              "in tools/gen_fir_table.py and regenerate fir_coeffs.h");
-
-static_assert(kFirNtap % 2 == 1,
-              "odd tap count - the group delay must be a whole number of samples");
+              "no FIR table for stage 2 (kFirS2Kind, kFirS2Ntap, kRowOdrHz/kWelchInputOdrHz) - "
+              "add it to DEFAULT_DECIM / DEFAULT_NTAP in tools/gen_fir_table.py and "
+              "regenerate fir_coeffs.h");
 
 static_assert(kRowOdrHz % kWelchInputOdrHz == 0,
               "stage 2 must decimate a whole number of rows - fir.py assumes the same");
@@ -145,16 +172,17 @@ static_assert(kRowOdrHz <= kImuOdrHz,
 static_assert(kWelchInputOdrHz <= kRowOdrHz,
               "the Welch input is a decimation of the rows - it cannot exceed kRowOdrHz");
 
-static_assert(wave_capture_warmup > ((uint32_t)kFirNtap * 1000u) / kRowOdrHz + 2000,
-              "warm-up must cover FIR start-up (1.29 s) plus AHRS convergence");
+static_assert(wave_capture_warmup > ((uint32_t)kFirS1Ntap * 1000u) / kImuOdrHz +
+                                    ((uint32_t)kFirS2Ntap * 1000u) / kRowOdrHz + 2000,
+              "warm-up must cover the start-up of both FIR stages plus AHRS convergence");
 
 // ---- Orientation delay ----
 // The quaternions from built in AHRS are not filtered in firmware.
 // Need to correct for delay when using the quaternions in the analysis and outputting to imu.csv.
-// Due to FIR, ax..gz describe the signal kFirHalf raw samples earlier than the imu row's timestamp.
+// Due to FIR, ax..gz describe the signal kFirS1Half raw samples earlier than the imu row's timestamp.
 //
 // The AHRS steps once per raw sample, so the delay is the FIR group delay itself
-static constexpr uint16_t kQuatDelaySteps = kFirHalf;
+static constexpr uint16_t kQuatDelaySteps = kFirS1Half;
 static constexpr uint16_t kQuatDelaySlots = kQuatDelaySteps + 1;
 
 // -----------------------------------------------------------------------------
@@ -184,7 +212,7 @@ static constexpr uint16_t kBrakeMinSamples =
 // spectrum is coarser than the analysis
 // -----------------------------------------------------------------------------
 static constexpr uint16_t kWelchSegLen     = 512;
-static constexpr uint16_t kWelchOverlapDiv = 4;      // step = seglen/4 => 75% overlap
+static constexpr uint16_t kWelchStepDiv = 4;      // step = seglen/4 => 75% overlap
 static_assert((kWelchSegLen & (kWelchSegLen - 1)) == 0, "kWelchSegLen must be a power of two");
 
 

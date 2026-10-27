@@ -27,6 +27,31 @@
 #define BUILD_STR2(x) #x
 #define BUILD_STR(x)  BUILD_STR2(x)
 
+// v in exponent form, d.dddde-05. Print's float output is fixed-point only, and the
+// elevation PSD tail falls to 1e-6 m^2/Hz and below - six decimals would print it as
+// 0.000000. snprintf("%e") is no alternative: newlib-nano is linked without float
+// printf support.
+// Scaling by 10 in a loop rather than log10f/powf, which would link ~3 kB of libm for
+// this alone. The loop runs in double: a dozen float steps lose the 7th digit
+// (3.3e-12 -> 3.299999e-12), and Print formats in double anyway.
+static void printSci(Print &p, float v, uint8_t digits) {
+  if (!isfinite(v))  { p.print(v, digits); return; }   // "nan" / "inf", as a CSV reader expects
+  if (v == 0.0f)     { p.print(v, digits); p.print(F("e+00")); return; }
+  double m = fabs((double)v);
+  int e = 0;
+  while (m >= 10.0) { m /= 10.0; e++; }
+  while (m < 1.0)   { m *= 10.0; e--; }
+  // Rounding to digits can carry the mantissa up to 10.000 - renormalise first.
+  double half = 0.5;
+  for (uint8_t i = 0; i < digits; i++) half /= 10.0;
+  if (m + half >= 10.0) { m /= 10.0; e++; }
+  if (v < 0.0f) p.print('-');
+  p.print(m, digits);
+  p.print(e < 0 ? F("e-") : F("e+"));
+  if (abs(e) < 10) p.print('0');
+  p.print(abs(e));
+}
+
 // imu.csv column header. Naming convention:
 //   unsuffixed  = the SELECTED filter (AhrsFilter, or SFLP when wave_use_sflp)
 //   _sflp       = the on-chip SFLP rotation fusion, or ZERO throughout when
@@ -291,7 +316,13 @@ void WaveManager::writeSessionConfig(File &f) {
 
   // --- decimation ---
   f.print("row_decimation,fir");  f.println();
-  f.print("fir_ntap,");           f.println(kFirNtap);
+  f.print("fir_ntap,");           f.println(kFirS1Ntap);   // stage 1, kept for older parsers
+  f.print("fir_s1_kind,");        f.println(firKindName(kFirS1Kind));
+  f.print("fir_s1_ntap,");        f.println(kFirS1Ntap);
+  f.print("fir_s2_kind,");        f.println(firKindName(kFirS2Kind));
+  f.print("fir_s2_ntap,");        f.println(kFirS2Ntap);
+  f.print("fir_s1_decim,");       f.println(kFirS1Decim, 3);
+  f.print("fir_s2_decim,");       f.println(kFirS2Decim);
   f.print("fir_s1_cutoff_hz,");   f.println(kFirS1CutoffHz, 3);
   f.print("fir_s2_cutoff_hz,");   f.println(kFirS2CutoffHz, 3);
   f.print("fir_s1_delay_s,");     f.println(kFirS1DelayS, 6);
@@ -325,15 +356,15 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("gravity,");            f.println(kGravity, 5);
   f.print("mg_to_ms2,");          f.println(kMg2Ms2, 8);
   f.print("mdps_to_rads,");       f.println(kMdps2Rads, 8);
-  f.print("log_mode,");           f.println((uint8_t)wave_log_mode);  // 0=csv 1=raw 2=both
+  f.print("log_mode,");           f.println((uint8_t)wave_log_mode);  // 0=csv 1=raw 2=both 3=none
   f.print("raw_format_version,"); f.println(kRawFormatVersion);
   f.print("vacc_bucket_ms,");     f.println(kWelchInputPeriodMs);
   f.print("vacc_fs_hz,");         f.println((float)kWelchInputOdrHz, 3);
 
   // Welch spectrum + acc->elevation taper
   f.print("welch_seglen,");       f.println(kWelchSegLen);
-  f.print("welch_overlap_div,");  f.println(kWelchOverlapDiv);
-  f.print("welch_step,");         f.println(kWelchSegLen / kWelchOverlapDiv);
+  f.print("welch_overlap_div,");  f.println(kWelchStepDiv);
+  f.print("welch_step,");         f.println(kWelchSegLen / kWelchStepDiv);
   f.print("welch_window,");       f.println(kWelchWindow == WindowType::Hann ? "Hann" : "Hamming");
   f.print("welch_detrend,");      f.println(kWelchDetrend == DetrendMode::None ? "none"
                                           : kWelchDetrend == DetrendMode::Mean ? "mean" : "linear");
@@ -384,8 +415,8 @@ void WaveManager::writeSpecCsv(void) {
     if (taper <= 0.0f) continue;
     float pacc = psd[k] * invSeg;
     sf.print(f, 5); sf.print(',');
-    sf.print(pacc, 6); sf.print(',');
-    sf.println(pacc / w4 * (taper * taper), 6);
+    printSci(sf, pacc, 6); sf.print(',');
+    printSci(sf, pacc / w4 * (taper * taper), 6); sf.println();
   }
   sf.sync(); sf.close();
 }

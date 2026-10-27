@@ -108,7 +108,7 @@ static constexpr float  kDetrendIMid = 0.5f * (kWelchSegLen - 1);
 /*
   Detrend one segment, window it, FFT, accumulate one-sided PSD into psdAcc[0..N/2].
 
-  Runs once every kWelchSegLen / kWelchOverlapDiv samples - 25.6 s at 5 Hz - and is the
+  Runs once every kWelchSegLen / kWelchStepDiv samples - 25.6 s at 5 Hz - and is the
   longest uninterruptible stretch in the capture loop. Its cost is therefore a
   FIFO question. It should be called when the FIFO is drained.
 
@@ -222,7 +222,7 @@ void WaveSpectrumAnalyzer::pushWelch(float sample) {
 }
 
 // The deferred half of pushWelch: FFT + accumulate PSD, then release one step of the
-// ring (1-1/kWelchOverlapDiv => 75% overlap keeps the rest). 
+// ring (1-1/kWelchStepDiv => 75% overlap keeps the rest). 
 // Called from the capture loop with the FIFO just drained
 bool WaveSpectrumAnalyzer::accumulateSegment(void) {
   if (!segPending_) return false;
@@ -231,7 +231,7 @@ bool WaveSpectrumAnalyzer::accumulateSegment(void) {
   accumSegment(ring_, tail_, psdAcc_);
   nSeg_++;
 
-  const uint16_t step = kWelchSegLen / kWelchOverlapDiv;
+  const uint16_t step = kWelchSegLen / kWelchStepDiv;
   tail_ += step;
   if (tail_ >= kWelchRingLen) tail_ -= kWelchRingLen;
   fill_ -= step;
@@ -268,7 +268,7 @@ void WaveSpectrumAnalyzer::ingest(const ImuRow &r) {
   }
 
   // Evaluate the FIR at the centre of the bucket and push it into the Welch ring buffer
-  // The FIR delay is kFirHalf = (kFirNtap - 1) / 2 measurements.
+  // The FIR delay is kFirS2Half = (kFirS2Ntap - 1) / 2 rows.
   if (!bucketDone_ && t >= bucket * (long)kWelchInputPeriodMs + (long)kFirS2CenterMs) {
     float s = fir2_.eval();
     pushWelch(isfinite(s) ? s : 0.0f);

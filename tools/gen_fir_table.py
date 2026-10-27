@@ -29,8 +29,8 @@ Usage:
   python gen_fir_table.py \\
       -o ../firmware/common_libraries/wave_manager/src/fir_coeffs.h
 
-Add a new rate combination by extending --decim; the firmware's static_assert says
-which D is missing.
+Add a new rate combination by extending --decim, a tap count with --ntap; the
+firmware's static_assert says which combination is missing.
 """
 
 import argparse
@@ -47,6 +47,12 @@ import fir
 # linker (-fdata-sections + --gc-sections), so the list costs nothing to keep generous.
 DEFAULT_DECIM = [1.2, 2.4, 4.0, 4.8, 5.0, 6.0, 8.0, 9.6, 10.0, 12.0, 16.0, 19.2]
 
+# Sinc tap counts. The mean has its own (fir.mean_ntap).
+DEFAULT_NTAP = [31, 63, 129]
+
+# --kind value -> FirKind enumerator in fir.h. Must follow that enum.
+KINDS = {"hamming": "Hamming", "hann": "Hann", "blackman": "Blackman", "mean": "Mean"}
+
 
 def decim_key(d):
     """Integer key = 10*D. Only exact tenths are legal, otherwise two different Ds
@@ -59,14 +65,22 @@ def decim_key(d):
     return k
 
 
-def fmt_table(name, d, coeffs, per_line=4):
+def lit(v):
+    """One float32 literal, with the decimal point forced in, because 0f is not valid C++."""
+    t = f"{np.float32(v):.9g}"
+    if not any(c in t for c in ".en"):
+        t += ".0"
+    return t + "f"
+
+
+def fmt_table(name, comment, coeffs, per_line=4):
     """%.9g is short enough to read and long enough to round back to exactly the same
     float32."""
-    out = [f"// D = {d:g}: firwin_lowpass({len(coeffs)}, 0.5, {d:g}) => fc/fs = {0.5 / d:.9g}",
-           f"inline constexpr float {name}[kFirNtap] = {{"]
+    out = [f"// {comment}",
+           f"inline constexpr float {name}[{len(coeffs)}] = {{"]
     for i in range(0, len(coeffs), per_line):
         chunk = coeffs[i:i + per_line]
-        out.append("    " + " ".join(f"{np.float32(v):.9g}f," for v in chunk))
+        out.append("    " + " ".join(f"{lit(v)}," for v in chunk))
     out.append("};")
     return "\n".join(out)
 
@@ -77,67 +91,80 @@ def main():
     ap.add_argument("--decim", type=float, nargs="+", default=DEFAULT_DECIM,
                     help="the decimation factors to build tables for "
                          f"(default {DEFAULT_DECIM})")
-    ap.add_argument("--ntap", type=int, default=fir.NTAP, help=f"number of taps (default {fir.NTAP})")
+    ap.add_argument("--ntap", type=int, nargs="+", default=DEFAULT_NTAP,
+                    help=f"sinc tap counts (default {DEFAULT_NTAP}); the mean sets its own")
+    ap.add_argument("--kind", nargs="+", default=list(KINDS), choices=list(KINDS),
+                    help=f"filter kinds (default {list(KINDS)})")
     ap.add_argument("-o", "--out", default="-", help="output file, '-' for stdout")
     args = ap.parse_args()
 
     keys = sorted({decim_key(d) for d in args.decim})
 
-    tables = []
-    for k in keys:
-        d = k / 10.0
-        h = fir.firwin_lowpass(args.ntap, 0.5, d)   # fc = 0.5, fs = D => fc/fs = 1/(2D)
-        # firwin_lowpass normalises to sum(h) = 1 in float64, but we store float32. The
-        # deviation has to be small enough that the DC gain is still 1 within the noise -
-        # otherwise a constant accel bias would be scaled by the filter.
-        s = float(np.sum(np.float32(h).astype(np.float64)))
-        if abs(s - 1.0) > 1e-5:
-            sys.exit(f"D = {d:g}: the float32 sum {s!r} deviates too far from 1.0")
-        tables.append((k, d, h))
+    tables = []   # (kind, ntap, key, comment, taps)
+    for kind in args.kind:
+        for k in keys:
+            d = k / 10.0
+            if kind == "mean":
+                n = fir.mean_ntap(d)
+                if n is None:
+                    continue   # no whole-sample mean for a fractional D
+                variants = [(n, f"D = {d:g}: mean_taps({d:g}), {n} taps", fir.mean_taps(d))]
+            else:
+                # fc = 0.5, fs = D => fc/fs = 1/(2D)
+                variants = [(n, f"D = {d:g}: firwin_lowpass({n}, 0.5, {d:g}, {kind!r}) "
+                                f"=> fc/fs = {0.5 / d:.9g}",
+                             fir.firwin_lowpass(n, 0.5, d, kind))
+                            for n in sorted(set(args.ntap))]
+            for n, comment, h in variants:
+                # firwin_lowpass normalises to sum(h) = 1 in float64, but we store float32.
+                # The deviation has to be small enough that the DC gain is still 1 within
+                # the noise - otherwise a constant accel bias would be scaled by the filter.
+                s = float(np.sum(np.float32(h).astype(np.float64)))
+                if abs(s - 1.0) > 1e-5:
+                    sys.exit(f"{kind} N = {n} D = {d:g}: the float32 sum {s!r} deviates too far from 1.0")
+                tables.append((kind, n, k, comment, h))
+
+    def tname(kind, n, k):
+        return f"kFirTaps_{KINDS[kind]}_N{n}_D{k}"
 
     # A chain of ternary operators: the constexpr function has to be a single
     # expression to be evaluable in a static_assert.
     selector = "\n".join(
-        f"  {'return' if i == 0 else '     :'} k == {k:3d} ? kFirTapsD{k}"
-        for i, (k, _, _) in enumerate(tables))
+        f"  {'return' if i == 0 else '     :'} kind == FirKind::{KINDS[kind]:<8} && ntap == {n:3d} && k == {k:3d} ? {tname(kind, n, k)}"
+        for i, (kind, n, k, _, _) in enumerate(tables))
     selector += "\n       :            nullptr;"
 
     body = f"""#ifndef FIR_COEFFS_H
 #define FIR_COEFFS_H
 
-#include "fir.h"   // kFirNtap - the tables are sized by it and generated for it
+#include "fir.h"   // FirKind
 
 /*
   GENERATED by tools/gen_fir_table.py - do not edit by hand.
 
-  Windowed-sinc lowpass (Hamming, normalised so sum(h) = 1).
-  Sum = 1 gives exactly unity gain at DC, so any residual accel bias
-  is not scaled.
+  Windowed-sinc lowpass (Hamming / Hann / Blackman, normalised so sum(h) = 1), and the
+  mean over one output period. Sum = 1 gives exactly unity gain at DC, so any residual
+  accel bias is not scaled.
 
-  ONE TABLE PER DECIMATION FACTOR. The coefficients depend only on
+  ONE TABLE PER (KIND, TAP COUNT, DECIMATION FACTOR). The coefficients depend only on
   fc/fs, and since both stages use fc = fs_out/2 that is 1/(2*D) - so 960->100 and
   480->50 are the SAME table.
 
-  The name suffix is 10x the decimation factor, since D can be 9.6:
-  kFirTapsD96 = D 9.6, kFirTapsD100 = D 10.0.
+  The D suffix is 10x the decimation factor, since D can be 9.6:
+  kFirTaps_Hamming_N31_D96 = D 9.6, kFirTaps_Hamming_N31_D100 = D 10.0.
 
   The tables live in flash; the linker drops the unused ones
 */
 
-// The tap count must match the value in fir.h
-static_assert(kFirNtap == {args.ntap},
-              "kFirNtap changed - regenerate fir_coeffs.h with "
-              "tools/gen_fir_table.py --ntap <n>");
-
 """
 
-    for k, d, h in tables:
-        body += fmt_table(f"kFirTapsD{k}", d, h) + "\n\n"
+    for kind, n, k, comment, h in tables:
+        body += fmt_table(tname(kind, n, k), comment, h) + "\n\n"
 
-    body += f"""// Select a table by decimation factor x 10. Returns nullptr for a factor with no
-// table, so analysis_config.h can stop the build with a message naming what is missing
-// rather than filtering with the wrong coefficients.
-constexpr const float *firTapsForDecimX10(uint16_t k) {{
+    body += f"""// Select a table by kind, tap count and decimation factor x 10. Returns nullptr for a
+// combination with no table, so analysis_config.h can stop the build with a message
+// naming what is missing rather than filtering with the wrong coefficients.
+constexpr const float *firTaps(FirKind kind, uint16_t ntap, uint16_t k) {{
 {selector}
 }}
 
@@ -149,8 +176,9 @@ constexpr const float *firTapsForDecimX10(uint16_t k) {{
     else:
         with open(args.out, "w") as f:
             f.write(body)
-        print(f"wrote {args.out}: {len(tables)} tables of {args.ntap} taps, "
-              f"D = {', '.join(f'{d:g}' for _, d, _ in tables)}")
+        print(f"wrote {args.out}: {len(tables)} tables, kinds {', '.join(args.kind)}, "
+              f"sinc N = {', '.join(str(n) for n in sorted(set(args.ntap)))}, "
+              f"D = {', '.join(f'{k / 10:g}' for k in keys)}")
 
 
 if __name__ == "__main__":

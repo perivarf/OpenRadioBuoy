@@ -23,7 +23,7 @@ template <bool On> struct CsvFir {
   void  push(float x) { f.push(x); }
   float eval() const { return f.eval(); }
   float center() const { return f.center(); }
-  FirDecimator f;
+  FirDecimator<kFirS1Ntap> f;
 };
 template <> struct CsvFir<false> {
   explicit CsvFir(const float *) {}
@@ -60,7 +60,7 @@ class FirRowBank {
   CsvChan<kFirAx> ax_; CsvChan<kFirAy> ay_; CsvChan<kFirAz> az_;
   CsvChan<kFirNx> nx_; CsvChan<kFirNy> ny_; CsvChan<kFirNz> nz_;
   CsvChan<kFirGx> gx_; CsvChan<kFirGy> gy_; CsvChan<kFirGz> gz_;
-  FirDecimator vacc_;
+  FirDecimator<kFirS1Ntap> vacc_;
 };
 
 #endif  // FIR_ROW_BANK_H

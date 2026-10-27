@@ -14,12 +14,48 @@ CUTOFF = None                # None => half the output rate (fs_out/2), as in fi
 COMPENSATE_DELAY = True      # compensate the group delay (the firmware does not)
 
 
-def firwin_lowpass(ntap, cutoff, fs):
-    """Windowed sinc lowpass - identical to scipy.signal.firwin(ntap, cutoff, fs=fs)
-    with the default choices (Hamming window, scale=True), but written out by hand
-    because scipy is an OPTIONAL dependency here:
+WINDOWS = ("hamming", "hann", "blackman")
 
-      h[n] = sinc(2*(fc/fs)*(n - (N-1)/2)) * w_hamming[n],  normalised so sum(h) = 1
+
+def sinc_window(ntap, window):
+    """Symmetric window weights w[0..N-1], as scipy.signal.get_window(window, N, fftbins=False)."""
+    n = np.arange(ntap, dtype=np.float64)
+    x = 2.0 * np.pi * n / (ntap - 1)
+    if window == "hamming":
+        return 0.54 - 0.46 * np.cos(x)
+    if window == "hann":
+        return 0.5 - 0.5 * np.cos(x)
+    if window == "blackman":
+        return 0.42 - 0.5 * np.cos(x) + 0.08 * np.cos(2.0 * x)
+    raise ValueError(f"FIR: unknown window {window!r} (one of {WINDOWS})")
+
+
+def mean_ntap(decim):
+    """Tap count of the mean over one output period: D taps for an odd D, D+1 for an
+    even D (half weight at the ends) so the length stays odd. None for a fractional D."""
+    d = int(round(decim))
+    if abs(decim - d) > 1e-9 or d < 1:
+        return None
+    return d if d % 2 else d + 1
+
+
+def mean_taps(decim):
+    """Moving mean over one output period, as a symmetric odd-length FIR (see mean_ntap)."""
+    n = mean_ntap(decim)
+    if n is None:
+        raise ValueError(f"FIR: the mean needs a whole decimation factor (got {decim})")
+    h = np.ones(n, dtype=np.float64)
+    if n != int(round(decim)):
+        h[0] = h[-1] = 0.5
+    return h / float(np.sum(h))
+
+
+def firwin_lowpass(ntap, cutoff, fs, window="hamming"):
+    """Windowed sinc lowpass - identical to scipy.signal.firwin(ntap, cutoff, fs=fs,
+    window=window) with scale=True, but written out by hand because scipy is an
+    OPTIONAL dependency here:
+
+      h[n] = sinc(2*(fc/fs)*(n - (N-1)/2)) * w[n],  normalised so sum(h) = 1
 
     The normalisation gives exactly unity gain at DC, which is what keeps a filtered
     mean level (a residual accel bias, say) from being scaled.
@@ -37,7 +73,7 @@ def firwin_lowpass(ntap, cutoff, fs):
         raise ValueError(f"FIR: cutoff must lie in (0, fs/2) = (0, {0.5 * fs:g}) Hz (got {cutoff})")
     n = np.arange(ntap, dtype=np.float64)
     h = np.sinc(2.0 * (cutoff / fs) * (n - 0.5 * (ntap - 1)))
-    h *= 0.54 - 0.46 * np.cos(2.0 * np.pi * n / (ntap - 1))   # Hamming (symmetric)
+    h *= sinc_window(ntap, window)
     return h / float(np.sum(h))
 
 

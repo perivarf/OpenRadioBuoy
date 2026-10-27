@@ -7,8 +7,8 @@
   Delay buffer for the AHRS and SFLP quaternions to match the FIR delay in the 
   ax, ay, az, gx, gy, gz and vacc columns of an ImuRow.
 
-  The ax..gz and vacc columns in a row describe the signal kFirHalf raw samples earlier
-  than the row's timestamp. Selecting quaternions from kFirHalf raw samples earlier
+  The ax..gz and vacc columns in a row describe the signal kFirS1Half raw samples earlier
+  than the row's timestamp. Selecting quaternions from kFirS1Half raw samples earlier
   makes every element in a row refer to the same moment.
 
   The SFLP quaternion runs at its own on-chip rate (kSflpOdrHz<=kImuOdrHz) and is
@@ -22,7 +22,7 @@ class QuatDelay {
 
   // Fills the whole ring with one attitude. Used at capture start, once the AHRS has
   // been seeded from gravity.
-  // Without this, the logger would receive an all-zero quaternion for the first Slots (=kFirHalf+1) steps.
+  // Without this, the logger would receive an all-zero quaternion for the first Slots (=kFirS1Half+1) steps.
   void reset(const float *ahrsQ, const float *sflpQ) {
     for (uint16_t s = 0; s < Slots; s++) store(s, ahrsQ, sflpQ);
     idx_ = 0;

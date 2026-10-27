@@ -78,7 +78,7 @@ class WaveSpectrumAnalyzer {
   // Applied on every reading including the warm-up ones
   // - otherwise the delay line is still half full of zeros when the
   // first Welch sample is taken
-  FirDecimator fir2_{kFirCoeffsStage2};
+  FirDecimator<kFirS2Ntap> fir2_{kFirCoeffsStage2};
   long curBucket_ = -1;
   bool bucketDone_ = false;   // this bucket's centre has been reached and evaluated
 

@@ -255,7 +255,7 @@ void ImuSampler::processAccelWord(const ImuFifoWord &w) {
 
     // The attitude is not filtered, but it is carried back by the same group
     // delay the FIR imposes on ax..gz, so the whole row describes one instant.
-    // At one step per sample that delay is kFirHalf pushes exactly.
+    // At one step per sample that delay is kFirS1Half pushes exactly.
     qDelay_.push(ahrs_.quaternion(), sflpQ);
   }
 
