@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""<stamp>_imu.bin -> <stamp>_imu_from_raw.csv: decoding, and nothing more.
+"""<stamp>_raw.bin -> <stamp>_imu_from_raw.csv (+ _gps.csv): decoding, and nothing more.
 
 The file is every FIFO word exactly as the sensor produced it, where imu.csv is the
 FIR-decimated row. This runs no FIR, no AHRS and no analysis - it writes out what the
@@ -16,16 +16,26 @@ RawLogWriter):
     word     7 B  tag_sensor + 6 B payload, unchanged from the FIFO
     sync    17 B  0xFF + u32 t_us + u32 accel_n + u32 millis + u16 n_words
                   + u16 flags, one per drain, written BEFORE the words it covers
+    gps     61 B  0xFE + u8 payload length (59) + u32 millis + u32 rel_ms + u32 iTOW_ms
+                  + u8 hour, minute, second, fixType, numSV + i32 lat_e7, lng_e7,
+                  gSpeed_mms, velN_mms, velE_mms, velD_mms, headMot_e5 + u32 sAcc_mms,
+                  hAcc_mm, vAcc_mm + u16 pDOP_e2. One per GNSS fix, format v3 only
 
-The tag gives the length: 0xFF is a sync record, anything else is a word. They cannot
-collide - tag_sensor is the top five bits of the FIFO tag, so at most 0x1F.
+The tag gives the length: 0xFF is a sync record, 0x1F and below a word. In v3 every
+other tag is followed by a length byte, so a record this decoder does not know is
+skipped. They cannot collide - tag_sensor is the top five bits of the FIFO tag, so at
+most 0x1F.
+
+The GPS records are written out as <stamp>_gps.csv, with the columns and scaling of
+the gps.csv the firmware wrote before v3, plus t_s (accel time axis) as the last column,
+so readers of the old file find it under the same name and in the same layout.
 
 THE TIME AXIS. There is deliberately no per-word timestamp: at 480 Hz the sample period
 is 2.08 ms, and a whole millisecond would be coarser than the data. Word ORDER is the
 time axis, and the sync records pin it to the clock with t_us and the cumulative accel
 counter. The times here are interpolated between those pairs.
 
-    python3 raw_to_csv.py <capture>_imu.bin
+    python3 raw_to_csv.py <capture>_raw.bin
     python3 raw_to_csv.py <session dir> -o /somewhere/else.csv
 """
 
@@ -39,12 +49,19 @@ import numpy as np
 
 MAGIC = 0x4257524F              # "ORWB", kRawMagic
 SYNC_TAG = 0xFF                 # kRawSyncTag
+GPS_TAG = 0xFE                  # kRawGpsTag
+GPS_PAYLOAD = struct.Struct("<IIIBBBBBiiiiiiiIIIH")   # kRawGpsPayloadBytes = 59
+VERSIONS = (2, 3)               # v3 added the GPS record
 HEADER_BYTES = 32               # kRawHeaderBytes
 FLAG_FIFO_OVF = 0x0001          # kRawFlagFifoOvf
 FLAG_WRITE_FAIL = 0x0002        # kRawFlagWriteFail
 TAG_GYR = 1                     # imu_device.cpp: tag 1
 TAG_ACC = 2                     # imu_device.cpp: tag 2
 TAG_SFLP = 0x13                 # kSflpRotationTag
+
+# gps.csv as the firmware wrote it before v3, plus t_s on the accel time axis last
+GPS_COLUMNS = ("rel_ms", "utc", "itow", "lat", "lon", "gspeed", "vN", "vE", "vUp", "head",
+               "sAccuracy", "hAccuracy", "vAccuracy", "pdop", "sats", "t_s")
 
 # Column order of the output. The names are imu.csv's wherever the quantity is the
 # same, so a reader can use one set of column names across both files.
@@ -60,9 +77,9 @@ def read_header(buf):
     magic, ver = struct.unpack_from("<IB", buf, 0)
     if magic != MAGIC:
         sys.exit(f"raw: bad magic 0x{magic:08X} - not a _imu.bin")
-    if ver != 2:
+    if ver not in VERSIONS:
         sys.exit(f"raw: format v{ver}. This decoder follows the firmware in the repo, "
-                 f"and that writes v2.")
+                 f"and reads v{VERSIONS[0]}-v{VERSIONS[-1]}.")
     wordlen, imu_odr, sflp_odr = struct.unpack_from("<BHH", buf, 5)
     acc_sens, gyr_sens = struct.unpack_from("<ff", buf, 10)
     t0, reading_id, sync_bytes = struct.unpack_from("<IHH", buf, 18)
@@ -81,6 +98,8 @@ def parse(buf, hdr):
     acc, gyr, quat = [], [], []          # raw LSB, scaled at the end
     acc_gyr_i, acc_quat_i = [], []       # which gyro/quat word was current
     sync = []
+    gps = []                             # GPS_PAYLOAD tuples
+    last_gps_ms = None
     sync_n, sync_t = [], []              # (accel_n, t_us) - the time axis anchors
     ovf_at = []                          # accel index where a drain reported an overflow
     unknown = {}
@@ -122,6 +141,25 @@ def parse(buf, hdr):
             o += sb
             continue
 
+        if hdr["version"] >= 3 and tag > 0x1F:
+            if o + 2 > n:
+                break
+            ln = buf[o + 1]
+            if o + 2 + ln > n:
+                break                                   # truncated tail
+            if tag == GPS_TAG and ln >= GPS_PAYLOAD.size:
+                g = GPS_PAYLOAD.unpack_from(buf, o + 2)
+                if last_gps_ms is not None and g[0] < last_gps_ms:
+                    tail_at = (o, f"gps went backwards: {g[0]} ms after {last_gps_ms} ms")
+                    break
+                last_gps_ms = g[0]
+                gps.append(g)
+            else:
+                unknown[tag] = unknown.get(tag, 0) + 1
+            unknown_in_a_row = 0
+            o += 2 + ln
+            continue
+
         if o + wb > n:
             break
         p = buf[o + 1:o + wb]
@@ -146,7 +184,7 @@ def parse(buf, hdr):
         o += wb
 
     return dict(acc=acc, gyr=gyr, quat=quat, acc_gyr_i=acc_gyr_i,
-                acc_quat_i=acc_quat_i, sync=sync, sync_n=sync_n, sync_t=sync_t,
+                acc_quat_i=acc_quat_i, sync=sync, sync_n=sync_n, sync_t=sync_t, gps=gps,
                 ovf_at=ovf_at, unknown=unknown, tail_at=tail_at,
                 n_write_fail=n_write_fail, first_write_fail_n=first_write_fail_n,
                 read_bytes=o, file_bytes=n)
@@ -171,6 +209,37 @@ def accel_times(n_acc, sync_n, sync_t, odr_hz):
     t[lo] = fp[0] + (idx[lo] - xp[0]) * nominal
     t[hi] = fp[-1] + (idx[hi] - xp[-1]) * nominal
     return t
+
+
+def gps_times(gps_ms, sync):
+    """GPS record millis -> the accel time axis, through the sync records' (millis, t_us)
+    pairs. Outside them the slope is 1 ms per ms, not clamped (see accel_times)."""
+    ms = np.asarray(gps_ms, dtype=np.float64)
+    if len(sync) < 2:
+        return np.full(len(ms), np.nan)
+    xp = np.asarray([s["millis"] for s in sync], dtype=np.float64)
+    fp = np.asarray([s["t_us"] for s in sync], dtype=np.float64) * 1e-6
+    keep = np.diff(xp, prepend=xp[0] - 1) > 0
+    xp, fp = xp[keep], fp[keep]
+    t = np.interp(ms, xp, fp)
+    lo, hi = ms < xp[0], ms > xp[-1]
+    t[lo] = fp[0] + (ms[lo] - xp[0]) * 1e-3
+    t[hi] = fp[-1] + (ms[hi] - xp[-1]) * 1e-3
+    return t
+
+
+def write_gps(path, gps, t_s):
+    """One row per record, formatted as serviceGps() printed gps.csv before v3."""
+    with open(path, "w", newline="") as f:
+        f.write(",".join(GPS_COLUMNS) + "\n")
+        for g, t in zip(gps, t_s):
+            (_, rel_ms, itow, hh, mm, ss, _fix, nsv, lat, lon, gspd, vn, ve, vd, head,
+             sacc, hacc, vacc, pdop) = g
+            f.write(f"{rel_ms},{hh * 1000000 + mm * 10000 + ss * 100},{itow},"
+                    f"{lat * 1e-7:.6f},{lon * 1e-7:.6f},{gspd / 1000:.4f},"
+                    f"{vn / 1000:.4f},{ve / 1000:.4f},{-vd / 1000:.4f},{head * 1e-5:.2f},"
+                    f"{sacc / 1000:.2f},{hacc / 1000:.2f},{vacc / 1000:.2f},"
+                    f"{pdop * 0.01:.2f},{nsv},{t:.6f}\n")
 
 
 def quaternions(raw):
@@ -217,9 +286,10 @@ def drop_nan_quats(q):
 def resolve(path):
     """Accept a .bin, or a session directory holding one."""
     if os.path.isdir(path):
-        cand = sorted(glob(os.path.join(path, "*_imu.bin")))
+        cand = sorted(glob(os.path.join(path, "*_raw.bin"))
+                      + glob(os.path.join(path, "*_imu.bin")))
         if not cand:
-            sys.exit(f"found no *_imu.bin in {path}")
+            sys.exit(f"found no *_raw.bin or *_imu.bin in {path}")
         return cand[0]
     if not os.path.isfile(path):
         sys.exit(f"found no {path}")
@@ -241,6 +311,7 @@ def summarise(hdr, d, t_acc):
         f"gyro  {len(d['gyr']):7d} words",
         f"sflp  {len(d['quat']):7d} words",
         f"sync  {len(d['sync']):7d} drains, {len(d['ovf_at'])} with a FIFO overflow",
+        f"gps   {len(d['gps']):7d} records",
     ]
     if len(d["sync"]) > 1:
         ms = np.diff([s["millis"] for s in d["sync"]])
@@ -266,9 +337,12 @@ def summarise(hdr, d, t_acc):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("path", help="<stamp>_imu.bin or the session directory")
+    ap.add_argument("path", help="<stamp>_raw.bin or the session directory")
     ap.add_argument("-o", "--out",
                     help="write here (default: <stamp>_imu_from_raw.csv beside the .bin)")
+    ap.add_argument("--gps-out",
+                    help="GPS track here (default: <stamp>_gps.csv beside the "
+                         ".bin). Only written when the file holds GPS records")
     ap.add_argument("--allow-damaged", action="store_true",
                     help="convert even though the raw log lost blocks. Everything past "
                          "the first loss is misparsed")
@@ -318,7 +392,18 @@ def main():
         if 0 <= a_n < n_acc:
             ovf[a_n] = 1
 
-    out = args.out or binpath.replace("_imu.bin", "_imu_from_raw.csv")
+    stem = binpath[:-len(".bin")]
+    for suffix in ("_raw", "_imu"):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+
+    if d["gps"]:
+        gps_out = args.gps_out or stem + "_gps.csv"
+        write_gps(gps_out, d["gps"], gps_times([g[0] for g in d["gps"]], d["sync"]))
+        print(f"wrote {gps_out}  ({len(d['gps'])} rows)")
+
+    out = args.out or stem + "_imu_from_raw.csv"
     with open(out, "w", newline="") as f:
         f.write(",".join(COLUMNS) + "\n")
         for i in range(n_acc):

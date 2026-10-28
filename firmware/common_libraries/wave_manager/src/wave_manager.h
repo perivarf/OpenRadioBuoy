@@ -103,7 +103,7 @@ class WaveManager {
   void appendImuCsvRow(const ImuRow &r);  // one imu.csv line
   void writeSpecCsv(void);                // spec.csv: the PSD
   void writeAnaCsv(bool ok, const WaveParams &params);  // Wave analysis + misc counters
-  void serviceGps(uint32_t relMs);  // when wave_gps_track_in_capture is set: poll the receiver, log a gps.csv row per fresh fix.
+  void serviceGps(uint32_t relMs);  // when wave_gps_track_in_capture is set: poll the receiver, buffer a GPS record in the raw log per fresh fix.
   bool waitForGpsFix(void);         // block up to wave_gps_fix_timeout for a fresh PVT
   uint16_t countSessionDirs(void);  // session folders already under waves/
   void     seedReadingId(void);     // readingID_ = countSessionDirs()
@@ -121,7 +121,6 @@ class WaveManager {
 
   // File states
   File     imuFile_;
-  File     gpsFile_;
   File     sessionFile_;
   File     rawFile_;
 

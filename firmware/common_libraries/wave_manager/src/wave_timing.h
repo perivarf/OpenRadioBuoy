@@ -85,7 +85,7 @@ enum TimingBucket : uint8_t {
   TIM_FLUSH,       // RawLogWriter::flush -> the raw log's SD write.
                    // only counts the drains that actually wrote
   TIM_WELCH,       // welch - PSD - estimation
-  TIM_GPS,         // serviceGps: the receiver poll and one gps.csv row
+  TIM_GPS,         // serviceGps: the receiver poll and one buffered GPS record
   TIM_LOOP,        // one capture-loop iteration, delay() excluded
   TIM_DBGPRINT,    // the serial report itself
   TIM_COUNT        // Keep this as last element, it is the enum count.
@@ -107,7 +107,7 @@ struct WaveTiming {
   // dead time in the capture window, and preAllocate of a ~28 MB reservation is not
   // small. Single values: a TimeStat with n = 1 would only dress them up.
   uint32_t startSessionUs = 0;
-  uint32_t stopImuUs = 0, stopGpsUs = 0, stopRawUs = 0, stopTotalUs = 0;
+  uint32_t stopImuUs = 0, stopRawUs = 0, stopTotalUs = 0;
 
   void addFlushBytes(uint32_t bytes) {
     if (!wave_timing_enabled) return;
@@ -126,7 +126,7 @@ struct WaveTiming {
     for (uint8_t i = 0; i < TIM_COUNT; i++) b[i].resetCapture();
     flushBytes = flushBytesCap = 0;
     startSessionUs = 0;
-    stopImuUs = stopGpsUs = stopRawUs = stopTotalUs = 0;
+    stopImuUs = stopRawUs = stopTotalUs = 0;
   }
 };
 

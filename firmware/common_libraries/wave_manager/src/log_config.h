@@ -14,7 +14,6 @@
 */
 
 // File names
-#define WAVE_GPS_PREFIX      "gps" // gps.csv - gps
 #define WAVE_SESSION_PREFIX  "ses" // ses.csv - session file, including length of session
 #define WAVE_SPEC_PREFIX     "spec" // spec.csv - PSD
 #define WAVE_ANA_PREFIX      "ana"  // ana.csv - Statistics calculated basesd on PSD (Significant Wave Height etc)
@@ -32,9 +31,6 @@ static constexpr bool     wave_log_to_sd     {true};
 // truncated after successful logging. Err on side of caution here, and do a test with
 // timing on before deploying.
 static constexpr uint16_t wave_imu_row_bytes_max {256};
-
-// Measure on created GPS-file. Change if file definition is changed.
-static constexpr uint16_t wave_gps_row_bytes_max {208};
 
 // parent dir for session folders (e.g., "waves" will create directory /waves on sd-card)
 static constexpr char wave_log_dir[] = "waves";  
@@ -69,12 +65,22 @@ static constexpr bool waveModeImuRaw(void) {
 // Decoded by tools/raw_to_csv.py.
 // -----------------------------------------------------------------------------
 static constexpr uint32_t kRawMagic         = 0x4257524FUL;  // "ORWB" little-endian
-static constexpr uint8_t  kRawFormatVersion = 2;
+static constexpr uint8_t  kRawFormatVersion = 3;
 static constexpr uint8_t  kRawSyncTag       = 0xFF;
+static constexpr uint8_t  kRawGpsTag        = 0xFE;  // one GNSS fix, see raw_log.h
 static constexpr uint8_t  kRawWordBytes     = kImuFifoWordBytes; // Storing FIFO word as we read it from IMU
 static constexpr uint8_t  kRawSyncBytes     = 17;
 static constexpr uint8_t  kRawHeaderBytes   = 32;
 static constexpr uint16_t kRawBlockBytes    = 512;   // SD block; buffered, not per word
+
+// GPS record: tag + length byte + payload (layout in raw_log.h)
+static constexpr uint8_t  kRawGpsPayloadBytes = 59;
+static constexpr uint8_t  kRawGpsBytes        = 2 + kRawGpsPayloadBytes;   // 61
+
+// GPS records are appended between drains (serviceGps), but the buffer is only flushed
+// after a drain. At 10 Hz and ~110 ms between drains that is 1-2 records, more after an
+// sd-stall. Beyond this, the safety valve in RawLogWriter::append() takes over.
+static constexpr uint8_t  kRawGpsMaxPending   = 4;
 
 // Worst case for one drain: a full FIFO emptied in a single round, plus its sync
 // record. Not theoretical - it is precisely the drain AFTER an sd-stall, when the FIFO
@@ -89,11 +95,14 @@ static constexpr uint16_t kRawWorstDrainBytes =
 static constexpr uint16_t kRawFlushThreshold = 1 * kRawBlockBytes;
 
 // The buffer must hold whatever can be left over when a drain starts (kRawFlushThreshold-1), 
-// plus the worst drain on top of that (kRawWorstDrainBytes)
-static constexpr uint16_t kRawBufBytes = kRawFlushThreshold - 1 + kRawWorstDrainBytes; 
+// plus the GPS records appended since, plus the worst drain on top of that (kRawWorstDrainBytes)
+static constexpr uint16_t kRawBufBytes = kRawFlushThreshold - 1
+                                       + kRawGpsMaxPending * kRawGpsBytes
+                                       + kRawWorstDrainBytes;
 
-static_assert(kRawSyncTag > 0x1F,
-              "the sync tag must not collide with a FIFO tag_sensor (top 5 bits)");
+static_assert(kRawSyncTag > 0x1F && kRawGpsTag > 0x1F && kRawGpsTag != kRawSyncTag,
+              "record tags must not collide with a FIFO tag_sensor (top 5 bits) or "
+              "with each other");
 static_assert(kRawHeaderBytes < kRawFlushThreshold,
               "the header is buffered in buf_ and must fit in the sub-threshold remainder");
 static_assert(kRawBlockBytes >= kRawSyncBytes + kRawWordBytes,

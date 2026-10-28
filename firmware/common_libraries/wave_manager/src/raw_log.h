@@ -12,8 +12,16 @@
     word    1 B tag_sensor + 6 B payload                          = kRawWordBytes (7 B)
     sync    1 B kRawSyncTag + u32 t_us + u32 accel_n + u32 millis
                             + u16 n_words + u16 flags             = kRawSyncBytes (17 B)
+    gps     1 B kRawGpsTag + u8 payload length + payload           = kRawGpsBytes (61 B)
+              payload: u32 millis + u32 rel_ms + u32 iTOW_ms
+                       + u8 hour, minute, second, fixType, numSV
+                       + i32 lat_e7, lng_e7, gSpeed_mms, velN_mms, velE_mms, velD_mms,
+                             headMot_e5
+                       + u32 sAcc_mms, hAcc_mm, vAcc_mm + u16 pDOP_e2   (59 B)
 
-  tag_sensor is 5 bits, so it can never collide with kRawSyncTag. There is no per-word
+  tag_sensor is 5 bits, so it can never collide with kRawSyncTag or kRawGpsTag. Records
+  with a tag above 0x1F other than the sync carry their length, so a decoder can skip
+  a record it does not know. There is no per-word
   timestamp: word order is the time axis, and one sync record per drain pins it to the
   clock.
 
@@ -44,6 +52,10 @@ class RawLogWriter {
   // The FIFO word exactly as it came off the bus. Called for every word, including
   // tags the wave chain does not decode: this is a record of what the sensor produce.
   void emitWord(uint8_t tag, const uint8_t payload[6]);
+
+  // A length-prefixed record: tag + len + payload. Used for the GPS fixes; the caller
+  // packs the payload, so this writer does not depend on the GPS driver.
+  void emitRecord(uint8_t tag, const uint8_t *payload, uint8_t len);
 
   /*
     Write buffer to sd-card.

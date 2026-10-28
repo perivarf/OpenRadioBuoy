@@ -42,8 +42,10 @@ void RawLogWriter::append(const uint8_t *p, uint8_t n) {
   if (!sink_) return;
   
   // Safety valve, not the normal path: this will only fire if the FIFO delivered more than
-  // kFifoDepthWords (i.e. if the FIFO is not properly sized)
-  if (len_ + n > kRawBufBytes) flush(true);
+  // kFifoDepthWords, or more than kRawGpsMaxPending GPS records arrived between drains.
+  // Whole sectors only: flush(true) would leave the file unaligned for the rest of the
+  // capture. The buffer is far above kRawFlushThreshold when this fires.
+  if (len_ + n > kRawBufBytes) flush();
 
   // Sdding data to the buffer
   for (uint8_t i = 0; i < n; i++) buf_[len_++] = p[i];
@@ -55,6 +57,13 @@ void RawLogWriter::emitWord(uint8_t tag, const uint8_t payload[6]) {
   rec[0] = tag;
   for (uint8_t i = 0; i < 6; i++) rec[i + 1] = payload[i];
   append(rec, kRawWordBytes);
+}
+
+void RawLogWriter::emitRecord(uint8_t tag, const uint8_t *payload, uint8_t len) {
+  if (!sink_) return;
+  const uint8_t head[2] = {tag, len};
+  append(head, 2);
+  append(payload, len);
 }
 
 void RawLogWriter::emitSync(uint32_t tUs, uint32_t accelN, uint16_t nWords,

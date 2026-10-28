@@ -53,3 +53,6 @@ __pycache__/
 
 # Hidden directories anywhere under firmware/ (machine-specific tool/editor config)
 firmware/**/.*/
+
+# Local plans and notes
+todo/

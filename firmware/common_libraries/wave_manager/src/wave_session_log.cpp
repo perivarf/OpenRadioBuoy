@@ -11,8 +11,8 @@
   * _ana.csv (Significant Wave Height, number of measurements, etc)
   * _imu.csv (IMU data, optional, depending on wave_log_mode)
   * _cfg.csv (Configuration data)
-  * _gps.csv (GPS data)
-  * _ses.csv (Session data, timing, lat/lng)
+   * _ses.csv (Session data, timing, lat/lng)
+  * _raw.bin (raw IMU words, sync records and the GPS track; raw_to_csv.py decodes it)
   * _spec.csv (Welch spectrum)
 */
 
@@ -145,17 +145,10 @@ bool WaveManager::startSession(void) {
     imuFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
   }
 
-  // gps.csv opened if wave_gps_track_in_capture is set
-  if (wave_gps_track_in_capture) {
-    snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_GPS_PREFIX);
-    gpsFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
-  }
-
   // ses.csv opened always, for session anchors and timing
   snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_SESSION_PREFIX);
   sessionFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
-  if ((waveModeImuCsv() && !imuFile_) ||
-      (wave_gps_track_in_capture && !gpsFile_) || !sessionFile_) {
+  if ((waveModeImuCsv() && !imuFile_) || !sessionFile_) {
     if (debug_serial) Serial.println("WaveManager: could not open session files");
     return false;
   }
@@ -175,15 +168,10 @@ bool WaveManager::startSession(void) {
   // due to SD card takes too long to allocate a new cluster.
   const uint32_t durationS = wave_capture_duration / s_2_ms;
   const uint32_t imuBytes  = (uint32_t)kRowOdrHz * durationS * wave_imu_row_bytes_max;
-  const uint32_t gpsBytes  = GPS_nav_rate_hz *     durationS * wave_gps_row_bytes_max;
 
   if (imuFile_ && !imuFile_.preAllocate(imuBytes) && debug_serial) {
     Serial.print("WaveManager: imu preAllocate failed, "); Serial.print(imuBytes);
     Serial.println(" B - sd-card may be full or fragmented");
-  }
-
-  if (gpsFile_ && !gpsFile_.preAllocate(gpsBytes) && debug_serial) {
-    Serial.println("WaveManager: gps preAllocate failed");
   }
 
   if (rawFile_) {
@@ -191,9 +179,12 @@ bool WaveManager::startSession(void) {
     // batches in a second, and the measured captures land only 4 % under it - too
     // little to absorb a run where the sync records come more often or the SFLP
     // batching shifts. Running out mid-capture is not the graceful fallback a failed
-    // preAllocate is; see the gpsBytes comment above for what it costs.
+    // preAllocate is.
+    // The GPS track rides in the same file, one record per fix.
+    const uint32_t gpsPerSec  = wave_gps_track_in_capture ? GPS_nav_rate_hz * kRawGpsBytes : 0u;
     const uint32_t rawNominal = kRawHeaderBytes + durationS *
-                                (kFifoWordsPerSec * kRawWordBytes + 16u * kRawSyncBytes);
+                                (kFifoWordsPerSec * kRawWordBytes + 16u * kRawSyncBytes
+                                 + gpsPerSec);
     const uint32_t rawBytes = rawNominal + rawNominal / 5u;
 
     if (!rawFile_.preAllocate(rawBytes) && debug_serial) {
@@ -213,14 +204,8 @@ bool WaveManager::startSession(void) {
     rawFile_.sync();
   }
 
-  // IMU, GPS, Session headers
+  // IMU, Session headers
   if (imuFile_) { imuFile_.println(kImuCsvHeader); imuFile_.sync(); }
-
-  if (gpsFile_) { 
-    gpsFile_.println("rel_ms,utc,itow,lat,lon,gspeed,vN,vE,vUp,head,"
-                     "sAccuracy,hAccuracy,vAccuracy,pdop,sats");
-    gpsFile_.sync();
-  }
 
   sessionFile_.println("key,value");
   writeSessionAnchor();  // anchor keys (sessionFile_ kept open)
@@ -281,7 +266,7 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("duration_ms,");        f.println(wave_capture_duration);
   f.print("period_ms,");          f.println(base_wave_capture_period);
   
-  // AHRS settling window: logged to imu.csv/gps.csv but excluded from Welch/PSD, so
+  // AHRS settling window: logged to imu.csv/raw.bin but excluded from Welch/PSD, so
   // postprocess must skip the same leading rows to reproduce the on-device Hs.
   f.print("filter_warm_up_ms,");  f.println(wave_capture_warmup);
 
@@ -467,7 +452,7 @@ void WaveManager::writeSessionSummary(void) {
   sessionFile_.print("stop_utc_epoch,"); sessionFile_.println((uint32_t)captureEnd_);
   writePosition("stop", captureEndPos_);
   sessionFile_.print("duration_ms,");    sessionFile_.println(wave_capture_duration);
-  // Rows in gps.csv, not an analysis count - the on-board chain never reads the drift
+  // GPS records in raw.bin, not an analysis count - the on-board chain never reads the drift
   // track, so this says what was LOGGED and stays on the session side.
   sessionFile_.print("gps_rows,");       sessionFile_.println(gpsRowsWritten_);
   writeTimingBlock();
@@ -497,7 +482,6 @@ void WaveManager::writeTimingBlock(void) {
   // No FIFO risk, so not so important.
   sessionFile_.print("tim_start_session_us,"); sessionFile_.println(wave_timing.startSessionUs);
   sessionFile_.print("tim_stop_imu_us,");      sessionFile_.println(wave_timing.stopImuUs);
-  sessionFile_.print("tim_stop_gps_us,");      sessionFile_.println(wave_timing.stopGpsUs);
   sessionFile_.print("tim_stop_raw_us,");      sessionFile_.println(wave_timing.stopRawUs);
   sessionFile_.print("tim_stop_total_us,");    sessionFile_.println(wave_timing.stopTotalUs);
 
@@ -512,43 +496,40 @@ void WaveManager::stopSession(void) {
   sessionActive_ = false;
 }
 
-// GPS-file, if open, is written to at the nav rate
+// One GPS record in the raw log per fresh 3D fix, at the nav rate. Only buffered here:
+// the record goes to the card with the next raw flush, after a FIFO drain, so no sd-card
+// work happens in this step.
 void WaveManager::serviceGps(uint32_t relMs) {
   gps_manager.update();
-  if (!sessionActive_ || !gpsFile_ || !gps_manager.freshFix()) return;
+  if (!sessionActive_ || !rawFile_ || !gps_manager.freshFix()) return;
 
   // Get (copy of) last position fix from the GPS manager
   const UBX_PVT &f = gps_manager.lastFix();
 
   // Not interested if we do not have a 3D fix or if f invalid
   if (!f.valid || f.fixType < 3) return;
-  
-  gpsFile_.print(relMs);                    gpsFile_.print(',');
 
-  // UTC as HHMMSSCC
-  gpsFile_.print((uint32_t)f.hour * 1000000UL +
-                 (uint32_t)f.minute * 10000UL +
-                 (uint32_t)f.second * 100UL); gpsFile_.print(',');
+  // Payload in the order raw_log.h declares, little-endian, unscaled
+  uint8_t p[kRawGpsPayloadBytes];
+  uint8_t o = 0;
+  auto put32 = [&](uint32_t v) {
+    p[o++] = (uint8_t)v;         p[o++] = (uint8_t)(v >> 8);
+    p[o++] = (uint8_t)(v >> 16); p[o++] = (uint8_t)(v >> 24);
+  };
 
-  //iTOW: Interval Time Of Week (milliseconds since start of current GPS week)
-  gpsFile_.print(f.iTOW_ms);                gpsFile_.print(','); 
+  put32(millis());              // same clock as the sync records' millis
+  put32(relMs);                 // ms since the capture loop started
+  put32(f.iTOW_ms);             // GPS time of week
+  p[o++] = f.hour;  p[o++] = f.minute;  p[o++] = f.second;
+  p[o++] = f.fixType;
+  p[o++] = f.numSV;
+  put32((uint32_t)f.lat_e7);    put32((uint32_t)f.lng_e7);
+  put32((uint32_t)f.gSpeed_mms);
+  put32((uint32_t)f.velN_mms);  put32((uint32_t)f.velE_mms);  put32((uint32_t)f.velD_mms);
+  put32((uint32_t)f.headMot_e5);
+  put32(f.sAcc_mms);  put32(f.hAcc_mm);  put32(f.vAcc_mm);
+  p[o++] = (uint8_t)f.pDOP_e2;  p[o++] = (uint8_t)(f.pDOP_e2 >> 8);
 
-  // Latitude, Longitude, Speed, Velocity N/E/Up, Heading
-  gpsFile_.print(f.lat_e7 * 1e-7, 6);       gpsFile_.print(',');
-  gpsFile_.print(f.lng_e7 * 1e-7, 6);       gpsFile_.print(',');
-  gpsFile_.print(f.gSpeed_mms / 1000.0, 4); gpsFile_.print(',');
-  gpsFile_.print(f.velN_mms / 1000.0, 4);   gpsFile_.print(',');
-  gpsFile_.print(f.velE_mms / 1000.0, 4);   gpsFile_.print(',');
-  gpsFile_.print(-f.velD_mms / 1000.0, 4);  gpsFile_.print(','); //vUp
-  gpsFile_.print(f.headMot_e5 * 1e-5, 2);   gpsFile_.print(',');
-
-  // Accuracy (speed (m/s), horizontal (m), vertical (m))
-  // PDOP (Position Dilution Of Precision 1 great, 10 poor), Satellites
-  gpsFile_.print(f.sAcc_mms / 1000.0, 2);   gpsFile_.print(',');
-  gpsFile_.print(f.hAcc_mm / 1000.0, 2);    gpsFile_.print(',');
-  gpsFile_.print(f.vAcc_mm / 1000.0, 2);    gpsFile_.print(',');
-  gpsFile_.print(f.pDOP_e2 * 0.01, 2);      gpsFile_.print(',');
-  gpsFile_.println(f.numSV);
-
+  rawLog_.emitRecord(kRawGpsTag, p, o);
   gpsRowsWritten_++;
 }

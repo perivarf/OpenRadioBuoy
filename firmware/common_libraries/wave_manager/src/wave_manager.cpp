@@ -238,7 +238,7 @@ void WaveManager::runCaptureLoop(void) {
     // (due to FIFO pop loop / SD-card-operations sometimes taking longer than 100ms)
     if constexpr (wave_gps_track_in_capture) {
       const uint32_t tGps = timeStart();
-      serviceGps(elapsed);          // non-blocking GPS poll -> one gps.csv row per fix
+      serviceGps(elapsed);          // non-blocking GPS poll -> one raw-log GPS record per fix
       timeAdd(TIM_GPS, tGps);
     }
 
@@ -255,7 +255,7 @@ void WaveManager::runCaptureLoop(void) {
   }
 }
 
-// Truncate/sync/close imu, gps and raw files 
+// Truncate/sync/close imu and raw files 
 // No-op unless a session was actually started.
 void WaveManager::closeSessionDataFiles(void) {
   if (!sessionActive_) return;
@@ -274,14 +274,6 @@ void WaveManager::closeSessionDataFiles(void) {
     imuFile_.sync();      IWatchdog.reload();
     imuFile_.close();     IWatchdog.reload();
     if (wave_timing_enabled) wave_timing.stopImuUs = micros() - t0;}
-
-  if (gpsFile_) {
-    const uint32_t tStopGps = timeStart();
-    gpsFile_.truncate();  IWatchdog.reload();
-    gpsFile_.sync();      IWatchdog.reload();
-    gpsFile_.close();     IWatchdog.reload();
-    if (wave_timing_enabled) wave_timing.stopGpsUs = micros() - tStopGps;
-  }
 
   // The raw log's partial block has to be pushed before truncate()
   if (rawFile_) {

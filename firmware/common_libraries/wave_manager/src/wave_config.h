@@ -15,8 +15,12 @@ static constexpr uint32_t wave_gps_fix_timeout {120000};  // ms
 // Whether that timeout aborts the capture or merely ends the wait.
 static constexpr bool wave_measurement_require_gps {true};
 
-// Whether the capture loop logs GPS fixes to gps.csv
+// Whether the capture loop logs GPS fixes, as GPS records in imu.bin (raw_to_csv.py
+// writes them out as <stamp>_gps.csv).
 // Only use when postprocessing of GPS data is needed, as it adds some overhead.
 static constexpr bool wave_gps_track_in_capture = true;
+
+static_assert(!wave_gps_track_in_capture || waveModeImuRaw(),
+              "the GPS track is logged in imu.bin - select WaveLogMode::Raw or Both");
 
 #endif  // WAVE_CONFIG_H
