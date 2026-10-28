@@ -320,6 +320,7 @@ void WaveManager::writeSessionConfig(File &f) {
   f.print("fir_compensate,0");    f.println();
 
   // breaking wave detection
+  f.print("brake_detect,");       f.println(wave_brake_detect ? 1 : 0);
   f.print("brake_g_thresh,");     f.println(kBrakeGThreshold, 3);
   f.print("brake_thresh_mg2,");   f.println((float)kBrakeThresholdMg2, 1);
   f.print("brake_min_ms,");       f.println(kBrakeMinMs);

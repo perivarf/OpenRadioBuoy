@@ -191,6 +191,12 @@ static constexpr uint16_t kQuatDelaySlots = kQuatDelaySteps + 1;
 // Adding the possibility to require this over a minimum number of samples in a row
 // to avoid potential false positives due to noise.
 // -----------------------------------------------------------------------------
+
+// Diagnostic only: counted as brake_windows in ana.csv and logged as the braking column
+// in imu.csv, never excluded from Welch. Off saves a full rotation per raw sample;
+// braking then stays 0.
+static constexpr bool   wave_brake_detect = false;
+
 static constexpr float  kBrakeGThreshold = 1.0/3.0f;
 static constexpr double kBrakeThresholdMg2 =
     (double)(kBrakeGThreshold * 1000.0) * (kBrakeGThreshold * 1000.0);

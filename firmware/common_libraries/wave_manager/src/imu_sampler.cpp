@@ -260,38 +260,45 @@ void ImuSampler::processAccelWord(const ImuFifoWord &w) {
   }
 
   // Gravity frame linear accel from the SFLP quaternion, gravity removed.
+  // Only needed when SFLP drives the wave chain, or for the nx/ny/nz columns of imu.csv
+  // (their FIR channels are compiled out otherwise).
   float wX = 0.0f, wY = 0.0f, wZ = 0.0f;
-  if (kEnableSflp) {
+  if (kEnableSflp && (wave_use_sflp || waveModeImuCsv())) {
     float w[3];
     rotateBodyToWorld(sflpQ, ax, ay, az, w);
     wX = w[0]; wY = w[1]; wZ = w[2] - 1000.0f;   // remove 1 g, mg units
   }
 
-  // Brake flag: LINEAR accel (gravity removed) must stay over
+  // Brake flag: LINEAR accel (gravity removed, mg) must stay over
   // threshold for kBrakeMinSamples in a row.
+  auto brake = [&](float bX, float bY, float bZ) {
+    const double aMag2 = (double)bX * bX + (double)bY * bY + (double)bZ * bZ;
 
-  float bX = wX, bY = wY, bZ = wZ;
-  if (!wave_use_sflp) {
+    // If linear accel magnitude exceeds threshold for kBrakeMinSamples in a row, the window is flagged as braking.
+    if (aMag2 > kBrakeThresholdMg2) {
+      if (brakeRun_ < 0xFFFF) brakeRun_++;
+      if (brakeRun_ >= kBrakeMinSamples) winBraking_ = true;
+    } else {
+      brakeRun_ = 0;
+    }
+  };
+
+  // The vertical accel is recomputed on every raw sample from the latest quaternion.
+  // With the software AHRS and brake detection on, the full rotation is needed anyway,
+  // and its z row is the vertical accel - verticalAccel() would compute it again.
+  float vacc;
+  if constexpr (wave_use_sflp) {
+    if constexpr (wave_brake_detect) brake(wX, wY, wZ);
+    vacc = wZ * kMg2Ms2;
+  } else if constexpr (wave_brake_detect) {
     float b[3];
     rotateBodyToWorld(ahrs_.quaternion(), ax, ay, az, b);
-    bX = b[0]; bY = b[1]; bZ = b[2] - 1000.0f;
-  }
-
-  const double aMag2 = (double)bX * bX + (double)bY * bY + (double)bZ * bZ;
-
-  // If linear accel magnitude exceeds threshold for kBrakeMinSamples in a row, the window is flagged as braking.
-  if (aMag2 > kBrakeThresholdMg2) {
-    if (brakeRun_ < 0xFFFF) brakeRun_++;
-    if (brakeRun_ >= kBrakeMinSamples) winBraking_ = true;
+    const float bZ = b[2] - 1000.0f;
+    brake(b[0], b[1], bZ);
+    vacc = bZ * kMg2Ms2;    // = verticalAccel(q, axS, ayS, azS, kGravity)
   } else {
-    brakeRun_ = 0;
+    vacc = verticalAccel(ahrs_.quaternion(), axS, ayS, azS, kGravity);
   }
-
-  // The vertical accel is recomputed on every raw sample from the latest
-  // quaternion
-  const float vacc = wave_use_sflp
-                         ? (wZ * kMg2Ms2)
-                         : verticalAccel(ahrs_.quaternion(), axS, ayS, azS, kGravity);
 
   // Adding acceleration (ax, ay, az - sensor frame), acceleration (wZ, wY, wZ - SFLP gravity frame),
   // gyro (latestGx... - sensor frame) and vertical accel (vacc - gravity frame) to the FIR decimation filters.
