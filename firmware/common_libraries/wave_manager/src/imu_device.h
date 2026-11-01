@@ -40,6 +40,15 @@ static_assert(kFifoBurstWords > 0 && kFifoBurstWords <= kFifoDepthWords,
 static constexpr uint8_t kInt1CtrlReg = 0x0D;
 static constexpr uint8_t kInt1FifoTh  = 0x08;  // bit 3: FIFO watermark reached
 
+// IF_CFG (0x03): electrical mode of the INT pads. Push-pull out of reset, which on this
+// board fights the module's band strap on PB12 (same net as INT1) and draws current
+// through it whenever INT1 sits at the opposite level - in deep sleep too, since the
+// IMU stays powered. Open-drain, active low: the pad is released when idle, the strap
+// / MCU pull-up holds the line high, and the sensor only pulls it low on a watermark.
+static constexpr uint8_t kIfCfgReg       = 0x03;
+static constexpr uint8_t kIfCfgPpOd      = 0x08;  // bit 3: 1 = open-drain
+static constexpr uint8_t kIfCfgHLactive  = 0x10;  // bit 4: 1 = active low
+
 // FIFO_STATUS1/FIFO_STATUS2. Read as a 2-byte burst rather than through the wrapper:
 // lsm6dsv16x_fifo_status_get drops FIFO_OVR_LATCHED
 static constexpr uint8_t kFifoStatus1Reg = 0x1B;
