@@ -35,6 +35,16 @@ void WaveManager::begin(void) {
   }
 }
 
+// TEMP: INT1 open-drain sleep test - watermark check, then the IMU powered down.
+// Remove after checking.
+bool WaveManager::configureImuOnly(void) {
+  bool pass = false;
+  if (imu_.begin(Serial)) pass = imu_.testWatermark(Serial);
+  else Serial.println("INT1 OD test: IMU begin() failed");
+  imu_.shutdownIMU();
+  return pass;
+}
+
 void WaveManager::wake(void) {
 
   // Restart the GNSS engine
@@ -147,6 +157,38 @@ uint8_t WaveManager::takeReading(void) {
   return 0;
 }
 
+/*
+  Power-measurement bench: takeReading() with the capture length, the drift track and
+  the sd-card log chosen at run time, and onCaptureStart called right before the
+  capture loop (the bench marks that moment in the current log). Unlike takeReading
+  it does not skip the capture without a GNSS fix: the fix wait still runs and costs
+  what it costs, but a bench indoors would otherwise never reach the capture.
+  The overrides are put back afterwards, so a normal capture is unaffected.
+*/
+uint8_t WaveManager::benchCapture(uint32_t durationMs, bool gpsTrack, bool logToSd,
+                                  void (*onCaptureStart)(void)) {
+  if (!imuOk_) return 1;
+
+  captureDurationMs_ = durationMs;
+  gpsTrack_ = gpsTrack;
+  logToSd_ = logToSd;
+
+  gpsFixAtStart_ = waitForGpsFix();
+  beginCapture();
+  if (onCaptureStart) onCaptureStart();
+  if (debug_serial) { Serial.print("benchCapture: loop starts, ms "); Serial.println(captureDurationMs_); }
+  runCaptureLoop();
+  if (debug_serial) Serial.println("benchCapture: loop done");
+  closeSessionDataFiles();
+  setCaptureEndTimeLocation();
+  if (debug_serial) Serial.println("benchCapture: end position done");
+
+  captureDurationMs_ = wave_capture_duration;
+  gpsTrack_ = wave_gps_track_in_capture;
+  logToSd_ = wave_log_to_sd;
+  return 0;
+}
+
 // 0 if the capture may proceed, else the code takeReading() should return without
 // having captured anything.
 uint8_t WaveManager::checkPreconditions(void) {
@@ -186,7 +228,7 @@ void WaveManager::beginCapture(void) {
   IWatchdog.reload();
 
   // Turning off GPS if not needed in capture.
-  if constexpr (!wave_gps_track_in_capture) {
+  if (!gpsTrack_) {
     gps_manager.shutdownGPS();
     if (debug_serial) Serial.println("WaveManager: GPS off for the capture (no drift track)");
   }
@@ -197,7 +239,7 @@ void WaveManager::beginCapture(void) {
   // Logging to the sd-card is optional
   sessionActive_ = false;
 
-  if (wave_log_to_sd && sd_writer.active) {
+  if (logToSd_ && sd_writer.active) {
     const uint32_t tStart = timeStart();
     sessionActive_ = startSession();
     if (wave_timing_enabled) wave_timing.startSessionUs = micros() - tStart;
@@ -213,7 +255,7 @@ void WaveManager::runCaptureLoop(void) {
   imu_.startStreaming();
 
   uint32_t start = millis();
-  while (millis() - start < wave_capture_duration) {
+  while (millis() - start < captureDurationMs_) {
 
     const uint32_t elapsed = millis() - start;
 
@@ -222,7 +264,7 @@ void WaveManager::runCaptureLoop(void) {
 
     // Fetch IMU data, process it, and write it to raw log and/or imu.csv
     // The FIFO is drained in update() until it is empty, and the FIR is evaluated for each window
-    imu_.update(Serial, wave_capture_duration - elapsed, gpsRowsWritten_);
+    imu_.update(Serial, captureDurationMs_ - elapsed, gpsRowsWritten_);
 
     // The full segment is accumulated in the analyzer by imu_.update() -> onRow() -> analyzer_.ingest(). 
     // The analyzer's accumulateSegment() is called here to finalise the segment and accumulate the PSD sums. 
@@ -231,12 +273,12 @@ void WaveManager::runCaptureLoop(void) {
     if (analyzer_.accumulateSegment()) timeAdd(TIM_WELCH, tWelch);
 
     // The GNSS tracking, and the only GPS work inside the loop. 
-    // Compiled out entirely when wave_gps_track_in_capture is off
+    // Skipped when gpsTrack_ is off (wave_gps_track_in_capture, or benchCapture's override);
     // the positions at each end of the capture come from outside this loop either way.
     // Not guaranteed to produce uniformly spacing, but with 480Hz IMU field tests
     // show that when we set GPS to 10Hz, we get around 9.5 Hz of actual capture 
     // (due to FIFO pop loop / SD-card-operations sometimes taking longer than 100ms)
-    if constexpr (wave_gps_track_in_capture) {
+    if (gpsTrack_) {
       const uint32_t tGps = timeStart();
       serviceGps(elapsed);          // non-blocking GPS poll -> one raw-log GPS record per fix
       timeAdd(TIM_GPS, tGps);
@@ -298,7 +340,7 @@ void WaveManager::setCaptureEndTimeLocation(void) {
     // End capture timestamp, for ses.csv and WaveResult
   captureEnd_ = now();
 
-  if constexpr (wave_gps_track_in_capture) {
+  if (gpsTrack_) {
     captureEndPos_ = currentFixE7();
   } else {
     gps_manager.begin();

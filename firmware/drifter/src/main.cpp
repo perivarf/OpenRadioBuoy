@@ -10,6 +10,7 @@
 #include "IWatchdog.h"
 #include "STM32LowPower.h"
 #include "TimeLib.h"
+#include "power_batch.h"
 
 HardwareSerial mySerial{DEBUG_SERIAL_RX_PIN, DEBUG_SERIAL_TX_PIN};
 
@@ -80,6 +81,97 @@ static void bootloaderWindow(void){
   mySerial.println();
 }
 
+/*
+  Baseline current (baseline_current_test in config.h). Runs before the watchdog is
+  started and before any other init, and never returns. Out of reset the IMU is
+  already powered down, but the GNSS is acquiring and the SPI chip selects float, so
+  those are stilled first; the radio is brought up only to be put to sleep. Then it
+  alternates a busy spin with Sleep mode (WFI), baseline_current_test_phase_ms each.
+*/
+static void baselineStillPeripherals(uint32_t gpsBackupMs){
+  pinMode(SPI_CS_SD_PIN, OUTPUT);   digitalWrite(SPI_CS_SD_PIN, HIGH);
+  pinMode(SPI_CS_IMU_PIN, OUTPUT);  digitalWrite(SPI_CS_IMU_PIN, HIGH);
+
+  gps_manager.begin();         // no fix needed, only an answering module
+  const bool gpsAnswered = gps_manager.ready();
+  if (baseline_gps_backup){
+    gps_manager.backupGPS(gpsBackupMs);  // 0 = until power cycle; no-op if the module never answered
+  } else {
+    gps_manager.shutdownGPS(); // GNSS stop; no-op if the module never answered
+  }
+  if (debug_serial){
+    mySerial.println(gpsAnswered ? "Baseline: GPS answered" : "Baseline: GPS did NOT answer");
+  }
+
+  // A receiver in backup no longer ACKs its I2C address, so a probe tells whether it
+  // really went down: code 0 = ACK (still awake), 2 = NACK (asleep).
+  if (baseline_gps_backup && debug_serial){
+    delay(2000);
+    Wire.begin();
+    Wire.beginTransmission(GPS_I2C_ADDR);
+    const uint8_t code = Wire.endTransmission();
+    Wire.end();
+    mySerial.print("Baseline: GPS probe 2 s after backup, code ");
+    mySerial.print(code);
+    mySerial.println(code == 0 ? " (ACK - still awake!)" : " (no ACK - in backup)");
+  }
+
+  LORA.beginRadio(LoRa_freq_receive, LoRa_bw, LoRa_sf, LoRa_cr, LoRa_power);
+  LORA.sleep();
+}
+
+static void baselineCurrentTest(void){
+  baselineStillPeripherals(baseline_current_test_phase_ms);  // GPS wakes after one phase
+
+  while (true){
+    if (debug_serial){ mySerial.println("Baseline: busy spin"); mySerial.flush(); }
+    uint32_t start = millis();
+    while(true){}
+    // while (millis() - start < baseline_current_test_phase_ms){}
+
+    // if (debug_serial){ mySerial.println("Baseline: sleep (WFI)"); mySerial.flush(); }
+    // start = millis();
+    // while (millis() - start < baseline_current_test_phase_ms){
+    //   __WFI();
+    // }
+  }
+}
+
+/*
+  Baseline current with everything as deep asleep as firmware alone can put it
+  (baseline_sleep_test in config.h): GNSS in backup until the next power cycle, the
+  sd-card initialised and released so it idles in standby rather than in its
+  power-up state, radio asleep, IMU powered down, serial closed, and the MCU in Stop2
+  (LowPower.deepSleep), woken by the RTC alarm every baseline_current_test_phase_ms
+  only to go straight back. Runs before the watchdog is started, so nothing has to be
+  fed. Never returns. Cut the power before running normal firmware again: the GNSS
+  does not wake from backup on its own.
+*/
+static void baselineSleepTest(void){
+  baselineStillPeripherals(0);
+  sd_writer.begin();
+  sd_writer.shutdown();
+
+  /*
+    SD.end() leaves the SPI pins undriven, and they feed the CMOS hex buffer (U8) in
+    front of the card: a floating CMOS input can draw current through both output
+    transistors. Drive them instead. SCK high also keeps the SD activity LED dark:
+    LED2 + R16 sit between DAT3 (= CS, high when idle) and the buffered SCK, so with
+    CS high and SCK low it is lit for as long as the card is idle.
+  */
+  pinMode(SPI_CS_SD_PIN, OUTPUT);   digitalWrite(SPI_CS_SD_PIN, HIGH);
+  pinMode(SPI_CS_IMU_PIN, OUTPUT);  digitalWrite(SPI_CS_IMU_PIN, HIGH);
+  pinMode(SPI_SCK_PIN, OUTPUT);     digitalWrite(SPI_SCK_PIN, HIGH);
+  pinMode(SPI_MOSI_PIN, OUTPUT);    digitalWrite(SPI_MOSI_PIN, HIGH);
+
+  LowPower.begin();
+  if (debug_serial){ mySerial.println("Baseline: deep sleep (Stop2) from here on"); mySerial.flush(); }
+  mySerial.end();
+  while (true){
+    LowPower.deepSleep(baseline_current_test_phase_ms);
+  }
+}
+
 void setup() {
 
   // Serial debugging can be turned on or off with the debug_serial flag.
@@ -95,6 +187,37 @@ void setup() {
 
   if (enable_bootloader_menu){
     bootloaderWindow();
+  }
+
+  // TEMP: deep sleep with INT1 open-drain. Brings SPI1 up for the IMU (both CS high
+  // first), configures it, then the same quiet board as baseline_sleep_test. Remove
+  // after checking.
+  if (int1_od_sleep_test){
+    pinMode(SPI_CS_IMU_PIN, OUTPUT);  digitalWrite(SPI_CS_IMU_PIN, HIGH);
+    pinMode(SPI_CS_SD_PIN, OUTPUT);   digitalWrite(SPI_CS_SD_PIN, HIGH);
+    SPI.setMOSI(SPI_MOSI_PIN);
+    SPI.setMISO(SPI_MISO_PIN);
+    SPI.setSCLK(SPI_SCK_PIN);
+    SPI.begin();
+    const bool wtmPass = wave_manager.configureImuOnly();
+    mySerial.print("INT1 OD test: INT1 pin level before sleep = ");
+    mySerial.println(digitalRead(INT1_IMU_PIN));  // 1 = pad released, 0 = still driven low
+    if (!wtmPass){
+      mySerial.println("INT1 OD test: watermark FAILED - not going to sleep, halted");
+      mySerial.flush();
+      while (true){}
+    }
+    baselineSleepTest();
+  }
+
+  if (power_batch_test){
+    runPowerBatch();
+  }
+  if (baseline_current_test){
+    baselineCurrentTest();
+  }
+  if (baseline_sleep_test){
+    baselineSleepTest();
   }
 
   // We try to enable rtc timing

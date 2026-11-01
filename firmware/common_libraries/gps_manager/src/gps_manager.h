@@ -120,6 +120,10 @@ static constexpr uint16_t GPS_ddc_check_ms               {GPS_nav_period_ms / GP
 */
 static constexpr uint16_t GPS_ddc_max_drain              {128};
 
+// TIMEPULSE (1 PPS) output. Off: nothing in the firmware uses it, and the pin drives the
+// PPS LED on the board, which costs current whenever it is high. begin() sends CFG-TP5.
+static constexpr bool     GPS_timepulse_enabled          {false};
+
 // No valid frame for ten navigation epochs means the bus or the module needs a nudge; see
 // recoverDdc(). Long enough that a normal SD stall (measured max 878 ms) never trips it.
 // Counted only across epochs update() was there to see - a gap between CALLS this long
@@ -154,6 +158,10 @@ class GPS_Manager{
     time_t timestamp = 0;
     uint8_t performNReadings(uint8_t N, uint32_t max_wait_time, bool logEveryReading);
     void shutdownGPS(void);
+    // Software backup (UBX-RXM-PMREQ): tens of uA against the mA of shutdownGPS's GNSS
+    // stop. I2C does NOT wake it - only the timeout (durationMs, 0 = never) or a power
+    // cycle. Bench use until the wake-up path is settled.
+    void backupGPS(uint32_t durationMs);
     void processReadings(bool);
     uint32_t iterations = 0;
 

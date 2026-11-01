@@ -21,10 +21,10 @@ static uint16_t ubxU2(const uint8_t * p){
 /*
   Send a UBX message (class/id + payload) over the DDC port, appending the
   two byte Fletcher checksum. The buffer only has to hold the small CFG
-  messages we send during startup.
+  messages we send during startup - the largest is CFG-TP5, 32 B of payload.
 */
 static void sendUbx(uint8_t cls, uint8_t id, const uint8_t * payload, uint16_t len){
-  uint8_t buf[32];
+  uint8_t buf[48];
   buf[0] = 0xB5; buf[1] = 0x62; buf[2] = cls; buf[3] = id;
   buf[4] = (uint8_t) (len & 0xFF); buf[5] = (uint8_t) (len >> 8);
   for (uint16_t i = 0; i < len; i++){
@@ -172,6 +172,46 @@ void GPS_Manager::begin(){
       sendUbx(0x06, 0x08, rate, 6);
       delay(100);
       flushDDC(availBytes());  // drop the ACK
+
+      /*
+        UBX-CFG-TP5 for TIMEPULSE (tpIdx 0) with flags.active cleared: no pulse at all.
+        The pin drives the PPS LED (LED1 via R12, 1 kOhm), ~1.3 mA whenever it is high,
+        and nothing in the firmware uses the pulse. Remaining fields are the M8
+        defaults (1 s period, 100 ms pulse when locked), so setting bit 0 again restores
+        the stock behaviour. Not in flash, so re-sent on every begin() like the rest.
+      */
+      if (!GPS_timepulse_enabled){
+        uint8_t tp5[32] = {
+          0x00, 0x01, 0x00, 0x00,     // tpIdx 0, version 1, reserved
+          0x32, 0x00, 0x00, 0x00,     // antCableDelay 50 ns, rfGroupDelay 0
+          0x40, 0x42, 0x0F, 0x00,     // freqPeriod       1 000 000 us
+          0x40, 0x42, 0x0F, 0x00,     // freqPeriodLock   1 000 000 us
+          0x00, 0x00, 0x00, 0x00,     // pulseLenRatio    0
+          0xA0, 0x86, 0x01, 0x00,     // pulseLenRatioLock 100 000 us
+          0x00, 0x00, 0x00, 0x00,     // userConfigDelay  0
+          0x76, 0x00, 0x00, 0x00};    // flags: default 0x77 with bit 0 (active) cleared
+        sendUbx(0x06, 0x31, tp5, sizeof(tp5));
+        delay(50);
+
+        // The buffer was drained before the TP5, so its ACK-ACK (05 01) or ACK-NAK
+        // (05 00) comes first: report which, since the LED is the only other sign
+        uint16_t n = availBytes();
+        uint8_t got = (n > 0) ? Wire.requestFrom(GPS_I2C_ADDR, (uint8_t) (n > 32 ? 32 : n)) : 0;
+        uint8_t r[32];
+        for (uint8_t i = 0; i < got; i++) r[i] = Wire.read();
+        int8_t tpAck = -1;
+        for (uint8_t i = 0; i + 7 < got; i++){
+          if (r[i] == 0xB5 && r[i+1] == 0x62 && r[i+2] == 0x05 && r[i+6] == 0x06 && r[i+7] == 0x31){
+            tpAck = r[i+3];
+            break;
+          }
+        }
+        if (debug_serial){
+          Serial.print(F("GPS: CFG-TP5 (timepulse off) "));
+          Serial.println(tpAck == 1 ? F("ACK") : (tpAck == 0 ? F("NAK") : F("no reply")));
+        }
+        flushDDC(n - got);
+      }
 
       /*
         Turn NAV-PVT into a periodic message instead of something update() has to ask for.
@@ -823,6 +863,33 @@ void GPS_Manager::shutdownGPS(void){
   packet.clear();
   Wire.end();
   frameIdx_ = 0;  // a half-parsed frame must not be finished with bytes from the next session
+  initialized = false;
+}
+
+void GPS_Manager::backupGPS(uint32_t durationMs){
+  if (initialized){
+    // UBX-RXM-PMREQ v1: version, reserved[3], duration (ms), flags, wakeupSources
+    // flags 0x06 = backup | force. wakeupSources 0: only the timeout wakes it - a
+    // floating RXD or EXTINT would otherwise be free to wake it at once.
+    uint8_t req[16] = {0x00, 0x00, 0x00, 0x00,
+                       (uint8_t)durationMs, (uint8_t)(durationMs >> 8),
+                       (uint8_t)(durationMs >> 16), (uint8_t)(durationMs >> 24),
+                       0x06, 0x00, 0x00, 0x00,
+                       0x00, 0x00, 0x00, 0x00};
+    sendUbx(0x02, 0x41, req, 16);
+    delay(100);
+
+    // The 8-byte v0 form (duration, flags), for firmware that ignores v1. A receiver
+    // that did go down on v1 no longer listens, so this cannot undo it.
+    uint8_t req0[8] = {(uint8_t)durationMs, (uint8_t)(durationMs >> 8),
+                       (uint8_t)(durationMs >> 16), (uint8_t)(durationMs >> 24),
+                       0x02, 0x00, 0x00, 0x00};   // flags 0x02 = backup
+    sendUbx(0x02, 0x41, req0, 8);
+    delay(20);
+  }
+  packet.clear();
+  Wire.end();
+  frameIdx_ = 0;
   initialized = false;
 }
 

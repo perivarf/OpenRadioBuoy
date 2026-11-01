@@ -36,6 +36,9 @@ class ImuSampler {
 
   bool checkImu(Print &dbg) { return dev_.checkAlive(dbg); }
 
+  // TEMP: INT1 open-drain watermark test. Remove after checking.
+  bool testWatermark(Print &dbg) { return dev_.testWatermark(dbg); }
+
   // Drain all pending FIFO words once (call repeatedly during a capture).
   // captureLeftMs and gpsRows are passed straight to the debug output
   void update(Print &dbg, uint32_t captureLeftMs, uint32_t gpsRows = 0);

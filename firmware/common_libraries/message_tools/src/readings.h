@@ -9,6 +9,8 @@ static constexpr uint8_t ANALOG_READING_TYPE_UNKNOWN   {0};
 static constexpr uint8_t ANALOG_READING_TYPE_PH        {1};
 static constexpr uint8_t ANALOG_READING_TYPE_TURBIDITY {2};
 
+// PIF TODO
+
 struct temperature_Reading
 {
     uint16_t reading_ID;

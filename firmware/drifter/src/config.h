@@ -56,6 +56,40 @@ static constexpr bool enable_bootloader_menu                {true};
 static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
 
 /*
+  Bench test of the board's baseline current. With this on, setup() stops right after
+  the bootloader menu: it stills what is not quiet out of reset (GNSS stopped, radio
+  asleep, SPI chip selects high; the IMU is already powered down) and then never
+  returns, alternating a busy spin (what delay() does) with Sleep mode (WFI, as in the
+  wave capture loop), baseline_current_test_phase_ms each. Read the ammeter in each.
+*/
+static constexpr bool     baseline_current_test             {false};
+// Same stilling as above, then the MCU in deep sleep (Stop) instead of a spin or WFI,
+// waking every baseline_current_test_phase_ms. baseline_current_test must be false,
+// or that test runs first and never returns.
+static constexpr bool     baseline_sleep_test               {false};
+// Both baseline tests: true puts the GNSS in software backup (UBX-RXM-PMREQ) instead
+// of shutdownGPS's GNSS stop. In baseline_current_test it wakes by itself after one
+// phase and stays up; in baseline_sleep_test it stays in backup until a power cycle.
+static constexpr bool     baseline_gps_backup               {true};
+// TEMP: baseline_sleep_test with the IMU configured first (INT1 open-drain, active
+// low), so the sleep current can be compared against the plain baseline. Runs first,
+// before the power batch, and never returns. Remove after checking.
+static constexpr bool     int1_od_sleep_test                {true};
+static constexpr uint32_t baseline_current_test_phase_ms    {600*s_2_ms};
+
+/*
+  Power-measurement bench (drifter/src/power_batch.cpp): every board configuration back
+  to back, each preceded by an ID-coded current pattern that
+  power_measurement/power_batch_analyze.py decodes from the supply log. Tests 1-10 in one
+  run, the sd-card inserted by hand before the tests that use it (the bench waits;
+  power_batch_log.py says when). Runs right after the bootloader menu and never
+  returns; takes precedence over the baseline tests.
+  Test 7 logs raw.bin, so wave_log_mode must be Raw.
+*/
+static constexpr bool     power_batch_test                  {true};
+static constexpr uint32_t power_batch_test_ms               {120*s_2_ms};  // each test / capture
+
+/*
   Take the first GPS/thermistor reading and start the first wave capture on the first
   loop iteration, rather than after one full period of silence. Set false to let both
   gates wait out their period after boot (useful when a bench unit should not start a

@@ -35,10 +35,11 @@ bool Lsm6dsvDevice::begin(Print &dbg) {
 
   // Set up use of interrupt pin for FIFO watermark
   if (kImuUseInt1) {
-    // pinMode before attachInterrupt, or the ISR never fires.
-    pinMode(INT1_IMU_PIN, INPUT);
-    // The sensor drives INT1 push-pull, active high -> trigger on the rising edge.
-    attachInterrupt(digitalPinToInterrupt(INT1_IMU_PIN), isrTrampoline, RISING);
+    // pinMode before attachInterrupt, or the ISR never fires. INT1 is open-drain
+    // (see configure()), so the line needs a pull-up when the pad is released.
+    pinMode(INT1_IMU_PIN, INPUT_PULLUP);
+    // Open-drain, active low -> trigger on the falling edge.
+    attachInterrupt(digitalPinToInterrupt(INT1_IMU_PIN), isrTrampoline, FALLING);
   }
 
   return true;
@@ -76,6 +77,12 @@ void Lsm6dsvDevice::configure() {
     imu_.Set_SFLP_Batch(false, false, false);
   }
 
+  // INT pads open-drain, active low - unconditionally, since a push-pull INT1 draws
+  // current through the band strap on PB12 whether or not the interrupt is used.
+  uint8_t ifCfg = 0;
+  imu_.Read_Reg(kIfCfgReg, &ifCfg);
+  imu_.Write_Reg(kIfCfgReg, (uint8_t)(ifCfg | kIfCfgPpOd | kIfCfgHLactive));
+
   // Interrupt
   // INT1_CTRL has no setter in the wrapper, therefore the raw register write.
   if (kImuUseInt1) {
@@ -107,6 +114,41 @@ bool Lsm6dsvDevice::checkAlive(Print &dbg) {
     return false;
   }
   return true;
+}
+
+// TEMP: INT1 open-drain watermark test. Remove after checking.
+// Idle the line must read high (pad released), on the watermark the ISR must fire on
+// the falling edge, and after BYPASS the line must be released again.
+bool Lsm6dsvDevice::testWatermark(Print &dbg) {
+  bypassFifo();
+  delay(5);
+  const int pinIdle = digitalRead(INT1_IMU_PIN);
+
+  const uint32_t t0 = millis();
+  startStreaming();
+  int32_t pinLowMs = -1;
+  while ((millis() - t0) < 1000) {
+    if (pinLowMs < 0 && !digitalRead(INT1_IMU_PIN)) pinLowMs = (int32_t)(millis() - t0);
+    if (fifoFlag_ && pinLowMs >= 0) break;
+  }
+  const uint32_t dt = millis() - t0;
+  const bool fired = fifoFlag_;
+
+  bypassFifo();
+  delay(5);
+  const int pinAfter = digitalRead(INT1_IMU_PIN);
+
+  dbg.print("WTM test: pin idle = "); dbg.print(pinIdle);
+  dbg.print(", pin low after ");
+  if (pinLowMs < 0) dbg.print("- never"); else { dbg.print(pinLowMs); dbg.print(" ms"); }
+  dbg.print(", ISR "); dbg.print(fired ? "FIRED" : "did NOT fire");
+  dbg.print(" after "); dbg.print(dt); dbg.print(" ms (expected ~");
+  dbg.print((uint32_t)kFifoWatermark * 1000UL / (2UL * kImuOdrHz));
+  dbg.print(" ms), pin after BYPASS = "); dbg.println(pinAfter);
+
+  const bool pass = pinIdle && fired && pinAfter;
+  dbg.println(pass ? "WTM test: PASS" : "WTM test: FAIL");
+  return pass;
 }
 
 // Start streaming: FIFO fills, watermark flag cleared

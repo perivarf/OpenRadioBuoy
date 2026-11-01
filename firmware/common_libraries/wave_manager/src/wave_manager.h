@@ -48,6 +48,10 @@ class WaveManager {
   etl::deque<WaveResult, max_number_of_wave_measurements> wave_analysis_results;
 
   void begin(void);
+
+  // TEMP: INT1 open-drain sleep test - watermark check, then the IMU powered down.
+  // Returns whether the watermark test passed. Remove after checking.
+  bool configureImuOnly(void);
   void wake(void);
   void sleep(void);
 
@@ -58,6 +62,12 @@ class WaveManager {
   //   2 = no GNSS fix within wave_gps_fix_timeout, and wave_measurement_require_gps
   //       is set - capture deliberately skipped. 
   uint8_t takeReading(void);
+
+  // Power-measurement bench: takeReading with run-time capture length, drift track and
+  // sd-card log, onCaptureStart called right before the capture loop, and no skip
+  // without a GNSS fix. 0 = capture ran, 1 = no IMU.
+  uint8_t benchCapture(uint32_t durationMs, bool gpsTrack, bool logToSd,
+                       void (*onCaptureStart)(void));
 
   // Finalise the Welch spectrum -> wave params, push a WaveResult, write spec/ana.
   // Returns 0 on success, non-zero if no usable spectrum was produced.
@@ -150,6 +160,11 @@ class WaveManager {
   // Write position to session file
   void writePosition(const char *when, const FixE7 &p);
   bool     imuOk_ = false;
+
+  // Run-time copies of the capture config, overridden only by benchCapture
+  uint32_t captureDurationMs_ = wave_capture_duration;
+  bool     gpsTrack_          = wave_gps_track_in_capture;
+  bool     logToSd_           = wave_log_to_sd;
 };
 
 extern WaveManager wave_manager;
