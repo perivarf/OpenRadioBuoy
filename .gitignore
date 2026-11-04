@@ -51,8 +51,9 @@ out/
 __pycache__/
 *.pyc
 
-# Hidden directories anywhere under firmware/ (machine-specific tool/editor config)
-firmware/**/.*/
+# Hidden directories anywhere in the repo (machine-specific tool/editor config: .vscode, .pio, .claude, ...)
+.*/
 
 # Local plans and notes
 todo/
+

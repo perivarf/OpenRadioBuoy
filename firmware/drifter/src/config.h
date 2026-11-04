@@ -17,11 +17,11 @@ static constexpr float    mps_2_kmph                       {3.6};
 
 
 // Radio parameters
-static           uint32_t minimal_transmission_period    {2*s_2_ms};
+static           uint32_t minimal_transmission_period    {5*min_2_s*s_2_ms};
 static           float    LoRa_freq_receive              {863};
 static constexpr uint8_t  LoRa_power                     {15};
 
-static constexpr uint8_t  packet_count_send_treshold     {0}; // Default 2 -> this is expensive
+static constexpr uint8_t  packet_count_send_treshold     {2}; // Default 2 -> this is expensive
 static constexpr int16_t  transmission_grace_period      {5*s_2_ms};
 static constexpr uint32_t max_radio_fix_look_time        {90*s_2_ms};
 static constexpr uint32_t beacon_ping_period             {2*min_2_s*s_2_ms};
@@ -30,14 +30,14 @@ static constexpr uint32_t send_delay_after_handshake     {1000};
 // Sensor reading parameters
 static constexpr uint8_t  readings_per_measurement            {15};
 static constexpr uint8_t  max_number_of_measurements         {40};
-static constexpr uint32_t max_GPS_read_time                  {1*min_2_s*s_2_ms}; //Default 3 min
+static constexpr uint32_t max_GPS_read_time                  {3*min_2_s*s_2_ms}; //Default 3 min
 static constexpr uint32_t max_sensor_read_time               {40*s_2_ms};
 static constexpr float    outlier_discard_tolerance          {2};
 static constexpr uint16_t GPS_baud                           {9600};
 static constexpr uint32_t minimal_measurement_period         {10*s_2_ms}; //Default 10 min
-static           uint32_t base_measurement_period            {10*s_2_ms}; //Default 10 min
+static           uint32_t base_measurement_period            {10*min_2_s*s_2_ms}; //Default 10 min
 static constexpr uint32_t maximal_measurement_period         {30*min_2_s*s_2_ms}; //Default 30 min
-static constexpr uint32_t thermometre_pause_between_readings {30};
+static constexpr uint32_t thermometre_pause_between_readings {300};
 
 
 // Enable or disable parameters
@@ -59,7 +59,7 @@ static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
   Take the first GPS/thermistor reading and start the first wave capture on the first
   loop iteration, rather than after one full period of silence. Set false to let both
   gates wait out their period after boot (useful when a bench unit should not start a
-  half-hour capture the moment it is powered).
+  20-minute capture the moment it is powered).
 */
 static constexpr bool measure_immediately_after_deployment  {true};
 
@@ -78,7 +78,7 @@ static constexpr bool measure_immediately_after_deployment  {true};
   max_radio_fix_look_time + max_radio_wait_time). Set false for a deployment where
   radio power matters more than seeing the buoy quickly.
 */
-static constexpr bool transmit_before_wave_capture          {true};
+static constexpr bool transmit_before_wave_capture          {false};
 
 // Motion parameters
 static bool     enable_motion_detection                  {false};
@@ -96,7 +96,7 @@ static constexpr uint32_t wave_capture_duration           {1200*s_2_ms};       /
 // from a single accel sample and needs a while to converge on the true orientation;
 // the vertical acceleration it produces before then is biased and would pollute the
 // PSD. Rows inside the warm-up are still fed to the filter (that is the point) and
-// still logged to imu.csv/gps.csv - they are only kept out of the 10 Hz bucketing,
+// still logged to raw.bin/imu.csv - they are only kept out of the 5 Hz bucketing,
 // the Welch accumulation and hence Hs/Tz/Tc/Tp. Set to 0 to disable.
 static constexpr uint32_t wave_capture_warmup             {30*s_2_ms};
 static_assert(wave_capture_warmup < wave_capture_duration,

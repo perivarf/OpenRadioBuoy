@@ -15,6 +15,30 @@ The current modules are, with descriptions and  listed dependencies (with the ex
 | [```sd_writer```](common_libraries/sd_writer/) | All operations when it comes to file management and file writing to the onboard sd card | [```etl_error_manager```](common_libraries/etl_error_manager/), [```SdFat```](https://github.com/greiman/SdFat) |
 | [```stats```](common_libraries/stats/) | Measurement filtering and post-processing | None | 
 | [```thermo_manager```](common_libraries/thermo_manager/) | Library to manage everything related to the onboard thermometres. More or less a compatability port of the excellent [OpenMetBuoy thermistor library](https://github.com/jerabaul29/OpenMetBuoy-v2021a/blob/main/legacy_firmware/firmware/plain_gps_drifter/thermistors_manager.h) | [```stats```](common_libraries/stats/), [```sd_writer```](common_libraries/sd_writer/), [```parser_utils```](common_libraries/parser_utils/), [```OneWire```](https://github.com/PaulStoffregen/OneWire) | 
+| [```wave_manager```](common_libraries/wave_manager/) | IMU sampling and wave analysis on the drifter. Streams the LSM6DSVTR FIFO, estimates vertical acceleration with an AHRS (the on-chip SFLP fusion, or Madgwick or Kalman in software, chosen at compile time), and computes the wave spectrum (Welch) and sea state parameters (Hs, Tz, Tc, Tp). Logs each capture to the SD card, and builds the wave message sent to the base station | [```sd_writer```](common_libraries/sd_writer/), [```gps_manager```](common_libraries/gps_manager/), [```STM32duino LSM6DSV16X```](https://github.com/stm32duino/LSM6DSV16X), [```SdFat```](https://github.com/greiman/SdFat) |
 
 ## The Drifter firmware
 The drifter platformio project is the full software package used by the OLB drifters, and the configuration file is currently set in a default configuration for a drifter where power usage is a priority. A parameter table is given in the drifter folder README
+
+## Building
+All applications are environments in the [```platformio.ini```](platformio.ini) in this folder, and are built from here:
+
+| Environment | Description |
+| ----------- | ----------- |
+| ```orb_drifter``` | The drifter firmware |
+| ```orb_drifter_test_wave``` | The drifter firmware with ```DEBUG_WAVE_MSG``` enabled, for testing the wave message |
+| ```orb_basestation``` | The base station firmware |
+
+E.g. ```pio run -e orb_drifter -t upload```. The build also writes a ```.hex``` file (```compile_to_hex.py```), which can be flashed over UART with ```upload_hex.sh```.
+
+## Examples
+The [```examples```](examples/) folder holds small, separate PlatformIO projects showing how to use a single component. Each is built and flashed from its own folder.
+
+| Example | Description |
+| ------- | ----------- |
+| [```read_GPS```](examples/read_GPS/) | Read and process GPS data with ```gps_manager```, logging to the SD card |
+| [```read_IMU```](examples/read_IMU/) | Minimal polling of the IMU accelerometer and gyroscope, using only the built-in methods of the LSM6DSV16X library |
+| [```read_temperatures```](examples/read_temperatures/) | Read the thermistors with ```thermo_manager``` |
+
+## Tools
+Post-processing scripts for wave captures are found in [```../tools```](../tools/). [```raw_to_csv.py```](../tools/raw_to_csv.py) decodes a capture's ```<stamp>_raw.bin``` to CSV (IMU samples, and the GPS track as ```<stamp>_gps.csv``` when logged).

@@ -41,7 +41,7 @@ static constexpr uint32_t imu_debug_print_period = {20 * s_2_ms};  // 20 s
 
 // Hot-path timing (wave_timing.h). A diagnostic log: turn it off before deployment.
 // Prints to serial in loop, and summary to ses.csv (mean and max timings)
-static constexpr bool wave_timing_enabled {true};
+static constexpr bool wave_timing_enabled {false};
 
 // -----------------------------------------------------------------------------
 // Which IMU log a capture writes. Independent files, not two formats of one thing.

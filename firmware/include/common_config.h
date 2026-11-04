@@ -81,7 +81,7 @@ static constexpr uint32_t watchdog_wait_time {32000};
 
 // Debug / logging
 static constexpr int  serial_baud  {115200};
-static constexpr bool debug_serial {true};
+static constexpr bool debug_serial {false};
 
 /*
   Whether a received 'P' message is dumped ONE LINE PER BIN.

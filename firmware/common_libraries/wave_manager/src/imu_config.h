@@ -70,7 +70,7 @@ static constexpr float kGyrSensMdpsPerLsb = gyrSensMdpsPerLsb(kGyroFS);
 // On-chip sensor fusion (SFLP): a 6-axis AHRS in the sensor, emitting a quaternion
 // that rotates the sensor frame into the gravity frame
 // -----------------------------------------------------------------------------
-static constexpr bool  kEnableSflp = true;
+static constexpr bool  kEnableSflp = false;
 static constexpr float kSflpOdrHz  = 240.0f;
 
 // Words the FIFO takes in a second: accel and gyro at kImuOdrHz, plus the rotation
