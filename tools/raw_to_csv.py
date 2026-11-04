@@ -76,7 +76,7 @@ def read_header(buf):
         sys.exit("raw: the file is shorter than the header")
     magic, ver = struct.unpack_from("<IB", buf, 0)
     if magic != MAGIC:
-        sys.exit(f"raw: bad magic 0x{magic:08X} - not a _imu.bin")
+        sys.exit(f"raw: bad magic 0x{magic:08X} - not a _raw.bin")
     if ver not in VERSIONS:
         sys.exit(f"raw: format v{ver}. This decoder follows the firmware in the repo, "
                  f"and reads v{VERSIONS[0]}-v{VERSIONS[-1]}.")
@@ -108,7 +108,7 @@ def parse(buf, hdr):
 
     # THE TAIL. An interrupted capture never reaches truncate(), so the file is left at
     # its full preallocated length, and what lies past the last written block is
-    # whatever was in those clusters before - usually an earlier capture's imu.bin.
+    # whatever was in those clusters before - usually an earlier capture's raw.bin.
     # That tail has valid tags and decodes into perfectly clean samples. Two things give
     # it away, and the capture's own stream never does either: a sync record where the
     # clock or the accel counter goes BACKWARDS, and a long run of unknown tags.
@@ -287,7 +287,7 @@ def resolve(path):
     """Accept a .bin, or a session directory holding one."""
     if os.path.isdir(path):
         cand = sorted(glob(os.path.join(path, "*_raw.bin"))
-                      + glob(os.path.join(path, "*_imu.bin")))
+                      + glob(os.path.join(path, "*_imu.bin")))  # older sessions
         if not cand:
             sys.exit(f"found no *_raw.bin or *_imu.bin in {path}")
         return cand[0]

@@ -58,7 +58,10 @@
       "Bash(pdftotext -layout -f 60 -l 72 LSM6DSV.pdf -)",
       "Bash(grep -n \"CTRL7\\\\|CTRL8\\\\|^6[0-9]$\\\\|^7[0-2]$\")",
       "Bash(cd /home/pif/master && echo \"=== OldPCB drifter main.cpp hits ===\" && grep -n \"welch\\\\|Welch\\\\|significant wave\\\\|computeSeaState\" OpenRadioBuoyOldPCB/firmware/drifter/src/main.cpp | head -5 *)",
-      "Read(//home/pif/master/**)"
+      "Read(//home/pif/master/**)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:gitlab.com)",
+      "Bash(~/.platformio/penv/bin/pio run *)"
     ],
     "additionalDirectories": [
       "/home/pif/master/notehub_cloudflare/public",

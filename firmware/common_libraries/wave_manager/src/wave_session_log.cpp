@@ -153,7 +153,7 @@ bool WaveManager::startSession(void) {
     return false;
   }
 
-  // imu.bin opened if waveModeImuRaw
+  // raw.bin opened if waveModeImuRaw
   if (waveModeImuRaw()) {
     snprintf(nm, sizeof(nm), "%s/%s_%s.bin", sessionDir_, logStamp_, WAVE_RAW_PREFIX);
     rawFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
@@ -430,7 +430,7 @@ void WaveManager::writeAnaCsv(bool ok, const WaveParams &params) {
   // Times the FIFO overran during this capture
   af.print("fifo_overflows,"); af.println(imu_.overflowTotal());
 
-  // Blocks imu.bin lost
+  // Blocks raw.bin lost
   af.print("raw_write_failures,"); af.println(rawLog_.writeFailCount());
 
   // Welch and calculated wave parameters
