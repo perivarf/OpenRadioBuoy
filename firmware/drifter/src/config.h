@@ -66,7 +66,7 @@ static constexpr bool measure_immediately_after_deployment  {true};
 /*
   Run the transmission check before the wave capture as well as after it.
 
-  A capture blocks loop() for wave_capture_duration - half an hour as configured
+  A capture blocks loop() for wave_capture_duration - 20 minutes as configured
   - so with the check only after it, a freshly booted buoy shows no sign of life at
   the base station, and hence on Notehub, until the first capture has finished.
   Checking first as well gets whatever is already queued out the door immediately,
@@ -90,7 +90,7 @@ static uint32_t target_reading_distance                  {30};
 // live in common_config.h; this is the length of one blocking capture window).
 // -----------------------------------------------------------------------------
 static constexpr uint8_t  max_number_of_wave_measurements {5};
-static constexpr uint32_t wave_capture_duration           {30*min_2_s*s_2_ms}; // 30 min capture
+static constexpr uint32_t wave_capture_duration           {1200*s_2_ms};       // 1200 s (20 min) capture
 
 // AHRS settling time at the start of a capture. The filter (Madgwick/Kalman) starts
 // from a single accel sample and needs a while to converge on the true orientation;

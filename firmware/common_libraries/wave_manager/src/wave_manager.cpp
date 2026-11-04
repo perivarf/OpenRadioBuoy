@@ -105,7 +105,7 @@ WaveManager::FixE7 WaveManager::currentFixE7(void) const {
 }
 
 // -------------------------------------------------------------------------------
-// Row sink: analyse the window, then (optionally) append it to imu.csv / imu.bin
+// Row sink: analyse the window, then (optionally) append it to imu.csv / raw.bin
 // -------------------------------------------------------------------------------
 void WaveManager::rowSinkTrampoline(const ImuRow &r) {
   if (s_self) s_self->onRow(r);
