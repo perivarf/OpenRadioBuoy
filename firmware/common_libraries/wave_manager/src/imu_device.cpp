@@ -175,7 +175,7 @@ void Lsm6dsvDevice::fillBurst(uint16_t n) {
 
 // -----------------------------------------------------------------------------
 // Payload decoding 
-// TODO PIF: Consider removing and use the wrapper's FIFO_Get_X_Axes and FIFO_Get_Rotation_Vector instead
+// Consider removing and use the wrapper's FIFO_Get_X_Axes and FIFO_Get_Rotation_Vector instead
 // It is slightly slower since we then need to call the functions for each word,
 // but less complexity and less code to maintain.
 // -----------------------------------------------------------------------------

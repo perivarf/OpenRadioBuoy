@@ -245,11 +245,10 @@ void WaveManager::runCaptureLoop(void) {
     IWatchdog.reload();
     timeAdd(TIM_LOOP, tLoop);
 
-    // let the FIFO refill; keeps the drain loop from spinning hot
+    // Let the FIFO refill; keeps the drain loop from spinning hot
     /**
-     * TODO: If not using GNSS, we could let the FIFO fill up more (and subsequently sleep more)
-     * TODO: Calculate how much we can delay / sleep here based on FIFO fill level/ODR
-     * Consider changing to low power mode.
+     * Calculate how long we can sleep here based on FIFO fill level/ODR
+     * 
      * */
     delay(2);  
   }

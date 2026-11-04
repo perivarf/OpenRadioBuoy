@@ -39,7 +39,7 @@ struct BeaconOutgoingMessage{
 };
 
 struct StringMessage{
-  String msg; // TODO: replace more meaningful struct
+  String msg;
   bool success;
 };
 

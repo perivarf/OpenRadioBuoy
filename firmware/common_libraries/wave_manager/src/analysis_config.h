@@ -277,7 +277,7 @@ static_assert(kTaperF1 < kTaperF2 && kTaperF2 <= kWaveFMax, "need kTaperF1 < kTa
 // kPsdMinFreq..kPsdMaxFreq. Averaging preserves the energy.
 // -----------------------------------------------------------------------------
 
-// If we are to send the PSD or not (TODO move to config.h?)
+// If we are to send the PSD or not
 static constexpr bool  kSendPsd    = true;
 
 // Min and max frequencies to transmit
