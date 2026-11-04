@@ -18,9 +18,9 @@ static constexpr uint8_t  SD_SPI_MHZ      {12};
 static constexpr char readings_dir[] {"readings/"};
 
 
-static constexpr uint8_t OLB_SD_INACTIVE   {0};
-static constexpr uint8_t OLB_SD_WRITE_MODE {1};
-static constexpr uint8_t OLB_SD_READ_MODE  {2};
+static constexpr uint8_t ORB_SD_INACTIVE   {0};
+static constexpr uint8_t ORB_SD_WRITE_MODE {1};
+static constexpr uint8_t ORB_SD_READ_MODE  {2};
 static constexpr uint8_t DEBUG_MODE_NOTECARD_RESET {3};
 static constexpr uint8_t DEBUG_MODE_BST_HEARTBEAT  {4};
 static constexpr uint8_t DEBUG_MODE_NOTEHUB_SYNC   {5};
@@ -102,7 +102,7 @@ class SDWriter{
     void debugSerialPrintln(float number, int digits);
     int8_t debugByteArray(byte * array, int length);
     void closeDebug(void);
-    uint8_t mode = OLB_SD_INACTIVE;
+    uint8_t mode = ORB_SD_INACTIVE;
   private:
     bool SD_fail;
     File LogFile;

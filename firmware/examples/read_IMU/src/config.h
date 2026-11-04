@@ -2,10 +2,7 @@
 #define CONFIG_H
 #include "Arduino.h"
 
-// Useful constants
-static constexpr uint32_t s_2_ms                         {1000};
-
-// Pin config. Do not change unless you have rewired the OLB
+// Pin config. Do not change unless you have rewired the ORB
 // Console on the debug header (USART1). The variant's own Serial is an unused LPUART1.
 static constexpr uint32_t DEBUG_SERIAL_TX_PIN            {PB6};
 static constexpr uint32_t DEBUG_SERIAL_RX_PIN            {PB7};

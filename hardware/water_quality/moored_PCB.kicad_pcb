@@ -8,7 +8,7 @@
 	)
 	(paper "A5")
 	(title_block
-		(title "Open Lora Buoy")
+		(title "Open Radio Buoy")
 		(rev "1")
 	)
 	(layers

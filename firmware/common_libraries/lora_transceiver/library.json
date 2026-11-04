@@ -1,8 +1,8 @@
 {
-  "name": "OLB_LoRa_Transceiver",
+  "name": "ORB_LoRa_Transceiver",
   "version": "1.0.0",
-  "description": "Radio (LoRa) manager for the Open Lora Buoy",
-  "keywords": "LoRa, RadioLib, OLB",
+  "description": "Radio (LoRa) manager for the Open Radio Buoy",
+  "keywords": "LoRa, RadioLib, ORB",
   "authors":
   [
     {

@@ -192,8 +192,8 @@ int8_t SDWriter::startLogging(const char * filename){
   /*
     We check if the SD writer is in the correct mode to start new operations
   */
-  if ((mode == OLB_SD_INACTIVE) && (!SD_fail)){
-    mode   = OLB_SD_WRITE_MODE;
+  if ((mode == ORB_SD_INACTIVE) && (!SD_fail)){
+    mode   = ORB_SD_WRITE_MODE;
     LogFile = SD.open(filename, FILE_WRITE);
 
     /*
@@ -220,8 +220,8 @@ int8_t SDWriter::startReading(const char * filename){
   /*
     If the SD writer is inactive, start reading operation. Otherwise pass with error code
   */
-  if ((mode == OLB_SD_INACTIVE) && (!SD_fail)){
-    mode   = OLB_SD_READ_MODE;
+  if ((mode == ORB_SD_INACTIVE) && (!SD_fail)){
+    mode   = ORB_SD_READ_MODE;
     LogFile = SD.open(filename, FILE_READ);
     Serial.println("FILE OPENED");
     numLines = 0;
@@ -241,7 +241,7 @@ int8_t SDWriter::startReading(String filename){
 
 // File writing functions
 int8_t SDWriter::logString(const char * line){
-  if ((mode == OLB_SD_WRITE_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_WRITE_MODE) && (!SD_fail)){
     if (debug_serial){
       Serial.println("Writing the following line to file:");
       Serial.println(line);
@@ -278,7 +278,7 @@ int8_t SDWriter::logSignalInfo(uint32_t RSSI, uint32_t SNR){
 
 // The 'b' separator is included to indicate a new byte as to ensure unambigous log files
 int8_t SDWriter::logByteArray(byte* array, int length){
-  if ((mode == OLB_SD_WRITE_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_WRITE_MODE) && (!SD_fail)){
     if (debug_serial)
       Serial.println("Writing the following byte array to file:");
     for (int i = 0; i < length; i++){
@@ -313,7 +313,7 @@ int8_t SDWriter::readFile(void){
     First character indicates if the line is a raw measurement (R)
     or aggregated measurement (A)
   */
-  if ((mode == OLB_SD_READ_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_READ_MODE) && (!SD_fail)){
     char str_line[max_line_length];
     while (LogFile.available()){
       line = {"",0}; 
@@ -345,9 +345,9 @@ int8_t SDWriter::printFileToSerial(void){
 // Functions to stop writing/reading a file. Important to call before opening a new file. 
 
 int8_t SDWriter::closeLog(void){
-  if ((mode == OLB_SD_WRITE_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_WRITE_MODE) && (!SD_fail)){
     LogFile.close();
-    mode = OLB_SD_INACTIVE;
+    mode = ORB_SD_INACTIVE;
     numLines = 0;
     return 0;
   } else if (SD_fail) {
@@ -359,10 +359,10 @@ int8_t SDWriter::closeLog(void){
 
 
 int8_t SDWriter::closeRead(void){
-  if ((mode == OLB_SD_READ_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_READ_MODE) && (!SD_fail)){
     LogFile.close();
     file_buffer.clear();
-    mode = OLB_SD_INACTIVE;
+    mode = ORB_SD_INACTIVE;
     return 0;
   } else if (SD_fail) {
     return 1;

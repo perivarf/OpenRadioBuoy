@@ -2,7 +2,7 @@
 #define CONFIG_H
 #include "common_config.h"   // shared pins, modes, Serial alias, welch, watchdog, ...
 
-// OLB MODE PARAMETERS - DO NOT ADJUST LIGHTLY
+// ORB MODE PARAMETERS - DO NOT ADJUST LIGHTLY
 static constexpr uint8_t WIO_MODE {BUOY_MODE};
 
 /*

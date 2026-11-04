@@ -7,6 +7,9 @@
 
 */
 
+// Console on the debug header, see config.h
+HardwareSerial mySerial{DEBUG_SERIAL_RX_PIN, DEBUG_SERIAL_TX_PIN};
+
 static uint32_t measurement_timer;
 
 void setup() {

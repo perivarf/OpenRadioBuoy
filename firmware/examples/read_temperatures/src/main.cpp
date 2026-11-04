@@ -10,8 +10,8 @@
 */
 
 static uint32_t measurement_timer;
-static constexpr uint8_t thermistorDataPin  {PA9};
-static constexpr uint8_t thermistorPowerPin {PB10};
+// Console on the debug header, see config.h
+HardwareSerial mySerial{DEBUG_SERIAL_RX_PIN, DEBUG_SERIAL_TX_PIN};
 
 void setup() {
   
@@ -28,8 +28,8 @@ void setup() {
   // So we have to initialize the SD card writer as well
   bool SD_fail = sd_writer.begin();
 
-  // We initialize the thermometres at the desired pins
-  thermo_manager.begin(thermistorDataPin, thermistorPowerPin);
+  // We initialize the thermometres at the pins given in thermo_manager.h
+  thermo_manager.begin(THERMO_DATA_PIN, THERMO_POWER_PIN);
   measurement_timer = millis();
 }
 

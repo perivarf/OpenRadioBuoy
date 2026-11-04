@@ -1,6 +1,6 @@
 # Read IMU example
 This code example is a minimal starting point for the onboard IMU (LSM6DSVTR). It uses nothing but the built-in methods of the
-[STM32duino LSM6DSV16X](https://github.com/stm32duino/LSM6DSV16X) library, and is self-contained from the other OLB libraries.
+[STM32duino LSM6DSV16X](https://github.com/stm32duino/LSM6DSV16X) library, and is self-contained from the other ORB libraries.
 The accelerometer and gyroscope are polled and printed as CSV on the debug header (USART1, PB6/PB7, 115200 baud):
 
 ```

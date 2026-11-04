@@ -1,5 +1,5 @@
-# OLB firmware
-The firmware for the OLB is different applications bulit around a set of sometimes shared libraries. In fact, each application folder, currently ```drifter``` and ```basestation``` each only consist of an unique ```main.cpp``` and ```config.h```. All modules that relate to one or more component is located in the ```common_libraries``` folder, and is included in the applications through the ```platformio.ini``` file.
+# ORB firmware
+The firmware for the ORB is different applications bulit around a set of sometimes shared libraries. In fact, each application folder, currently ```drifter``` and ```basestation``` each only consist of an unique ```main.cpp``` and ```config.h```. All modules that relate to one or more component is located in the ```common_libraries``` folder, and is included in the applications through the ```platformio.ini``` file.
 
 ## Common modules
 The current modules are, with descriptions and  listed dependencies (with the exception of the excellent [Embedded Template Library (ETL)](https://www.etlcpp.com/) which is omitted due to it being a dependency for all the modules more or less)
@@ -10,7 +10,7 @@ The current modules are, with descriptions and  listed dependencies (with the ex
 | [```gps_manager```](common_libraries/gps_manager/) | Handling of the onboard GPS and its measurements | [```etl_error_manager```](common_libraries/etl_error_manager/), [```stats```](common_libraries/stats/), [```sd_writer```](common_libraries/sd_writer/), [```TinyGPSPlus```](https://github.com/mikalhart/TinyGPSPlus), [```parser_utils```](common_libraries/parser_utils/)  |
 | [```gsm```](common_libraries/gsm/) | All operations when it comes to the GSM module on the base station. Do note all supported message structures are defined in the [```message_tools```](common_libraries/message_tools/). | [```etl_error_manager```](common_libraries/etl_error_manager/), [```sd_writer```](common_libraries/sd_writer/), [```NoteCard.h```](https://github.com/blues/note-c) |
 | [```lora_transceiver```](common_libraries/lora_transceiver/) | Radio communication manager. Functionality for both buoy and BST. | [```etl_error_manager```](common_libraries/etl_error_manager/), [```sd_writer```](common_libraries/sd_writer/), [```message_tools```](common_libraries/message_tools/), [```parser_utils```](common_libraries/parser_utils/), [```RadioLib```](https://github.com/jgromes/RadioLib)  |
-| [```message_tools```](common_libraries/message_tools/) | Data structures and parsing tools for the different kind of OLB LoRa messages | None |
+| [```message_tools```](common_libraries/message_tools/) | Data structures and parsing tools for the different kind of ORB LoRa messages | None |
 | [```parser_utils```](common_libraries/parser_utils/) | Templates for inserting and extracting integers from byte arrays | None | 
 | [```sd_writer```](common_libraries/sd_writer/) | All operations when it comes to file management and file writing to the onboard sd card | [```etl_error_manager```](common_libraries/etl_error_manager/), [```SdFat```](https://github.com/greiman/SdFat) |
 | [```stats```](common_libraries/stats/) | Measurement filtering and post-processing | None | 
@@ -18,7 +18,7 @@ The current modules are, with descriptions and  listed dependencies (with the ex
 | [```wave_manager```](common_libraries/wave_manager/) | IMU sampling and wave analysis on the drifter. Streams the LSM6DSVTR FIFO, estimates vertical acceleration with an AHRS (the on-chip SFLP fusion, or Madgwick or Kalman in software, chosen at compile time), and computes the wave spectrum (Welch) and sea state parameters (Hs, Tz, Tc, Tp). Logs each capture to the SD card, and builds the wave message sent to the base station | [```sd_writer```](common_libraries/sd_writer/), [```gps_manager```](common_libraries/gps_manager/), [```STM32duino LSM6DSV16X```](https://github.com/stm32duino/LSM6DSV16X), [```SdFat```](https://github.com/greiman/SdFat) |
 
 ## The Drifter firmware
-The drifter platformio project is the full software package used by the OLB drifters, and the configuration file is currently set in a default configuration for a drifter where power usage is a priority. A parameter table is given in the drifter folder README
+The drifter platformio project is the full software package used by the ORB drifters, and the configuration file is currently set in a default configuration for a drifter where power usage is a priority. A parameter table is given in the drifter folder README
 
 ## Building
 All applications are environments in the [```platformio.ini```](platformio.ini) in this folder, and are built from here:
