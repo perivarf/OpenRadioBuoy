@@ -43,79 +43,29 @@ struct analog_Reading
     time_t timestamp;
 };
 
-/* Scaling factor when sending frequencies over LoRa
-   uint32 represents up to around 4e9, so with scaling factor 1e8
-   we can send 4e9 / 1e8 = 40 Hz with 8 decimals.
-
-   This will be enough precision when casting to float later, since
-   float has 1 sign bit, 8 exponent bits and 23 mantissa bits
-   So at at right under 4Hz we can represent numbers with spacing 2 * 1/2^23 = 2.38e-7
-   i.e. around 6 decimals of precision.
+/* Scaling factor when sending frequencies over LoRa.
+   uint32 holds up to ~4.29e9, so 1e7 gives up to ~429 Hz with 7 decimals,
+   finer than float resolution (~2.4e-7 just below 4 Hz).
 */
 static constexpr uint32_t wave_freq_scale {10000000UL};
 
-/* Scaling factor for max_value, the acceleration-PSD peak the spectrum is
-   normalised against. It needs its own scale for the same reason the frequency
-   axis does - scale_factor's 1e5 cannot express it at all.
-
-   An acceleration PSD in (m/s^2)^2/Hz spans an enormous range: a buoy at rest on
-   a bench sits on the accelerometer's noise floor at ~6e-7, four decades BELOW
-   scale_factor's smallest step, so the field quantised to 0 and every receiver
-   reconstructed value/65535 * 0 = a spectrum of zeros. The shape was on the wire
-   the whole time; only its scale was lost.
-
-   1e8 puts the resolution at 1e-8, two decades under that noise floor, and the
-   uint32 ceiling at 4294967295/1e8 = 42.9 (m/s^2)^2/Hz. For scale: Hs 1 m at
-   Tp 5 s peaks near 3, Hs 10 m at Tp 12 s near 15. Beyond that the sender clamps
-   rather than wraps - a saturated peak reads as a spectrum that is too flat, not
-   as noise, and Hs/Tz/Tc/Tp are transmitted as their own fields and stay right
-   regardless.
-
-   Replaying the field captures through this format put the largest observed peak at
-   1.85 (m/s^2)^2/Hz - a factor 23 under the ceiling - and the quietest, a buoy on a
-   bench, at 1e-6, which is 100 counts here and would have been 0 at 1e5. */
+/* Scaling factor for max_value, the peak of the acceleration PSD in (m/s^2)^2/Hz.
+   1e8 gives a resolution of 1e-8 (a buoy at rest is ~1e-6) and a ceiling of 42.9.
+   The sender clamps above that. */
 static constexpr uint32_t wave_psd_scale {100000000UL};
 
 /*
-  A WAVE MEASUREMENT TRAVELS AS TWO MESSAGES.
+  A wave measurement is sent as two messages:
 
-    'W'  the parameters: when, where, Hs/Tc/Tp/Tz          - 56 bytes
-    'P'  the spectrum:   max_value, the axis, the bins     - 26 + 2*num_bins
+    'W'  parameters: time, position, Hs/Tc/Tp/Tz        - 56 bytes
+    'P'  spectrum:   max_value, frequency axis, bins     - 26 + 2*num_bins
 
-  They were one message until the single packet hit 254 of the 255 bytes the
-  SX126x payload-length field can express, which left nothing for a position and
-  made kPsdMaxFreq a payload question rather than a Nyquist one. Splitting costs
-  about 15 % more airtime for the pair, and buys three things:
-
-    - The parameters get their own short packet. Hs and the periods are what the
-      measurement is FOR, and they now ride in ~56 bytes instead of sharing a
-      250-byte packet with the spectrum - a far smaller target at the same link
-      margin. A lost 'P' now costs the spectrum alone, where a lost combined
-      message cost everything.
-    - A position fits. The measurement becomes self-describing instead of relying
-      on a separate 'G' message being received and matched up afterwards.
-    - 'P' holds up to 114 bins in 255 bytes against 98 before, so the band is
-      limited by the analysis, not by the frame.
-
-  THE JOIN KEY IS (buoy, ts_start), NOT reading_ID. reading_ID is a counter that
-  restarts from 0 on every reboot (readingID_ in wave_manager.h), so two sessions
-  both produce reading 1, 2, 3 and the spectrum from one would attach to the
-  parameters of the other. ts_start is therefore repeated in BOTH messages: it is
-  already the primary key the base station's storage uses, it makes the pair
-  order-independent - whichever arrives first creates the record - and it lets a
-  'P' whose 'W' was lost still be placed in time. reading_ID stays as a
-  human-readable label, which is all it was ever reliable enough to be.
+  They are joined on (buoy, ts_start), not reading_ID, since reading_ID restarts
+  at 0 on every reboot. ts_start is therefore in both messages.
 */
 struct wave_analysis_Reading
 {
     uint16_t reading_ID;
-    /*
-      Full 8-byte time_t, the natural width every other message here serialises at.
-      Four would hold an epoch until 2106 and would save eight bytes, but the split
-      is what made those bytes cheap: this message is 56 of the 255 a packet can
-      carry, so there is nothing to buy with them. A format that cannot express a
-      date is a poor trade for slack nobody needs.
-    */
     time_t timestamp_start;
     time_t timestamp_end;
     uint32_t Hs;
@@ -123,16 +73,8 @@ struct wave_analysis_Reading
     uint32_t Tp;
     uint32_t Tz;
     /*
-      Position at the START and at the END of the analysis window, 1e-7 deg
-      (gps_coord_scale), sign-and-magnitude on the wire like the 'G' message.
-
-      Two, not one: over a 30-minute window a free-drifting buoy moves, and the
-      pair is the drift vector - surface current, which is a measurement rather
-      than metadata. For placing the record on a map either will do.
-
-      0,0 means NO FIX, which is the convention the rest of the system already
-      uses - a real 0,0 is in the Gulf of Guinea and the dashboard keeps such
-      points off the map deliberately.
+      Position at the start and end of the analysis window, 1e-7 deg
+      (gps_coord_scale), sign-and-magnitude like the 'G' message. 0,0 means no fix.
     */
     int32_t lat_start;
     int32_t lng_start;
@@ -150,21 +92,13 @@ struct wave_spectrum_Reading
     uint16_t reading_ID;
     time_t timestamp_start;    // the join key, same value and width as the 'W' message
     /*
-      The spectrum is the vertical ACCELERATION PSD with no taper applied.
+      Vertical acceleration PSD, untapered. Bins below kPsdMinFreq are not sent;
+      max_value is the peak over the sent bins.
 
-      The transmitted band is a SLICE, bins below kPsdMinFreq is dropped.
-      max_value is the peak over the  bins.
+      Bin centres: f_i = spec_f_min + i*(spec_f_max - spec_f_min)/(num_bins - 1).
 
-      The bin mid frequencies are
-      f_i = spec_f_min + i*(spec_f_max - spec_f_min)/(num_bins - 1).
-
-      Each bin is SQRT-COMPANDED: the sender stores sqrt(bin/peak) * 65535, so the
-      absolute PSD is (value/65535)^2 * max_value. Acceleration, not elevation, is what
-      travels: elevation is S_acc/(2*pi*f)^4, exact arithmetic on this side, which
-      leaves the receiver free to choose its own taper and low-frequency cut. Sending
-      elevation instead was measured and rejected - untapered it peaks in the BOTTOM bin
-      in every field capture, so max_value would be omega^-4-amplified drift rather than
-      a wave measurement.
+      Bins are sqrt-companded: stored as sqrt(bin/peak) * 65535, so
+      PSD = (value/65535)^2 * max_value. Elevation is S_acc/(2*pi*f)^4.
     */
     uint32_t max_value; // Peak of the acceleration PSD, scaled with wave_psd_scale
     uint32_t spec_f_min; // Bin centre of the first bin, scaled with wave_freq_scale
@@ -174,14 +108,8 @@ struct wave_spectrum_Reading
 };
 
 /*
-  On-wire size of the parameter message, framed 'W' ... 'E'. Must match the byte
-  layout produced by WaveManager::updateTransmitMessage and consumed by
-  Message_Parser::parse_wave_analysis_message.
-
-  Coordinates cost five bytes each, not four: msg_insert_int writes a 'P'/'N' sign
-  character and then the magnitude, which is the encoding the 'G' message already
-  uses. Four would fit an int32 and save 4 bytes, but this message has room and a
-  receiver that decodes every coordinate the same way is worth more than that.
+  On-wire size of the 'W' message. Must match WaveManager::updateTransmitMessage and
+  Message_Parser::parse_wave_analysis_message. Coordinates are 5 bytes (sign + int32).
 */
 static constexpr uint16_t wave_message_size =
     1 + sizeof(uint16_t) + 2 * sizeof(time_t) + 4 * sizeof(uint32_t)
@@ -191,11 +119,8 @@ static_assert(wave_message_size <= max_message_length,
     "wave_message_size exceeds the LoRa byte-message buffer (max_message_length)");
 
 /*
-  On-wire size of the spectrum message, framed 'P' ... 'E'.
-
-  The spectrum is last on purpose: it is the only variable-length field, so a sender
-  that has fewer bins to ship - or none at all - simply stops earlier and everything
-  before it keeps its fixed offset.
+  On-wire size of the 'P' message. The bins are last, since they are the only
+  variable-length field.
 */
 static constexpr uint16_t wave_spectrum_message_size =
     1 + sizeof(uint16_t) + sizeof(time_t) + 3 * sizeof(uint32_t)

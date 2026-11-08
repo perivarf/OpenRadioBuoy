@@ -3,15 +3,10 @@
 #include "Arduino.h"
 
 /*
-  Shared configuration for both the drifter and the basestation. Each project's
-  config.h includes this first, then defines its own project-specific values and
-  the constants whose value genuinely differs between the two targets.
+  Shared configuration for the drifter and the basestation; each config.h includes it.
 
-  The console is the mySerial instance in main.cpp (USART1 on PB6/PB7, the debug
-  header on this PCB). The variant's own `Serial` is an unused LPUART1 on PA2/PA3,
-  so alias it here and every existing Serial.print lands on the header. USART1
-  supports only this orientation: PB6 is in PinMap_UART_TX, PB7 in PinMap_UART_RX.
-  Swapping them leaves the line undriven.
+  The console is mySerial (USART1, PB6 TX / PB7 RX, the debug header). The variant's
+  Serial is an unused LPUART1, so Serial is aliased to mySerial.
 */
 extern HardwareSerial mySerial;
 #undef Serial          // WSerial.h has already aliased it to SerialLP1
@@ -84,22 +79,8 @@ static constexpr int  serial_baud  {115200};
 static constexpr bool debug_serial {false};
 
 /*
-  Whether a received 'P' message is dumped ONE LINE PER BIN.
-
-  Off by default, because that dump is not free the way the other debug prints are.
-  Every debugSerialPrint does a debugFile.sync(), and the bin loop makes five calls
-  per bin - about 510 syncs for a 102-bin spectrum, which blocks the receive loop for
-  seconds.
-
-  That matters now that a wave measurement arrives as TWO packets. listenByteArray
-  clears operationDone on entry, so an RxDone that fires while the console is busy is
-  discarded and the packet is never read out of the radio. With the drifter moving
-  straight on to the next queued result after its 'P', a spectrum dump is long enough
-  to swallow the 'W' that follows it.
-
-  The summary line above the loop - bin count, f_min, f_max, df, max_value - is
-  printed either way, so a spectrum that arrived and parsed still says so. Turn this
-  on for bench work on the codec, not for a station that is actually collecting.
+  Print a received 'P' message one line per bin. Off by default: every print syncs the
+  debug file, and the dump blocks the receive loop long enough to miss the next 'W'.
 */
 static constexpr bool debug_print_psd_bins {false};
 

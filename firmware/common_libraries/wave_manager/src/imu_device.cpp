@@ -240,11 +240,7 @@ static inline void payloadToQuat(const uint8_t p[6], float q[4]) {
 
     w[0..6] = tag | x_lo x_hi | y_lo y_hi | z_lo z_hi    (three LE int16, tag >> 3 = sensor)
 
-  FIFO_DATA_OUT_TAG is bit 0 unused, bits 2:1 tag_cnt, bits 7:3 tag_sensor - so the tag
-  is shifted down by 3 here, and that shifted value is what the raw log stores.
-
-  Decoding is unconditional: a word is exactly one kind, so the branch below does the
-  same work the caller's would have.
+  The tag is shifted down by 3 (bits 7:3 are tag_sensor); that value is what the raw log stores.
 */
 void Lsm6dsvDevice::popWord(ImuFifoWord &w, uint16_t remaining) {
   if (burstIdx_ == burstFill_) fillBurst(remaining);

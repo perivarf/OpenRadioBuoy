@@ -33,14 +33,8 @@ static void sdDateTimeCallback(uint16_t *date, uint16_t *time){
 
 uint32_t SDWriter::countFilesInDirectory(const char * dirName){
   /*
-    Counts the files in a directory. The entry handle MUST be closed between
-    iterations: SDFAT_FILE_TYPE is 1, so File is File32 and openNext() bails out on
-    isOpen() - leaving the previous entry open made the loop stop after the first
-    file, so this returned 1 for every non-empty directory. logCount then restarted
-    at 1 on every boot, which restarted the reading IDs and overwrote old readings.
-
-    A local handle rather than the member LogFile, so a counting call can never
-    clobber a log that is open.
+    Count files in a directory. Each entry must be closed before openNext(), or it
+    stops after the first file. A local handle, so an open LogFile is untouched.
   */
   uint32_t fileCount = 0;
   File directory;
@@ -196,13 +190,7 @@ int8_t SDWriter::startLogging(const char * filename){
     mode   = ORB_SD_WRITE_MODE;
     LogFile = SD.open(filename, FILE_WRITE);
 
-    /*
-      logCount is seeded in begin() from the number of files in readings/, and is
-      what names the next reading file and what the GPS/thermo reading_ID is derived
-      from. Only reading logs may bump it: counting boot_info.txt and every
-      messages/transmission log too made the index run ahead of the file count, so
-      after a reboot the numbering fell back into the gap and overwrote old readings.
-    */
+    // Only reading logs bump logCount, which names the next reading file and seeds reading_ID.
     if (strncmp(filename, readings_dir, sizeof(readings_dir) - 1) == 0){
       logCount++;
     }

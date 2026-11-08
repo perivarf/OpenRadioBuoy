@@ -55,23 +55,15 @@ class ScopeUs {
 };
 
 /*
-  The buckets, as an ARRAY with named indices
-
-  Measurements nest:
+  The buckets, as an array with named indices. Measurements nest, so they do not sum
+  to the capture:
 
       loop  >  update  >  pop ( > spi, ahrs, fir, rowsink ) + flush + dbgprint + status
       loop  >  welch
       loop  >  gps
 
-  I.e. the values do not sum to the capture.
-
-  Two important ratios:
-
-      spi n / update n      words per drain - the batch size, and the only place it is
-                            visible.
-      status n / update n   ~2 in a WTM build (the drain's read plus the re-arm), ~1 in
-                            a DRAIN one. Says nothing about batching: the status read
-                            sits BELOW both gates, so it runs only on actual drains.
+  spi n / update n is the number of words per drain. status n / update n is ~2 with
+  WTM (read + re-arm) and ~1 with DRAIN.
 */
 enum TimingBucket : uint8_t {
   TIM_UPDATE = 0,  // one whole drain

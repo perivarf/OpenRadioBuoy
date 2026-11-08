@@ -146,11 +146,8 @@ void setup() {
 
 #if DEBUG_WAVE_MSG
   /*
-    Bench mode: the GPS is never brought up. A unit on a desk gets no fix, so the
-    wait-for-fix loop below would spin forever and the message path under test
-    would never be reached. Nothing in this build reads a position: the wave
-    capture is replaced by a synthetic result and measurePositionTemperature is not
-    called, so timestamps stay boot-relative and that is fine.
+    Bench mode: the GPS is never started, since a unit on a desk gets no fix and the
+    wait below would never end. Timestamps stay boot-relative.
   */
   sd_writer.logString("DEBUG_WAVE_MSG: GPS not started");
   if (debug_serial){
@@ -177,11 +174,8 @@ void setup() {
   gps_manager.processReadings(false);
 
   /*
-    Set the system clock (RTC/TimeLib) from GPS now that we have a fix. The loop
-    above can miss the in-loop clock sync if the module's time-valid flag flips only
-    after that iteration's updateTimestamp ran, leaving now() boot-relative (1970)
-    and every log/session timestamp wrong. A valid PVT always carries UTC time, so
-    set it explicitly here.
+    Set the clock from GPS now that there is a fix. The loop above can miss it if the
+    time-valid flag flips after that iteration's updateTimestamp.
   */
   if (gps_manager.updateTimestamp(max_GPS_read_time, true) == 0){
     if (debug_serial){ mySerial.print("RTC set from GPS, epoch "); mySerial.println((uint32_t)now()); }
@@ -236,14 +230,8 @@ void setup() {
 
 
   /*
-    Arm both measurement gates so the first loop iteration runs them at once instead
-    of waiting out a whole period: a buoy that has just been thrown in the water
-    should produce a reading and start its first wave capture immediately, and the
-    wave cadence is then counted from that first capture.
-
-    The subtraction is deliberate unsigned wrap-around - the gates compare
-    millisTimeCorrected() - timer against the period in uint32 modular arithmetic,
-    so a timer "before" millis() = 0 gives the correct elapsed time regardless.
+    Arm both measurement gates so the first loop iteration runs them immediately.
+    The subtraction relies on unsigned wrap-around, which the gates handle.
   */
   if (measure_immediately_after_deployment){
     measurement_timer      = millis() - LORA.measurement_period - 1;
@@ -267,17 +255,6 @@ void setup() {
   sd_writer.closeLog();
   thermo_manager.sleep();
   LORA.sleep();
-
-  
-  // We try to recover a GPS measurement:
-  //char targetFile[64];
-  //sprintf(targetFile, "readings/reading%05d.txt", 3);
-  //sd_writer.startReading(targetFile);
-  //sd_writer.readFile();
-  //gps_manager.getMeasurementFromFile();
-  //thermo_manager.getMeasurementFromFile();
-  //sd_writer.closeRead();
-
 
   if (debug_serial){
     mySerial.println("Setup complete, loop beginning");
@@ -351,15 +328,7 @@ void waveCapture() {
     mySerial.println("Wave measurement starting");
   }
 
-  /*
-    The period is anchored to the START of the capture, not its end: a capture blocks
-    for wave_capture_duration, so resetting the timer afterwards would give a
-    cycle of duration + period instead of the period itself. With the anchor here, a
-    capture begins every wave_capture_period - which is exactly why that
-    period must be longer than wave_capture_duration (static_assert in config.h);
-    otherwise the gate is already due when the capture returns and they run
-    back-to-back.
-  */
+  // Anchored to the start of the capture, so captures begin every wave_capture_period.
   sleep_cycles_wave_measurement = 0;
   wave_measurement_timer = millis();
 
@@ -565,11 +534,9 @@ void sendBeacon(){
 }
 
 /*
-  Transmit if the radio is due and either queue has something in it.
-
-  lookahead_ms is added to the time since the last transmission, so a transmission that
-  would fall due within the next lookahead_ms counts as due now. Callers about to block
-  the loop pass the length of that block; everyone else passes 0.
+  Transmit if the radio is due and either queue has something in it. A transmission
+  due within lookahead_ms counts as due now; callers about to block pass the length
+  of the block, others 0.
 */
 static bool transmitIfDue(uint32_t lookahead_ms){
   const bool transmission_due =
@@ -613,13 +580,8 @@ void loop() {
 
 
 #if DEBUG_WAVE_MSG
-  // Bench mode: no capture at all. A synthetic result is queued as soon as the queue
-  // runs dry and then travels the PRODUCTION path (updateTransmitMessage ->
-  // LORA.sendData -> sd_writer). enable_wave_analysis is deliberately not consulted -
-  // the point is to test the message without configuring the buoy for a measurement
-  // campaign. There is no timer: the transmit below empties the queue, so refilling it
-  // the moment it is empty gives back-to-back messages at the loop's own pace. One
-  // pending result is enough - queueing more would only test the queue.
+  // Bench mode: no capture. A synthetic result is queued whenever the queue is empty
+  // and sent through the production path.
   if (wave_manager.wave_analysis_results.empty()){
       wave_manager.enqueueFakeResult();
       if (debug_serial){

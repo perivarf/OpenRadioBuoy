@@ -1,11 +1,4 @@
-"""FIR lowpass + decimation - mirrors the sfy buoy's src/fir.rs.
-
-The alternative to the firmware's bucket mean. A mean over D samples IS a FIR filter,
-but a poor one: the amplitude response |sin(pi*f*D/fs)/(D*sin(pi*f/fs))| has nulls at
-multiples of the output rate and leaks heavily between them, so everything above
-Nyquist folds down into the analysis band. A windowed sinc filter attenuates what is
-meant to go away.
-"""
+"""FIR lowpass + decimation, mirroring the firmware's FIR stages (and the sfy buoy's src/fir.rs)."""
 
 import numpy as np
 
@@ -51,18 +44,12 @@ def mean_taps(decim):
 
 
 def firwin_lowpass(ntap, cutoff, fs, window="hamming"):
-    """Windowed sinc lowpass - identical to scipy.signal.firwin(ntap, cutoff, fs=fs,
-    window=window) with scale=True, but written out by hand because scipy is an
-    OPTIONAL dependency here:
+    """Windowed sinc lowpass, equal to scipy.signal.firwin(ntap, cutoff, fs=fs, window=window)
+    with scale=True (scipy is optional here):
 
       h[n] = sinc(2*(fc/fs)*(n - (N-1)/2)) * w[n],  normalised so sum(h) = 1
 
-    The normalisation gives exactly unity gain at DC, which is what keeps a filtered
-    mean level (a residual accel bias, say) from being scaled.
-
-    Note the limiting case cutoff = fs/2: sinc(n - M) then becomes a pure delta, and
-    the filter is exactly the identity. That is precisely the right behaviour when
-    nothing is to be decimated (D = 1)."""
+    cutoff = fs/2 gives the identity filter (D = 1)."""
     if ntap < 3:
         raise ValueError(f"FIR: ntap must be >= 3 (got {ntap})")
     if ntap % 2 == 0:
@@ -78,14 +65,10 @@ def firwin_lowpass(ntap, cutoff, fs, window="hamming"):
 
 
 def fir_filter_centered(x, coeffs, compensate=True):
-    """Run the FIR over x and put the result back on x's OWN time axis.
+    """Run the FIR over x and centre the result on x's own time axis.
 
-    Returns (y, first_valid, last_valid), where y[n] is the filter value CENTRED on
-    x[n] and [first_valid, last_valid] is the range where no zero padding has
-    contributed. Linear phase gives a delay of h = (N-1)/2 samples, so the centred
-    value at n is the causal value at n+h - hence just an index shift.
-
-    compensate=False gives the firmware behaviour (causal, lagging by h samples)."""
+    Returns (y, first_valid, last_valid); [first_valid, last_valid] is the range with no
+    zero padding. compensate=False gives the firmware behaviour (causal, lagging (N-1)/2)."""
     c = np.asarray(coeffs, dtype=np.float64)
     x = np.asarray(x, dtype=np.float64)
     h = (len(c) - 1) // 2 if compensate else 0
@@ -97,19 +80,12 @@ def fir_filter_centered(x, coeffs, compensate=True):
 
 
 def raw_uniform_grid(t_ms, raw_dt_ms=None):
-    """Place the rows on an EXACTLY uniform raw grid.
+    """Place the rows on a uniform raw grid, inserting and flagging missing rows.
 
-    The FIR assumes a constant sample rate; rows can be missing (FIFO overflow, a
-    blocking SD flush). We find the grid from the row spacing, insert the missing
-    indices and flag them.
+    raw_dt_ms (kWindowMs from cfg.csv) is preferred over the median row spacing unless
+    the two disagree a lot.
 
-    raw_dt_ms = kWindowMs from cfg.csv when it is there, and it is the ground truth:
-    the median dt is only an estimate and misses if enough rows are gone. If the two
-    diverge a lot, the directory is mispaired or the timestamps are broken - and then
-    we trust what the rows show.
-
-    Returns (n_idx, nfull, dt_ms, gap_raw), where n_idx is each row's place in
-    nfull."""
+    Returns (n_idx, nfull, dt_ms, gap_raw), where n_idx is each row's place in nfull."""
     t = np.asarray(t_ms, dtype=np.float64)
     if len(t) < 2:
         raise ValueError("FIR: needs at least two rows")
@@ -141,38 +117,25 @@ def raw_uniform_grid(t_ms, raw_dt_ms=None):
 def fir_decimate_series(t_ms, series, bucket_idx, bucket_ms, fs_out,
                         ntap=NTAP, cutoff=CUTOFF, unwrap=(),
                         compensate=COMPENSATE_DELAY, raw_dt_ms=None):
-    """Replace the bucket mean with a FIR lowpass + decimation, on ALL the series.
+    """FIR lowpass + decimation of all series, evaluated at the middle of each bucket.
 
     t_ms       = win_start_ms per row (raw rate)
     series     = {name: raw-rate array}
-    bucket_idx = the bucket indices the series is to be delivered on (after gap filling)
-    bucket_ms  = the bucket length in ms (the output period)
-    fs_out     = the output rate in Hz, used as the default cutoff (fs_out/2)
-    unwrap     = names that are ANGLES and must be np.unwrap-ed before filtering (roll
-                 and pitch from atan2 jump by 2*pi, and a jump would smear itself
-                 across the whole filter support)
+    bucket_idx = bucket indices to deliver (after gap filling)
+    bucket_ms  = bucket length in ms (the output period)
+    fs_out     = output rate in Hz; default cutoff is fs_out/2
+    unwrap     = names of angle series to np.unwrap before filtering
 
-    All the series get EXACTLY the same treatment - a requirement when series are to
-    be compared bin by bin afterwards. The output for bucket b is taken at the MIDDLE
-    of the bucket, so that it sits at the same instant as the bucket mean it replaces.
-
-    Returns (out, gap, stats). gap is 1 for buckets where the filter support
-    (+/-(N-1)/2 samples) touches filled-in rows or reaches outside the series - those
-    are not real data and are ORed into the gap mask, so welch_psd can discard the
-    segments."""
+    Returns (out, gap, stats). gap is 1 where the filter support touches filled-in rows
+    or the series edges, so welch_psd can discard those segments."""
     n_idx, nfull, dt_ms, gap_raw = raw_uniform_grid(t_ms, raw_dt_ms)
     fs_raw = 1000.0 / dt_ms
     dec = int(round(bucket_ms / dt_ms))
     if dec < 1:
         raise ValueError(f"FIR: the raw rate ({fs_raw:.1f} Hz) is lower than the output "
                          f"({fs_out:g} Hz) - lower --decimate-hz")
-    # The bucket boundaries sit on whole bucket_ms. If that does not divide the row
-    # period, they fall in the middle of a row and the round() above gives a decimation
-    # that slides relative to the time axis. The firmware makes this a static_assert
-    # (kRowOdrHz % kWelchInputOdrHz == 0 - a whole number of ROWS per bucket, which is
-    # the same condition stated in rates rather than periods, and stays checkable when
-    # the row period is not a whole number of ms); here we cannot abort, since the
-    # logging rate varies from session to session.
+    # Bucket boundaries must fall on whole rows (firmware: static_assert
+    # kRowOdrHz % kWelchInputOdrHz == 0). Only warn here, the logging rate varies.
     if abs(bucket_ms - dec * dt_ms) > 1e-6:
         print(f"  WARNING: the bucket {bucket_ms} ms does not divide the row period "
               f"{dt_ms:g} ms - the decimation (D={dec}) slides against the time axis")

@@ -1,39 +1,11 @@
 #!/usr/bin/env python3
-"""<stamp>_raw.bin -> <stamp>_imu_from_raw.csv (+ _gps.csv): decoding, and nothing more.
+"""<stamp>_raw.bin -> <stamp>_imu_from_raw.csv (+ _gps.csv): decoding only, no FIR/AHRS/analysis.
 
-The file is every FIFO word exactly as the sensor produced it, where imu.csv is the
-FIR-decimated row. This runs no FIR, no AHRS and no analysis - it writes out what the
-binary actually holds, one row per accel sample, so the signal can be read without the
-firmware that wrote it.
+One row per accel sample. The record format is documented in raw_log.h (kRaw* in log_config.h).
+There is no per-word timestamp: word order is the time axis, and times are interpolated between
+the sync records (t_us, cumulative accel count).
 
-THE FORMAT (little-endian, defined by the kRaw* constants in log_config.h and by
-RawLogWriter):
-
-    header  32 B  magic "ORWB", version, word length, the ODRs, the sensitivities
-                  (LSB -> mg / mdps), capture start as a UTC epoch, reading_ID and
-                  the sync length. The rest is reserved and zeroed - read up to
-                  kRawHeaderBytes, not to where the fields happen to end.
-    word     7 B  tag_sensor + 6 B payload, unchanged from the FIFO
-    sync    17 B  0xFF + u32 t_us + u32 accel_n + u32 millis + u16 n_words
-                  + u16 flags, one per drain, written BEFORE the words it covers
-    gps     61 B  0xFE + u8 payload length (59) + u32 millis + u32 rel_ms + u32 iTOW_ms
-                  + u8 hour, minute, second, fixType, numSV + i32 lat_e7, lng_e7,
-                  gSpeed_mms, velN_mms, velE_mms, velD_mms, headMot_e5 + u32 sAcc_mms,
-                  hAcc_mm, vAcc_mm + u16 pDOP_e2. One per GNSS fix, format v3 only
-
-The tag gives the length: 0xFF is a sync record, 0x1F and below a word. In v3 every
-other tag is followed by a length byte, so a record this decoder does not know is
-skipped. They cannot collide - tag_sensor is the top five bits of the FIFO tag, so at
-most 0x1F.
-
-The GPS records are written out as <stamp>_gps.csv, with the columns and scaling of
-the gps.csv the firmware wrote before v3, plus t_s (accel time axis) as the last column,
-so readers of the old file find it under the same name and in the same layout.
-
-THE TIME AXIS. There is deliberately no per-word timestamp: at 480 Hz the sample period
-is 2.08 ms, and a whole millisecond would be coarser than the data. Word ORDER is the
-time axis, and the sync records pin it to the clock with t_us and the cumulative accel
-counter. The times here are interpolated between those pairs.
+_gps.csv keeps the column layout of the gps.csv the firmware wrote before v3, plus t_s.
 
     python3 raw_to_csv.py <capture>_raw.bin
     python3 raw_to_csv.py <session dir> -o /somewhere/else.csv
@@ -106,12 +78,8 @@ def parse(buf, hdr):
     tail_at = None
     n_write_fail, first_write_fail_n = 0, None
 
-    # THE TAIL. An interrupted capture never reaches truncate(), so the file is left at
-    # its full preallocated length, and what lies past the last written block is
-    # whatever was in those clusters before - usually an earlier capture's raw.bin.
-    # That tail has valid tags and decodes into perfectly clean samples. Two things give
-    # it away, and the capture's own stream never does either: a sync record where the
-    # clock or the accel counter goes BACKWARDS, and a long run of unknown tags.
+    # An interrupted capture leaves the preallocated tail, often an older raw.bin that
+    # decodes cleanly. Detected by a sync record going backwards or a long run of unknown tags.
     MAX_UNKNOWN_IN_A_ROW = 64
     unknown_in_a_row = 0
     last_ms = last_an = None

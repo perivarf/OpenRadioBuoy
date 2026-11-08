@@ -56,27 +56,15 @@ static constexpr bool enable_bootloader_menu                {true};
 static constexpr uint32_t bootloader_menu_window            {5*s_2_ms};
 
 /*
-  Take the first GPS/thermistor reading and start the first wave capture on the first
-  loop iteration, rather than after one full period of silence. Set false to let both
-  gates wait out their period after boot (useful when a bench unit should not start a
-  20-minute capture the moment it is powered).
+  Take the first readings and start the first wave capture on the first loop iteration
+  instead of waiting one period. Set false on the bench to avoid an immediate capture.
 */
 static constexpr bool measure_immediately_after_deployment  {true};
 
 /*
-  Run the transmission check before the wave capture as well as after it.
-
-  A capture blocks loop() for wave_capture_duration - 20 minutes as configured
-  - so with the check only after it, a freshly booted buoy shows no sign of life at
-  the base station, and hence on Notehub, until the first capture has finished.
-  Checking first as well gets whatever is already queued out the door immediately,
-  which is what you want when you are standing next to the buoy wondering whether it
-  came up at all.
-
-  Diagnostic convenience, not a measurement requirement: it costs one extra handshake
-  per capture whenever something is queued (connectToBaseStation is up to
-  max_radio_fix_look_time + max_radio_wait_time). Set false for a deployment where
-  radio power matters more than seeing the buoy quickly.
+  Also run the transmission check before the wave capture, so a freshly booted buoy
+  shows up at the base station without waiting for the first capture to finish.
+  Costs one extra handshake per capture when something is queued.
 */
 static constexpr bool transmit_before_wave_capture          {false};
 
@@ -92,22 +80,15 @@ static uint32_t target_reading_distance                  {30};
 static constexpr uint8_t  max_number_of_wave_measurements {5};
 static constexpr uint32_t wave_capture_duration           {1230*s_2_ms};       // 1230 s: 30 s warm-up + 1200 s (20 min) analysed
 
-// AHRS settling time at the start of a capture. The filter (Madgwick/Kalman) starts
-// from a single accel sample and needs a while to converge on the true orientation;
-// the vertical acceleration it produces before then is biased and would pollute the
-// PSD. Rows inside the warm-up are still fed to the filter (that is the point) and
-// still logged to raw.bin/imu.csv - they are only kept out of the 5 Hz bucketing,
-// the Welch accumulation and hence Hs/Tz/Tc/Tp. Set to 0 to disable.
+// AHRS settling time at the start of a capture. Rows in the warm-up feed the filter and
+// are logged, but are kept out of the Welch PSD and Hs/Tz/Tc/Tp. 0 disables.
 static constexpr uint32_t wave_capture_warmup             {30*s_2_ms};
 static_assert(wave_capture_warmup < wave_capture_duration,
               "AHRS warm-up must be shorter than the capture, or nothing is analysed");
 
 /*
-  base_wave_capture_period is the interval between the START of one
-  capture and the start of the next (wave_capture anchors its timer up front),
-  so it has to leave room for the capture itself. If it does not, the gate is already
-  due when the capture returns and the buoy captures back-to-back with no GPS/temp
-  measurement or transmission in between.
+  base_wave_capture_period runs from the start of one capture to the start of the
+  next, so it must be longer than the capture itself.
 */
 static_assert(base_wave_capture_period > wave_capture_duration,
               "Wave capture period must exceed wave_capture_duration, or captures run back-to-back");

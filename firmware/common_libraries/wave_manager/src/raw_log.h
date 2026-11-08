@@ -7,7 +7,7 @@
 /*
   Writer for <stamp>_raw.bin: the 6-byte payload of every FIFO word verbatim
 
-  LAYOUT, little-endian (kRaw* in wave_config.h):
+  LAYOUT, little-endian (kRaw* in log_config.h):
     header  kRawHeaderBytes, once at the top
     word    1 B tag_sensor + 6 B payload                          = kRawWordBytes (7 B)
     sync    1 B kRawSyncTag + u32 t_us + u32 accel_n + u32 millis

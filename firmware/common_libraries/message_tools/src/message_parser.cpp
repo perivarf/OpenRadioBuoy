@@ -208,14 +208,7 @@ void Message_Parser::print_wave_analysis_reading(const wave_analysis_Reading & r
             (unsigned long)r.timestamp_start, (unsigned long)r.timestamp_end);
     sd_writer.debugSerialPrintln(ts);
 
-    /*
-      Position at each end of the analysis window, 1e-7 deg on the wire. Two of them
-      because a free-drifting buoy moves during a 30-minute capture, and the pair is
-      the drift vector rather than a repeated field.
-
-      0,0 is not a coordinate here, it is "no fix was held" - see readings.h. Printed
-      as such, so it is not mistaken for a position in the Gulf of Guinea.
-    */
+    // Start/end position, 1e-7 deg. 0,0 means no fix (see readings.h).
     if (r.lat_start == 0 && r.lng_start == 0 && r.lat_end == 0 && r.lng_end == 0) {
       sd_writer.debugSerialPrintln("    position: no fix (0,0)");
     } else {
@@ -250,18 +243,8 @@ void Message_Parser::print_wave_spectrum_reading(const wave_spectrum_Reading & r
     sd_writer.debugSerialPrintln(ts);
 
     /*
-      Wire format is a uint16 per bin normalised to the peak and SQRT-COMPANDED, so the
-      absolute PSD is (value/65535)^2 * max_value. Squaring, not a plain multiply: the
-      sender stores sqrt(bin/peak) because peak is set by chop near 1 Hz while the wave
-      band sits decades below it, and a linear uint16 leaves the wave bins on a handful
-      of counts (see wave_analysis.cpp). Reading this linearly does not fail loudly - it
-      returns a spectrum that is too flat and too high in the wave band - so a receiver
-      and a sender from different builds must not be mixed.
-
-      Both columns are printed so the raw payload can be checked.
-
-      The bins are the vertical ACCELERATION PSD, (m/s^2)^2/Hz - untapered, and not
-      divided by omega^4. Elevation is S_acc / (2*pi*f)^4 from here.
+      Bins are sqrt-companded: PSD = (value/65535)^2 * max_value (see readings.h).
+      This is the vertical acceleration PSD; elevation is S_acc / (2*pi*f)^4.
     */
     const float f_min = (float)r.spec_f_min / wave_freq_scale;
     const float f_max = (float)r.spec_f_max / wave_freq_scale;

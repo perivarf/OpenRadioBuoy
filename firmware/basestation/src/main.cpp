@@ -254,15 +254,6 @@ void loop()
           }
           else if (LORA.byte_msg.byteMsg[0] == 'T')
           {
-            // GSM.sendMessage("temperature info");
-            // GSM.sendByteMessage(LORA.byte_buoy_msg);
-            // QueuedMessage qMsg;
-            // qMsg.type = 'T';
-            // qMsg.message = new byte[LORA.byte_buoy_msg.numBytes];
-            // qMsg.size = LORA.byte_buoy_msg.numBytes;
-            // memcpy(qMsg.message, LORA.byte_buoy_msg.byteMsg, LORA.byte_buoy_msg.numBytes);
-            // messageQueue.push(qMsg);
-
             BuoyMessage *qMsg = new BuoyMessage;
             qMsg->byteMsg = new ByteMessage;
             qMsg->rssi = rssi;
@@ -302,15 +293,7 @@ void loop()
           }
           else if (LORA.byte_msg.byteMsg[0] == 'P')
           {
-            /*
-              The spectrum half of a wave measurement. Queued exactly like 'W' - the
-              base station forwards bytes and does not pair the two; that happens
-              downstream, keyed on the timestamp both messages carry. See readings.h.
-
-              Kept as its own branch rather than folded into the 'W' one because the
-              two have different layouts and different printers, and because a build
-              with kSendPsd off simply never sends this message.
-            */
+            // Spectrum half of a wave measurement, queued like 'W'. Pairing happens downstream (see readings.h).
             BuoyMessage *qMsg = new BuoyMessage;
             qMsg->byteMsg = new ByteMessage;
             qMsg->rssi = rssi;

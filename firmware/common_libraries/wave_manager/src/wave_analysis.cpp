@@ -108,23 +108,17 @@ static constexpr float  kDetrendIMid = 0.5f * (kWelchSegLen - 1);
 /*
   Detrend one segment, window it, FFT, accumulate one-sided PSD into psdAcc[0..N/2].
 
-  Runs once every kWelchSegLen / kWelchStepDiv samples - 25.6 s at 5 Hz - and is the
-  longest uninterruptible stretch in the capture loop. Its cost is therefore a
-  FIFO question. It should be called when the FIFO is drained.
+  The longest uninterruptible stretch in the capture loop; call it right after a FIFO
+  drain. The window is a table lookup, see welch_window.h.
 
-  The window is a table lookup, not sinf per sample - see welch_window.h.
+  seg is the ring buffer and start the index of the first sample. psdAcc (kWelchSegLen/2 + 1,
+  Nyquist included) is accumulated in place and must be zeroed before the first call.
 
-  seg is the ring buffer, start is the index of the first sample to be processed
-  psdAcc is the accumulator for the one-sided PSD, which is updated in place. It must be
-  zeroed before the first call. It is of length kWelchSegLen / 2 + 1, since the Nyquist bin is included.
-
-  Welch, P. (1967). The use of Fast Fourier Transform for the estimation of 
-  power spectra: a method based on time averaging over sort, modified periodoghrams. 
-  IEEE Transactions on Audio and Electroacoustics, 15(2), 70–73. https://doi.org/10.1109/TAU.1967.1161901
-
-  // Ref: Heinzel, Rüdiger, Schilling (2002), "Spectrum and spectral density
-// estimation by the DFT", MPI für Gravitationsphysik. https://dcc.ligo.org/LIGO-T1400010/public
-
+  Welch, P. (1967). The use of Fast Fourier Transform for the estimation of power spectra:
+  a method based on time averaging over short, modified periodograms. IEEE Transactions on
+  Audio and Electroacoustics, 15(2), 70–73. https://doi.org/10.1109/TAU.1967.1161901
+  Heinzel, Rüdiger, Schilling (2002), "Spectrum and spectral density estimation by the DFT",
+  MPI für Gravitationsphysik. https://dcc.ligo.org/LIGO-T1400010/public
 */
 static void accumSegment(const float *seg, uint16_t start, float *psdAcc) {
   

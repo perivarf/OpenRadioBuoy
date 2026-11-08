@@ -27,13 +27,8 @@
 #define BUILD_STR2(x) #x
 #define BUILD_STR(x)  BUILD_STR2(x)
 
-// v in exponent form, d.dddde-05. Print's float output is fixed-point only, and the
-// elevation PSD tail falls to 1e-6 m^2/Hz and below - six decimals would print it as
-// 0.000000. snprintf("%e") is no alternative: newlib-nano is linked without float
-// printf support.
-// Scaling by 10 in a loop rather than log10f/powf, which would link ~3 kB of libm for
-// this alone. The loop runs in double: a dozen float steps lose the 7th digit
-// (3.3e-12 -> 3.299999e-12), and Print formats in double anyway.
+// Print v as d.dddde-05. Print has no exponent format and newlib-nano has no float
+// printf. Scales in double to keep the last digit.
 static void printSci(Print &p, float v, uint8_t digits) {
   if (!isfinite(v))  { p.print(v, digits); return; }   // "nan" / "inf", as a CSV reader expects
   if (v == 0.0f)     { p.print(v, digits); p.print(F("e+00")); return; }
@@ -175,12 +170,7 @@ bool WaveManager::startSession(void) {
   }
 
   if (rawFile_) {
-    // +20 % on top of the nominal word rate. The nominal figure is what the FIFO
-    // batches in a second, and the measured captures land only 4 % under it - too
-    // little to absorb a run where the sync records come more often or the SFLP
-    // batching shifts. Running out mid-capture is not the graceful fallback a failed
-    // preAllocate is.
-    // The GPS track rides in the same file, one record per fix.
+    // 20 % margin on the nominal word rate, plus the GPS track.
     const uint32_t gpsPerSec  = wave_gps_track_in_capture ? GPS_nav_rate_hz * kRawGpsBytes : 0u;
     const uint32_t rawNominal = kRawHeaderBytes + durationS *
                                 (kFifoWordsPerSec * kRawWordBytes + 16u * kRawSyncBytes

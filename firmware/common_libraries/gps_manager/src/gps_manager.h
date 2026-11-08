@@ -69,19 +69,9 @@ struct UBX_PVT{
   the project's config.h.
 */
 static constexpr uint8_t  GPS_I2C_ADDR                   {0x42};
-// Every GPS cost in this driver is bus time: one byte is 9 bit periods, so 90 us at
-// 100 kHz and 22.5 at 400. The capture loop's timing buckets put GPS at 285 ms/s - 28 %
-// of the CPU - at 100 kHz, measured 2026-08-15, and this is one of the two factors
-// behind that (the other is the NMEA traffic begin() now switches off).
-//
-// 400 kHz is what the SAM-M8Q's DDC port is rated for, and the module is alone on the
-// bus here: the temperature sensor is OneWire, and the only other Wire user in the repo
-// (common_libraries/gsm) is linked into orb_basestation only.
-//
-// The one thing this depends on that the code cannot see is the pull-up resistors - the
-// rise time at 400 kHz is four times tighter. If they are too weak the failure is loud
-// rather than silent: corrupt bytes fail the checksum in readPvtFrame, freshFix() stops
-// coming true, and begin()'s bus scan reports it at boot. Drop back to 100000 alone.
+// 400 kHz is the SAM-M8Q DDC maximum, and the module is alone on the bus. GPS cost is
+// bus time, so this is 4x cheaper than 100 kHz. Depends on the pull-ups: if they are
+// too weak, frames fail the checksum - drop back to 100000.
 static constexpr uint32_t GPS_I2C_CLOCK                  {400000};  // DDC max
 static constexpr uint16_t GPS_nav_rate_hz                {10};
 static constexpr uint16_t GPS_nav_period_ms              {1000 / GPS_nav_rate_hz};
@@ -89,34 +79,15 @@ static constexpr uint16_t GPS_pvt_frame_size             {100};     // header 6 
 static constexpr uint32_t GPS_probe_timeout              {3000};    // how long begin() retries the MON-VER probe
 
 /*
-  Cadence of the non-blocking reader (update()).
-
-  begin() asks the module to EMIT NAV-PVT once per navigation epoch rather than answering
-  polls, so the rate is the receiver's: update() can only ever miss epochs, never make
-  extra ones. The whole job is therefore to make sure no single event costs more than one
-  epoch, and to keep every call short enough that the IMU FIFO drain does not notice it.
-
-  A quarter of the nav period gives four chances per epoch. A check that arrives late eats
-  into the slack without losing the frame - the frame sits in the module's DDC buffer until
-  someone collects it - and the read still lands within 25 ms of the solution, which is the
-  jitter on the row's rel_ms stamp. (iTOW carries the receiver's own epoch time, so the
-  analysis does not depend on that stamp at all.)
+  update() checks the DDC buffer GPS_ddc_check_div times per navigation epoch. A late
+  check loses nothing, the frame waits in the module's buffer.
 */
 static constexpr uint8_t  GPS_ddc_check_div              {4};
 static constexpr uint16_t GPS_ddc_check_ms               {GPS_nav_period_ms / GPS_ddc_check_div};
 
 /*
-  Ceiling on how many bytes one update() call drains.
-
-  Normally avail is 0 or 100 - one frame per epoch - so this only bites on a backlog built
-  up while the loop was stalled in an SD write. Without it the worst case is the whole DDC
-  output buffer in one blocking go: ~23 ms at 400 kHz, ~92 ms at 100 kHz, and both rest on
-  a buffer size the datasheet states and the code cannot see. 128 B is ~3 ms at 400 kHz,
-  and 40 checks/s x 128 B = 5120 B/s against a 1000 B/s stream, so a backlog is worked off
-  over a few calls without any of them running long.
-
-  Safe only because readPvtFrame's parser state persists across calls: a frame cut by this
-  ceiling is reassembled on the next one instead of being thrown away.
+  Max bytes one update() call drains (~3 ms at 400 kHz). Only matters for a backlog
+  after an SD stall. A frame cut short is completed on the next call.
 */
 static constexpr uint16_t GPS_ddc_max_drain              {128};
 
@@ -168,18 +139,9 @@ class GPS_Manager{
     byte beaconMsg[beaconMsgSize];
 
     /*
-      Non-blocking NAV-PVT reader. Call it once per loop iteration from a tight loop
-      (e.g. the wave-capture IMU drain): it rate-limits itself to GPS_ddc_check_ms and
-      never waits on anything, so no call can starve the IMU FIFO. Sets freshFix() true
-      only on the call where a new PVT was decoded (one-shot).
-
-      It does NOT poll. begin() puts the module in periodic NAV-PVT output, so this only
-      collects what the receiver has already emitted. That is the whole point: a poll
-      that goes missing has no answer coming and used to cost a 1.2 s timeout - twelve
-      epochs - whereas a frame that goes missing here costs the one epoch, because the
-      next one arrives on its own 100 ms later.
-
-      Leaves the blocking pollPVT()/performNReadings() path untouched.
+      Non-blocking NAV-PVT reader, call once per loop iteration. Rate-limits itself
+      to GPS_ddc_check_ms and never waits. Does not poll: begin() sets the module to
+      periodic output. freshFix() is true only on the call that decoded a new PVT.
     */
     void update(void);
     bool freshFix(void) const { return freshFix_; };
@@ -199,14 +161,9 @@ class GPS_Manager{
     uint8_t getGPSData(uint32_t max_wait_time);
 
     /*
-      UBX transport over the DDC (I2C) port. availBytes reads the 0xFD/0xFE
-      byte count registers, pollPVT sends a NAV-PVT poll and blocks until the
-      answer has been read back and decoded. readPvtFrame drains and decodes
-      whatever is waiting (shared by pollPVT and the non-blocking update).
-
-      availBytes' optional `ok` tells a bus error apart from an empty buffer. Both
-      used to return 0, so a wedged bus read as "nothing here yet" and update() sat
-      out its whole timeout waiting for a receiver it could not hear.
+      UBX over DDC (I2C). availBytes reads the byte count, and `ok` separates a bus
+      error from an empty buffer. pollPVT polls and blocks; readPvtFrame decodes
+      what is waiting (shared by pollPVT and update).
     */
     uint16_t availBytes(bool * ok = nullptr);
     void flushDDC(uint16_t nbytes);
@@ -220,11 +177,8 @@ class GPS_Manager{
     void recoverDdc(uint32_t nowMs);
 
     /*
-      Byte-stream parser state for readPvtFrame, and a member rather than a local for
-      one reason: the DDC is one continuous stream, but a drain reads a snapshot of it.
-      A frame straddling the end of that snapshot - because the module was still writing,
-      or because GPS_ddc_max_drain cut the read short - is finished on the next call
-      instead of having its head thrown away and its tail left behind as junk.
+      Parser state for readPvtFrame, kept across calls so a frame split between
+      two drains is completed instead of discarded.
     */
     uint8_t  frameBuf_[GPS_pvt_frame_size];
     uint16_t frameIdx_ = 0;

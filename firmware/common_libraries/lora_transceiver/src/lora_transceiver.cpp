@@ -4,14 +4,8 @@
 LoRa_Transceiver LORA;
 
 /*
-  Reference oscillator supply on DIO3, in volts. Zero means the reference is a plain
-  32 MHz crystal and DIO3 is left alone.
-
-  Do NOT raise this and do not call setTCXO(). The module fitted here has no TCXO
-  even though the schematic calls for a -T part, so configuring one gives
-  XOSC_START_ERR (0x20) and startTransmit returns -707 - RadioLib documents that
-  pair as precisely this mismatch. The base station does have a TCXO; the asymmetry
-  costs frequency margin over temperature but is harmless for the link itself.
+  TCXO supply voltage on DIO3, 0 = plain crystal. The drifter's module has no TCXO
+  despite the schematic; setting one gives XOSC_START_ERR and startTransmit -707.
 */
 static constexpr float kTcxoVoltage = 0.0f;
 
@@ -69,15 +63,11 @@ void LoRa_Transceiver::beginRadio(double freq, double bw, int sf, int cr, int po
 
 
 /*
-  Printed once from beginRadio(). A dead reference oscillator or a failed calibration
-  is otherwise invisible: begin() still returns RADIOLIB_ERR_NONE, and the only
-  symptom is a link that never works. XOSC_START_ERR points at kTcxoVoltage;
-  PLL_LOCK_ERR and the calibration bits fail just as quietly.
+  Printed once from beginRadio(). XOSC, PLL and calibration errors are otherwise
+  silent: begin() still returns RADIOLIB_ERR_NONE.
 
-  Do NOT add a band-strap read here. PB12 carries both the strap and the IMU's INT1,
-  and the IMU's pad is push-pull from reset, driving GND - so a read at this point
-  reports the IMU, not the strap, and will claim an (L) module on an (H) one.
-  imu_sampler reads it at the one place where the pad is released.
+  No band-strap read here: PB12 is shared with the IMU's INT1, and imu_sampler
+  reads the strap where the pad is released.
 */
 void LoRa_Transceiver::reportModuleDiagnostics(double freq){
   Serial.print("Radio begin at ");
@@ -240,14 +230,8 @@ void LoRa_Transceiver::listenByteArray(uint32_t max_wait_time)
       byte_msg.success = false;
       byte_msg.numBytes = 0;
       /*
-        A packet WAS detected - DIO1 fired - but readData rejected it, almost always
-        RADIOLIB_ERR_CRC_MISMATCH (-7). Every caller sits behind `byte_msg.success`,
-        so without this line the case is indistinguishable from hearing nothing at
-        all, when in fact something is reaching us and only the decode is failing.
-
-        RSSI and SNR are meaningful here, unlike after a transmit: they describe the
-        packet that just failed. Above roughly -30 dBm points at receiver saturation
-        from transmitting too close, not at a weak link.
+        A packet was detected but readData rejected it (usually CRC mismatch, -7).
+        RSSI/SNR describe that packet; above ~-30 dBm suggests receiver saturation.
       */
       if (debug_serial)
       {

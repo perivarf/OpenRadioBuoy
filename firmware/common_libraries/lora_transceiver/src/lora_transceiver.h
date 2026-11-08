@@ -14,10 +14,8 @@
 void setFlag(void);
 
 /*
-  RadioLib keeps getDeviceErrors() protected unless the whole library is built with
-  RADIOLIB_GODMODE. The SX126x error register is the only place XOSC_START_ERR and
-  PLL_LOCK_ERR surface, and both are silent killers on a fresh board, so re-export
-  just that one method instead of opening up the library wholesale.
+  Exposes getDeviceErrors(), which RadioLib keeps protected unless built with
+  RADIOLIB_GODMODE. XOSC_START_ERR and PLL_LOCK_ERR only show up there.
 */
 class STM32WLx_Diag : public STM32WLx {
   public:
