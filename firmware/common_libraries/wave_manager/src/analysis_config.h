@@ -261,13 +261,8 @@ enum class DetrendMode { None, Mean, Linear };
 static constexpr DetrendMode kWelchDetrend = DetrendMode::Mean;
 
 // Low-frequency half-cosine taper (Kohout / Tucker & Pitt 2001) on the elevation PSD.
-//static constexpr float kTaperF1 = 0.03f;   // T=0 below
-//static constexpr float kTaperF2 = 0.05f;   // T=1 above
-
-// Taper in in-shore measurements based on Skjærhalden seems to be around 0.1-0.15 Hz
-// Using that so that we do not over-estimate the significant wave height
-static constexpr float kTaperF1 = 0.1f;   // T=0 below
-static constexpr float kTaperF2 = 0.15f;    // T=1 above
+static constexpr float kTaperF1 = 0.05f;  // T=0 below
+static constexpr float kTaperF2 = 0.1f;   // T=1 above
 
 static_assert(kTaperF1 < kTaperF2 && kTaperF2 <= kWaveFMax, "need kTaperF1 < kTaperF2 <= kWaveFMax");
 

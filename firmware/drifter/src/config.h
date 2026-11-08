@@ -90,7 +90,7 @@ static uint32_t target_reading_distance                  {30};
 // live in common_config.h; this is the length of one blocking capture window).
 // -----------------------------------------------------------------------------
 static constexpr uint8_t  max_number_of_wave_measurements {5};
-static constexpr uint32_t wave_capture_duration           {1200*s_2_ms};       // 1200 s (20 min) capture
+static constexpr uint32_t wave_capture_duration           {1230*s_2_ms};       // 1230 s: 30 s warm-up + 1200 s (20 min) analysed
 
 // AHRS settling time at the start of a capture. The filter (Madgwick/Kalman) starts
 // from a single accel sample and needs a while to converge on the true orientation;
