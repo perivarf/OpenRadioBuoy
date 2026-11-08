@@ -462,12 +462,18 @@ uint8_t Thermo_Manager::logReading(temperatureReading tempData){
 void Thermo_Manager::getMeasurementFromFile(void){
   temperatureReading readData;
   if (sd_writer.numLines > 0){
-    uint8_t lineNo = 1;
+    // Lines are streamed from the card; line 0 is skipped, as before
+    uint16_t lineNo = 1;
     fileLine currentLine = {"",0}, prevLine = {"",0};
-    while(lineNo < sd_writer.file_buffer.size()){
-      
+    sd_writer.rewindRead();
+    sd_writer.readLine(currentLine);
+    currentLine = {"",0};
+    while(lineNo < sd_writer.numLines){
+
       prevLine = currentLine;
-      currentLine = sd_writer.file_buffer.at(lineNo);
+      if (sd_writer.readLine(currentLine) != 0){
+        break;
+      }
 
       // We check for the filtered value 
       if ((strncmp(prevLine.line, "Filtered:", 4) == 0) \
@@ -495,7 +501,7 @@ void Thermo_Manager::getMeasurementFromFile(void){
 
             if (debug_serial){
               Serial.println(lineNo);
-              Serial.println(sd_writer.file_buffer[lineNo].line);
+              Serial.println(currentLine.line);
               Serial.println("Recovered data:\n---------------\n");
               Serial.print("ID = ");
               Serial.println(readData.readingID);

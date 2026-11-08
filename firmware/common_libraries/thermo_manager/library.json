@@ -1,8 +1,8 @@
 {
-  "name": "OLB_thermo_manager",
+  "name": "ORB_thermo_manager",
   "version": "1.0.0",
-  "description": "Thermistor manager for the Open Lora Buoy",
-  "keywords": "OLB, Thermistors, temperatures",
+  "description": "Thermistor manager for the Open Radio Buoy",
+  "keywords": "ORB, Thermistors, temperatures",
   "authors":
   [
     {

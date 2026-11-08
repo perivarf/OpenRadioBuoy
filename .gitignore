@@ -46,3 +46,14 @@ out/
 # Visual Studio Code temporary and workspace files
 .vscode/
 *.code-workspace
+
+# Python analysis tools
+__pycache__/
+*.pyc
+
+# Hidden directories anywhere in the repo (machine-specific tool/editor config: .vscode, .pio, .claude, ...)
+.*/
+
+# Local plans and notes
+todo/
+

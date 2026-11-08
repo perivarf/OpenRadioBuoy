@@ -1,0 +1,526 @@
+#include "wave_manager.h"
+
+#include <math.h>
+#include <TimeLib.h>
+#include "IWatchdog.h"
+#include "sd_writer.h"
+
+/*
+  Everything WaveManager writes to the sd-card: 
+  
+  * _ana.csv (Significant Wave Height, number of measurements, etc)
+  * _imu.csv (IMU data, optional, depending on wave_log_mode)
+  * _cfg.csv (Configuration data)
+   * _ses.csv (Session data, timing, lat/lng)
+  * _raw.bin (raw IMU words, sync records and the GPS track; raw_to_csv.py decodes it)
+  * _spec.csv (Welch spectrum)
+*/
+
+// platformio.ini passes the commit and branch UNQUOTED (-DREPO_COMMIT_ID=b402450...),
+// so they have to be stringified here. 
+#ifndef REPO_COMMIT_ID
+#define REPO_COMMIT_ID unknown
+#endif
+#ifndef REPO_GIT_BRANCH
+#define REPO_GIT_BRANCH unknown
+#endif
+#define BUILD_STR2(x) #x
+#define BUILD_STR(x)  BUILD_STR2(x)
+
+// Print v as d.dddde-05. Print has no exponent format and newlib-nano has no float
+// printf. Scales in double to keep the last digit.
+static void printSci(Print &p, float v, uint8_t digits) {
+  if (!isfinite(v))  { p.print(v, digits); return; }   // "nan" / "inf", as a CSV reader expects
+  if (v == 0.0f)     { p.print(v, digits); p.print(F("e+00")); return; }
+  double m = fabs((double)v);
+  int e = 0;
+  while (m >= 10.0) { m /= 10.0; e++; }
+  while (m < 1.0)   { m *= 10.0; e--; }
+  // Rounding to digits can carry the mantissa up to 10.000 - renormalise first.
+  double half = 0.5;
+  for (uint8_t i = 0; i < digits; i++) half /= 10.0;
+  if (m + half >= 10.0) { m /= 10.0; e++; }
+  if (v < 0.0f) p.print('-');
+  p.print(m, digits);
+  p.print(e < 0 ? F("e-") : F("e+"));
+  if (abs(e) < 10) p.print('0');
+  p.print(abs(e));
+}
+
+// imu.csv column header. Naming convention:
+//   unsuffixed  = the SELECTED filter (AhrsFilter, or SFLP when wave_use_sflp)
+//   _sflp       = the on-chip SFLP rotation fusion, or ZERO throughout when
+//                 kEnableSflp is false and the block never ran - cfg.csv's
+//                 sflp_enabled is what separates that from a still buoy
+//   _fir        = FIR-decimated; without it, the unfiltered value at the same instant
+static const char *kImuCsvHeader =
+    "win_start_ms,n,ax_mg,ay_mg,az_mg,ax_ned_sflp,ay_ned_sflp,az_ned_sflp,"
+    "gx_mdps,gy_mdps,gz_mdps,qw_sflp,qx_sflp,qy_sflp,qz_sflp,braking,"
+    "qw,qx,qy,qz,vacc,vacc_sflp,sflp_nan,fifo_ovf,vacc_fir,vacc_sflp_fir";
+
+// One row, in the column order kImuCsvHeader declares. Called from onRow, i.e. from
+// inside the FIFO pop loop - the decimals are budgeted there, not chosen freely.
+void WaveManager::appendImuCsvRow(const ImuRow &r) {
+  imuFile_.print(r.winStartMs); imuFile_.print(',');
+  imuFile_.print(r.n);          imuFile_.print(',');
+  imuFile_.print(r.ax, 3); imuFile_.print(','); imuFile_.print(r.ay, 3); imuFile_.print(','); imuFile_.print(r.az, 3); imuFile_.print(',');
+  imuFile_.print(r.axnSflp, 3); imuFile_.print(','); imuFile_.print(r.aynSflp, 3); imuFile_.print(','); imuFile_.print(r.aznSflp, 3); imuFile_.print(',');
+  imuFile_.print(r.gx, 3); imuFile_.print(','); imuFile_.print(r.gy, 3); imuFile_.print(','); imuFile_.print(r.gz, 3); imuFile_.print(',');
+  imuFile_.print(r.qwSflp, 5); imuFile_.print(','); imuFile_.print(r.qxSflp, 5); imuFile_.print(','); imuFile_.print(r.qySflp, 5); imuFile_.print(','); imuFile_.print(r.qzSflp, 5); imuFile_.print(',');
+  imuFile_.print(r.braking); imuFile_.print(',');
+  imuFile_.print(r.qw, 5); imuFile_.print(','); imuFile_.print(r.qx, 5); imuFile_.print(','); imuFile_.print(r.qy, 5); imuFile_.print(','); imuFile_.print(r.qz, 5); imuFile_.print(',');
+  imuFile_.print(r.vacc, 5); imuFile_.print(','); imuFile_.print(r.vaccSflp, 5); imuFile_.print(',');
+  imuFile_.print(r.sflpNan); imuFile_.print(',');
+  imuFile_.print(r.fifoOvf); imuFile_.print(',');
+  imuFile_.print(r.vaccFir, 5); imuFile_.print(','); imuFile_.println(r.vaccSflpFir, 5);
+}
+
+// -----------------------------------------------------------------------------
+// Count number of session directories on the card (for use by seedReadingId)
+// -----------------------------------------------------------------------------
+uint16_t WaveManager::countSessionDirs(void) {
+  SdFat &card = sd_writer.card();
+  if (!card.exists(wave_log_dir)) return 0;   // first capture on a fresh card
+
+  File dir;
+  if (!dir.open(wave_log_dir, O_RDONLY)) return 0;
+
+  uint16_t n = 0;
+  File entry;
+  // Count directories only
+  while (entry.openNext(&dir, O_RDONLY)) {
+    if (entry.isDir() && !entry.isHidden()) n++;
+    entry.close();
+    IWatchdog.reload();  // a card with hundreds of sessions must not trip the watchdog
+  }
+  dir.close();
+  return n;
+}
+
+// Get reading_ID at boot by counting the number of session directories on the card
+void WaveManager::seedReadingId(void) {
+  if (readingIdSeeded_ || !sd_writer.active) return;
+
+  readingID_ = countSessionDirs();
+  readingIdSeeded_ = true;
+  if (debug_serial) {
+    Serial.print("WaveManager: "); Serial.print(readingID_);
+    Serial.println(" sessions on card - next reading_ID is one past that");
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Session logging: one timestamped directory per capture
+//
+// Whether a capture ran to completion is not marked, but inferred by 
+// the presence of session-file.
+// -----------------------------------------------------------------------------
+bool WaveManager::startSession(void) {
+  SdFat &card = sd_writer.card();
+
+  // Stamp from the RTC (set from GPS in setup). Without a valid clock this falls
+  // back to the 1970..
+  sprintf(logStamp_, "%04d%02d%02d_%02d%02d%02d",
+          year(captureStart_), month(captureStart_), day(captureStart_),
+          hour(captureStart_), minute(captureStart_), second(captureStart_));
+  
+  // Session dir name: "waves/20240101_123456" for a capture that started at 2024-01-01 12:34:56.
+  snprintf(sessionDir_, sizeof(sessionDir_), "%s/%s", wave_log_dir, logStamp_);
+
+  // mkdir creates the missing "waves/" parent too.
+  if (!card.exists(sessionDir_) && !card.mkdir(sessionDir_)) {
+    if (debug_serial) { Serial.print("WaveManager: mkdir failed "); Serial.println(sessionDir_); }
+    return false;
+  }
+
+  // imu.csv opened if wave_log_mode is Csv or Both
+  char nm[64];
+  if (waveModeImuCsv()) {
+    snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_IMU_PREFIX);
+    imuFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
+  }
+
+  // ses.csv opened always, for session anchors and timing
+  snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_SESSION_PREFIX);
+  sessionFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
+  if ((waveModeImuCsv() && !imuFile_) || !sessionFile_) {
+    if (debug_serial) Serial.println("WaveManager: could not open session files");
+    return false;
+  }
+
+  // raw.bin opened if waveModeImuRaw
+  if (waveModeImuRaw()) {
+    snprintf(nm, sizeof(nm), "%s/%s_%s.bin", sessionDir_, logStamp_, WAVE_RAW_PREFIX);
+    rawFile_ = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
+    if (!rawFile_ && debug_serial) {
+      Serial.println("WaveManager: could not open raw log - continuing without it");
+    }
+  }
+
+  // Reserve every streaming file contiguously before the first byte goes in
+  // A failure here is not fatal: the file falls back to growing cluster by cluster
+  // The preallocation must cover the whole capture, otherwise FIFO may overflow
+  // due to SD card takes too long to allocate a new cluster.
+  const uint32_t durationS = wave_capture_duration / s_2_ms;
+  const uint32_t imuBytes  = (uint32_t)kRowOdrHz * durationS * wave_imu_row_bytes_max;
+
+  if (imuFile_ && !imuFile_.preAllocate(imuBytes) && debug_serial) {
+    Serial.print("WaveManager: imu preAllocate failed, "); Serial.print(imuBytes);
+    Serial.println(" B - sd-card may be full or fragmented");
+  }
+
+  if (rawFile_) {
+    // 20 % margin on the nominal word rate, plus the GPS track.
+    const uint32_t gpsPerSec  = wave_gps_track_in_capture ? GPS_nav_rate_hz * kRawGpsBytes : 0u;
+    const uint32_t rawNominal = kRawHeaderBytes + durationS *
+                                (kFifoWordsPerSec * kRawWordBytes + 16u * kRawSyncBytes
+                                 + gpsPerSec);
+    const uint32_t rawBytes = rawNominal + rawNominal / 5u;
+
+    if (!rawFile_.preAllocate(rawBytes) && debug_serial) {
+      Serial.print("WaveManager: raw preAllocate failed, "); Serial.print(rawBytes);
+      Serial.println(" B");
+    }
+    // Sink first: writeHeader goes through it, as every other record does.
+    rawLog_.reset();
+    rawLog_.setSink(&WaveManager::rawSinkTrampoline);
+    rawLog_.writeHeader((uint32_t)captureStart_, readingID_);
+    imu_.setRawLog(&rawLog_);
+
+    // Commit the preAllocate (directory entry with the full size, FAT chain) now, so a
+    // power loss mid-capture leaves the data on the card reachable. No sync during the
+    // capture: every sector lands in the reserved clusters regardless, and a sync
+    // there only adds a directory write.
+    rawFile_.sync();
+  }
+
+  // IMU, Session headers
+  if (imuFile_) { imuFile_.println(kImuCsvHeader); imuFile_.sync(); }
+
+  sessionFile_.println("key,value");
+  writeSessionAnchor();  // anchor keys (sessionFile_ kept open)
+
+  // cfg.csv: write-once and close - the constants are known at start of session.
+  snprintf(nm, sizeof(nm), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_CFG_PREFIX);
+  File cfg = card.open(nm, O_RDWR | O_CREAT | O_TRUNC);
+  if (cfg) {
+    writeSessionConfig(cfg);
+    cfg.sync(); cfg.close();
+  } else if (debug_serial) {
+    Serial.println("WaveManager: could not open cfg.csv");
+  }
+
+  if (debug_serial) { Serial.print("WaveManager: logging session to ");Serial.println(sessionDir_); }
+  return true;
+}
+
+// One end of the capture (i.e. when=start/stop), in degrees with six decimals
+// 0,0 is the "no fix" value currentFixE7 returns, not a position.
+void WaveManager::writePosition(const char *when, const FixE7 &p) {
+  sessionFile_.print("lat_"); sessionFile_.print(when); sessionFile_.print(',');
+  sessionFile_.println(p.lat * 1e-7, 6);
+  sessionFile_.print("lon_"); sessionFile_.print(when); sessionFile_.print(',');
+  sessionFile_.println(p.lng * 1e-7, 6);
+}
+
+// The session file (build + start time + start position) is written up front so it
+// survives on disk even if the capture is interrupted before stopSession. imu/gps use a
+// relative time base (ms from start), so these keys tie t=0 to real UTC.
+void WaveManager::writeSessionAnchor(void) {
+  if (!sessionFile_) return;
+  char iso[24];
+  sprintf(iso, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+          year(captureStart_), month(captureStart_), day(captureStart_),
+          hour(captureStart_), minute(captureStart_), second(captureStart_));
+  sessionFile_.print("reading_id,");      sessionFile_.println(readingID_);
+  sessionFile_.print("orientation_name,");sessionFile_.println(analyzer_.orientationName());
+  sessionFile_.print("gps_fix_at_start,"); sessionFile_.println(gpsFixAtStart_ ? 1 : 0);
+  sessionFile_.print("start_utc_epoch,"); sessionFile_.println((uint32_t)captureStart_);
+  sessionFile_.print("start_utc_iso,");   sessionFile_.println(iso);
+  writePosition("start", captureStartPos_);
+  sessionFile_.sync();  // do not close: summary is appended at stop
+}
+
+// cfg.csv: (hopefully) every constant the capture depends on, so that the session folder
+// is self-describing. Enabling postprocessing / testing / verification
+void WaveManager::writeSessionConfig(File &f) {
+  f.println("key,value");
+
+  // Build date and commit/branch. 
+  // NB at time of file compilation, so need to do clean rebuild to refresh.
+  f.print("build_date,");         f.println(__DATE__ " " __TIME__);
+  f.print("build_commit,");       f.println(BUILD_STR(REPO_COMMIT_ID));
+  f.print("build_branch,");       f.println(BUILD_STR(REPO_GIT_BRANCH));
+
+  // Capture duration etc
+  f.print("duration_ms,");        f.println(wave_capture_duration);
+  f.print("period_ms,");          f.println(base_wave_capture_period);
+  
+  // AHRS settling window: logged to imu.csv/raw.bin but excluded from Welch/PSD, so
+  // postprocess must skip the same leading rows to reproduce the on-device Hs.
+  f.print("filter_warm_up_ms,");  f.println(wave_capture_warmup);
+
+  // GNSS
+  // The nav rate the receiver is SET to against which the achieved fix rate from the track is read
+  f.print("gps_rate_hz,");        f.println(GPS_nav_rate_hz);
+  f.print("gps_fix_timeout_ms,"); f.println(wave_gps_fix_timeout);
+  f.print("gps_fix_required,");   f.println((wave_measurement_require_gps && enable_GPS) ? 1 : 0);
+  f.print("gps_track_in_capture,"); f.println(wave_gps_track_in_capture ? 1 : 0);
+
+  // IMU
+  f.print("imu_odr_hz,");         f.println(kImuOdrHz);
+  f.print("accel_odr_hz,");       f.println(kImuOdrHz);
+  f.print("imu_low_power,");      f.println(kImuLowPower);
+  f.print("imu_acc_mode,");       f.println((int)kImuAccMode);
+  f.print("imu_gyr_mode,");       f.println((int)kImuGyrMode);
+  f.print("imu_spi_hz,");         f.println(kImuSpiHz);
+  f.print("accel_fs_g,");         f.println((int)kAccelFS);
+  f.print("gyro_fs_dps,");        f.println((int)kGyroFS);
+  f.print("lpf2_enabled,");       f.println(kUseLpf2 ? 1 : 0);
+  f.print("lpf2_bw,");            f.println(kLpf2Bw);        // raw CTRL8 register value
+  f.print("lpf2_cutoff_hz,");     f.println(kLpf2CutoffHz, 2);
+  f.print("sflp_enabled,");       f.println(kEnableSflp ? 1 : 0);
+  f.print("sflp_odr_hz,");        f.println(kSflpOdrHz, 1);
+  f.print("sflp_rotation_tag,");  f.println(kTagSflpRotation);
+  f.print("imu_wake,");           f.println(kImuUseInt1 ? "int1_watermark" : "poll_watermark");
+  f.print("fifo_watermark,");     f.println(kFifoWatermark);
+
+  // --- IMU.csv - windowing (raw ODR -> imu.csv rows) ---
+  f.print("output_rate_hz,");     f.println(kRowOdrHz);
+  f.print("window_ms,");          f.println(kRowPeriodMsF, 4);
+  f.print("imu_prealloc_bytes,");
+  f.println((uint32_t)kRowOdrHz * (wave_capture_duration / s_2_ms) *
+            wave_imu_row_bytes_max);
+
+  // --- decimation ---
+  f.print("row_decimation,fir");  f.println();
+  f.print("fir_ntap,");           f.println(kFirS1Ntap);   // stage 1, kept for older parsers
+  f.print("fir_s1_kind,");        f.println(firKindName(kFirS1Kind));
+  f.print("fir_s1_ntap,");        f.println(kFirS1Ntap);
+  f.print("fir_s2_kind,");        f.println(firKindName(kFirS2Kind));
+  f.print("fir_s2_ntap,");        f.println(kFirS2Ntap);
+  f.print("fir_s1_decim,");       f.println(kFirS1Decim, 3);
+  f.print("fir_s2_decim,");       f.println(kFirS2Decim);
+  f.print("fir_s1_cutoff_hz,");   f.println(kFirS1CutoffHz, 3);
+  f.print("fir_s2_cutoff_hz,");   f.println(kFirS2CutoffHz, 3);
+  f.print("fir_s1_delay_s,");     f.println(kFirS1DelayS, 6);
+  f.print("fir_s2_delay_s,");     f.println(kFirS2DelayS, 6);
+  f.print("fir_s1_center_ms,");   f.println(0.5f * kRowPeriodMsF, 4);
+  f.print("fir_s2_center_ms,");   f.println(kFirS2CenterMs);
+  f.print("fir_compensate,0");    f.println();
+
+  // breaking wave detection
+  f.print("brake_detect,");       f.println(wave_brake_detect ? 1 : 0);
+  f.print("brake_g_thresh,");     f.println(kBrakeGThreshold, 3);
+  f.print("brake_thresh_mg2,");   f.println((float)kBrakeThresholdMg2, 1);
+  f.print("brake_min_ms,");       f.println(kBrakeMinMs);
+  f.print("brake_min_samples,");  f.println(kBrakeMinSamples);
+
+  // orientation / vertical acceleration
+  f.print("orientation_name,");   f.println(analyzer_.orientationName());
+  f.print("ahrs_rate_hz,");       f.println(kAhrsInputOdrHz, 2);
+  f.print("quat_decimation,hold"); f.println();
+  f.print("quat_delay_s,");       f.println(kFirS1DelayS, 6);
+  f.print("quat_delay_steps,");   f.println(kQuatDelaySteps);
+
+  // Madgwick
+  f.print("madgwick_beta,");      f.println(kMadgwickBeta, 4);
+
+  // Kalman
+  f.print("kalman_sigma_g,");     f.println(kKalmanParams.sigmaG, 6);
+  f.print("kalman_sigma_b,");     f.println(kKalmanParams.sigmaB, 8);
+  f.print("kalman_sigma_a,");     f.println(kKalmanParams.sigmaA, 6);
+  f.print("kalman_p0_angle,");    f.println(kKalmanParams.p0Angle, 5);
+  f.print("kalman_p0_bias,");     f.println(kKalmanParams.p0Bias, 5);
+  f.print("gravity,");            f.println(kGravity, 5);
+  f.print("mg_to_ms2,");          f.println(kMg2Ms2, 8);
+  f.print("mdps_to_rads,");       f.println(kMdps2Rads, 8);
+  f.print("log_mode,");           f.println((uint8_t)wave_log_mode);  // 0=csv 1=raw 2=both 3=none
+  f.print("raw_format_version,"); f.println(kRawFormatVersion);
+  f.print("vacc_bucket_ms,");     f.println(kWelchInputPeriodMs);
+  f.print("vacc_fs_hz,");         f.println((float)kWelchInputOdrHz, 3);
+
+  // Welch spectrum + acc->elevation taper
+  f.print("welch_seglen,");       f.println(kWelchSegLen);
+  f.print("welch_overlap_div,");  f.println(kWelchStepDiv);
+  f.print("welch_step,");         f.println(kWelchSegLen / kWelchStepDiv);
+  f.print("welch_window,");       f.println(kWelchWindow == WindowType::Hann ? "Hann" : "Hamming");
+  f.print("welch_detrend,");      f.println(kWelchDetrend == DetrendMode::None ? "none"
+                                          : kWelchDetrend == DetrendMode::Mean ? "mean" : "linear");
+  f.print("psd_df_hz,");          f.println(kPsdDfHz, 6);
+  f.print("wave_fmax_hz,");       f.println(kWaveFMax, 3);
+  f.print("psd_min_freq_hz,");    f.println(kPsdMinFreq, 3);
+  f.print("psd_max_freq_hz,");    f.println(kPsdMaxFreq, 3);
+  f.print("psd_wire_encoding,");  f.println("sqrt");
+  f.print("taper_f1_hz,");        f.println(kTaperF1, 3);
+  f.print("taper_f2_hz,");        f.println(kTaperF2, 3);
+  f.print("welch_bin_min,");      f.println((uint32_t)welch_bin_min);
+  f.print("welch_bin_max,");      f.println((uint32_t)welch_bin_max);
+  f.print("welch_bins,");         f.println((uint32_t)welch_bins);
+  f.print("spec_sent,");          f.println(kSendPsd ? 1 : 0);
+  f.print("spec_tx_bins,");       f.println((uint32_t)kSpecTxBins);
+  f.print("spec_n_bins,");        f.println((uint32_t)kSpecNBins);
+  f.print("spec_bin_group,");     f.println((uint32_t)kSpecBinGroup);
+  f.print("spec_bin_width_hz,");  f.println(kSpecBinWidthHz, 6);
+  f.print("spec_f_min_hz,");      f.println(kSpecFMinHz, 5);
+  f.print("spec_f_max_hz,");      f.println(kSpecFMaxHz, 5);
+  f.print("spec_quantity,");      f.println("acc");   // acc | eta
+  f.print("spec_taper_applied,"); f.println(0);
+  f.print("spec_band_min_hz,");   f.println(kSpecBandMinHz, 5);
+  f.print("spec_band_max_hz,");   f.println(kSpecBandMaxHz, 5);
+  f.print("scale_factor,");       f.println(scale_factor);
+}
+
+// spec.csv: the averaged spectrum bin by bin, as acceleration AND as elevation. The
+// taper is recomputed here rather than read back from the analyzer
+void WaveManager::writeSpecCsv(void) {
+  char name[64];
+  snprintf(name, sizeof(name), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_SPEC_PREFIX);
+  File sf = sd_writer.card().open(name, O_RDWR | O_CREAT | O_TRUNC);
+  if (!sf) return;
+
+  sf.println("f_hz,psd_acc,psd_eta");
+  const int N = kWelchSegLen;
+  const float df = (float)kWelchInputOdrHz / N;
+  const float invSeg = analyzer_.segments() > 0 ? 1.0f / (float)analyzer_.segments() : 0.0f;
+  const float *psd = analyzer_.psd();
+  for (int k = 1; k <= N / 2; k++) {
+    float f = k * df;
+    if (f > kWaveFMax) break;
+    float w = 2.0f * (float)M_PI * f;
+    float w4 = w * w * w * w;
+    float taper = (f <= kTaperF1) ? 0.0f : (f >= kTaperF2 ? 1.0f
+                 : 0.5f * (1.0f - cosf((float)M_PI * (f - kTaperF1) / (kTaperF2 - kTaperF1))));
+    if (taper <= 0.0f) continue;
+    float pacc = psd[k] * invSeg;
+    sf.print(f, 5); sf.print(',');
+    printSci(sf, pacc, 6); sf.print(',');
+    printSci(sf, pacc / w4 * (taper * taper), 6); sf.println();
+  }
+  sf.sync(); sf.close();
+}
+
+// ana.csv: the wave parameters
+void WaveManager::writeAnaCsv(bool ok, const WaveParams &params) {
+  char name[64];
+  snprintf(name, sizeof(name), "%s/%s_%s.csv", sessionDir_, logStamp_, WAVE_ANA_PREFIX);
+  File af = sd_writer.card().open(name, O_RDWR | O_CREAT | O_TRUNC);
+  if (!af) return;
+
+  af.println("key,value");
+  af.print("imu_rows,");         af.println(analyzer_.rows());
+  af.print("warmup_rows,");      af.println(analyzer_.warmupRows());
+  af.print("brake_windows,");    af.println(analyzer_.brakeRows());
+  af.print("vacc_welch_samples,"); af.println(analyzer_.samplesWelch());
+
+  // Windows where no raw sample landed on the centre, so the FIR was read at the window
+  // edge instead. Non-zero means FIFO gaps
+  af.print("fir_late_eval_windows,"); af.println(imu_.firLateEvalCount());
+
+  // Times the FIFO overran during this capture
+  af.print("fifo_overflows,"); af.println(imu_.overflowTotal());
+
+  // Blocks raw.bin lost
+  af.print("raw_write_failures,"); af.println(rawLog_.writeFailCount());
+
+  // Welch and calculated wave parameters
+  af.print("welch_segments,");   af.println(analyzer_.segments());
+  af.print("welch_seglen,");     af.println((int)kWelchSegLen);
+  af.print("welch_ring_full,");  af.println(analyzer_.ringFullCount()); // Should always be zero..
+  af.print("usable_spectrum,"); af.println(ok ? 1 : 0);
+  af.print("Hs,"); af.println(params.hs, 3);
+  af.print("Tz,"); af.println(params.tz, 2);
+  af.print("Tc,"); af.println(params.tc, 2);
+  af.print("Tp,"); af.println(params.tp, 2);
+  af.sync(); af.close();
+}
+
+// Append the capture-end summary to the session file.
+// Stop, lat/long, duration, gps_rows, timing buckets
+void WaveManager::writeSessionSummary(void) {
+  if (!sessionFile_) return;
+
+  sessionFile_.print("stop_utc_epoch,"); sessionFile_.println((uint32_t)captureEnd_);
+  writePosition("stop", captureEndPos_);
+  sessionFile_.print("duration_ms,");    sessionFile_.println(wave_capture_duration);
+  // GPS records in raw.bin, not an analysis count - the on-board chain never reads the drift
+  // track, so this says what was LOGGED and stays on the session side.
+  sessionFile_.print("gps_rows,");       sessionFile_.println(gpsRowsWritten_);
+  writeTimingBlock();
+  sessionFile_.sync();
+}
+
+/*
+  The timing buckets are written to the session file at the end of a capture
+*/
+void WaveManager::writeTimingBlock(void) {
+  if (!wave_timing_enabled || !sessionFile_) return;
+
+  for (uint8_t i = 0; i < TIM_COUNT; i++) {
+    const TimeStat &s = wave_timing.b[i];
+    sessionFile_.print("tim_"); sessionFile_.print(kTimingNames[i]);
+    sessionFile_.print("_n,");       sessionFile_.println(s.nCap);
+    sessionFile_.print("tim_"); sessionFile_.print(kTimingNames[i]);
+    sessionFile_.print("_us_mean,"); sessionFile_.println(s.meanUsCap());
+    sessionFile_.print("tim_"); sessionFile_.print(kTimingNames[i]);
+    sessionFile_.print("_us_max,");  sessionFile_.println(s.maxUsCap);
+  }
+
+  // Turns tim_flush into us/kB rather than us/drain
+  sessionFile_.print("tim_flush_bytes,");  sessionFile_.println(wave_timing.flushBytesCap);
+
+  // The one-shot costs outside the loop. 
+  // No FIFO risk, so not so important.
+  sessionFile_.print("tim_start_session_us,"); sessionFile_.println(wave_timing.startSessionUs);
+  sessionFile_.print("tim_stop_imu_us,");      sessionFile_.println(wave_timing.stopImuUs);
+  sessionFile_.print("tim_stop_raw_us,");      sessionFile_.println(wave_timing.stopRawUs);
+  sessionFile_.print("tim_stop_total_us,");    sessionFile_.println(wave_timing.stopTotalUs);
+
+  // Approximate FIFO budget in microseconds.
+  sessionFile_.print("tim_fifo_budget_us,");
+  sessionFile_.println((uint32_t)kFifoDepthWords * 1000000UL / kFifoWordsPerSec);
+}
+
+// Close the session file and mark the session inactive
+void WaveManager::stopSession(void) {
+  if (sessionFile_) { sessionFile_.sync(); sessionFile_.close(); }
+  sessionActive_ = false;
+}
+
+// One GPS record in the raw log per fresh 3D fix, at the nav rate. Only buffered here:
+// the record goes to the card with the next raw flush, after a FIFO drain, so no sd-card
+// work happens in this step.
+void WaveManager::serviceGps(uint32_t relMs) {
+  gps_manager.update();
+  if (!sessionActive_ || !rawFile_ || !gps_manager.freshFix()) return;
+
+  // Get (copy of) last position fix from the GPS manager
+  const UBX_PVT &f = gps_manager.lastFix();
+
+  // Not interested if we do not have a 3D fix or if f invalid
+  if (!f.valid || f.fixType < 3) return;
+
+  // Payload in the order raw_log.h declares, little-endian, unscaled
+  uint8_t p[kRawGpsPayloadBytes];
+  uint8_t o = 0;
+  auto put32 = [&](uint32_t v) {
+    p[o++] = (uint8_t)v;         p[o++] = (uint8_t)(v >> 8);
+    p[o++] = (uint8_t)(v >> 16); p[o++] = (uint8_t)(v >> 24);
+  };
+
+  put32(millis());              // same clock as the sync records' millis
+  put32(relMs);                 // ms since the capture loop started
+  put32(f.iTOW_ms);             // GPS time of week
+  p[o++] = f.hour;  p[o++] = f.minute;  p[o++] = f.second;
+  p[o++] = f.fixType;
+  p[o++] = f.numSV;
+  put32((uint32_t)f.lat_e7);    put32((uint32_t)f.lng_e7);
+  put32((uint32_t)f.gSpeed_mms);
+  put32((uint32_t)f.velN_mms);  put32((uint32_t)f.velE_mms);  put32((uint32_t)f.velD_mms);
+  put32((uint32_t)f.headMot_e5);
+  put32(f.sAcc_mms);  put32(f.hAcc_mm);  put32(f.vAcc_mm);
+  p[o++] = (uint8_t)f.pDOP_e2;  p[o++] = (uint8_t)(f.pDOP_e2 >> 8);
+
+  rawLog_.emitRecord(kRawGpsTag, p, o);
+  gpsRowsWritten_++;
+}

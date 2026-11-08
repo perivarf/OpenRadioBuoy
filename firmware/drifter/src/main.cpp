@@ -6,28 +6,26 @@
 #include "gps_manager.h"
 #include "sd_writer.h"
 #include "thermo_manager.h"
+#include "wave_manager.h"
 #include "IWatchdog.h"
 #include "STM32LowPower.h"
 #include "TimeLib.h"
-/*
-  TODO: 
-  Get a good algorithm for getting a date stamp from GPS.
-  This feature is currently disabled. 
-*/
 
 HardwareSerial mySerial{DEBUG_SERIAL_RX_PIN, DEBUG_SERIAL_TX_PIN};
 
 
 /* Workaround for millis not increasing during sleep cycles */
 uint32_t measurement_timer;
+uint32_t wave_measurement_timer;
 uint32_t beacon_timer = 0;
 static uint32_t sleep_cycles_measurement  = 0;
+static uint32_t sleep_cycles_wave_measurement = 0;
 static uint32_t sleep_cycles_transmission = 0;
 static uint32_t sleep_cycles_beacon       = 0;
 static uint32_t iterations_counter = 0;
 
 
-uint32_t millis_time_corrected(uint32_t sleep_cycles){
+uint32_t millisTimeCorrected(uint32_t sleep_cycles){
   return millis() + sleep_cycles*sleep_time;
 }
 
@@ -146,10 +144,20 @@ void setup() {
   */
   etl::error_handler::set_callback<etl_error_func>();
 
+#if DEBUG_WAVE_MSG
+  /*
+    Bench mode: the GPS is never started, since a unit on a desk gets no fix and the
+    wait below would never end. Timestamps stay boot-relative.
+  */
+  sd_writer.logString("DEBUG_WAVE_MSG: GPS not started");
+  if (debug_serial){
+    mySerial.println(F("DEBUG_WAVE_MSG: skipping GPS init and fix wait"));
+  }
+#else
   sd_writer.logString("Beginning GPS");
 
   IWatchdog.reload();
-  gps_manager.begin(GPS_baud);
+  gps_manager.begin();
 
   int8_t  nofix = 1;
 
@@ -166,10 +174,33 @@ void setup() {
   gps_manager.processReadings(false);
 
   /*
-    We need to read the attached thermistors for a buoy ID
+    Set the clock from GPS now that there is a fix. The loop above can miss it if the
+    time-valid flag flips after that iteration's updateTimestamp.
+  */
+  if (gps_manager.updateTimestamp(max_GPS_read_time, true) == 0){
+    if (debug_serial){ mySerial.print("RTC set from GPS, epoch "); mySerial.println((uint32_t)now()); }
+  } else if (debug_serial){
+    mySerial.println("WARNING: RTC not set - no valid GPS time yet (timestamps boot-relative)");
+  }
+#endif
+
+  /*
+    We need to read the attached thermistors for a buoy ID. Kept in the bench build
+    too: it is what sets the thermo power pin, so the sleep() at the end of setup
+    would otherwise drive an unconfigured pin.
   */
   thermo_manager.begin(THERMO_DATA_PIN, THERMO_POWER_PIN);
 
+  /*
+    Bring up the IMU for wave analysis. Runs after sd_writer.begin() (which set up
+    the shared SPI1 bus), and degrades gracefully to no wave analysis if the sensor
+    does not answer.
+  */
+  wave_manager.begin();
+
+  // The deployment message is built from the GPS fix, so it has no meaning in the
+  // bench build where the receiver is never started.
+#if !DEBUG_WAVE_MSG
   gps_manager.getDeploymentMessage(LORA.WiO_ID);
   LORA.startup_timestamp = gps_manager.timestamp;
   IWatchdog.reload();
@@ -189,7 +220,8 @@ void setup() {
     sd_writer.logString(gps_manager.deploymentMessage, deployment_message_size);
     LORA.waitUntilReady();
   }
-  
+#endif
+
   LORA.lastTransmission = millis();
   if (IWatchdog.isReset() == true){
     //We check to see if the buoy crashed
@@ -197,7 +229,17 @@ void setup() {
   }
 
 
-  measurement_timer = millis();
+  /*
+    Arm both measurement gates so the first loop iteration runs them immediately.
+    The subtraction relies on unsigned wrap-around, which the gates handle.
+  */
+  if (measure_immediately_after_deployment){
+    measurement_timer      = millis() - LORA.measurement_period - 1;
+    wave_measurement_timer = millis() - LORA.wave_capture_period - 1;
+  } else {
+    measurement_timer      = millis();
+    wave_measurement_timer = millis();
+  }
   if (enable_recovery_beacon){
     beacon_timer = millis();
   }
@@ -207,21 +249,12 @@ void setup() {
     enabling them again in the loop. 
   */ 
   LowPower.begin();
-  gps_manager.shutdownGPS();
+#if !DEBUG_WAVE_MSG
+  gps_manager.shutdownGPS();  // nothing to shut down when begin() never ran
+#endif
   sd_writer.closeLog();
   thermo_manager.sleep();
   LORA.sleep();
-
-  
-  // We try to recover a GPS measurement:
-  //char targetFile[64];
-  //sprintf(targetFile, "readings/reading%05d.txt", 3);
-  //sd_writer.startReading(targetFile);
-  //sd_writer.readFile();
-  //gps_manager.getMeasurementFromFile();
-  //thermo_manager.getMeasurementFromFile();
-  //sd_writer.closeRead();
-
 
   if (debug_serial){
     mySerial.println("Setup complete, loop beginning");
@@ -232,13 +265,13 @@ void setup() {
 
 }
 
-void task_measure_gps_temp() {
+void measurePositionTemperature() {
 
   // Measure time!
   unsigned long measurement_start = millis();
 
   // Wake up sensors
-  gps_manager.begin(GPS_baud);
+  gps_manager.begin();
   thermo_manager.wake();
   IWatchdog.reload();
 
@@ -282,14 +315,53 @@ void task_measure_gps_temp() {
   }
   // Turning off remaining sensors
   sleep_cycles_measurement = 0;
-  measurement_timer = millis_time_corrected(sleep_cycles_measurement);
+  measurement_timer = millisTimeCorrected(sleep_cycles_measurement);
   thermo_manager.sleep();
   sd_writer.closeLog();
   IWatchdog.reload();
 }
   
 
-void task_transmit() {
+void waveCapture() {
+
+  if (debug_serial){
+    mySerial.println("Wave measurement starting");
+  }
+
+  // Anchored to the start of the capture, so captures begin every wave_capture_period.
+  sleep_cycles_wave_measurement = 0;
+  wave_measurement_timer = millis();
+
+  // wave_manager owns its own per-capture session directory (imu/gps/ses/spec/ana) and
+  // wakes/stops the GPS itself for the drift track, so just ensure the SD card is up;
+  // do NOT open a log here - takeReading/processCapture manage the session.
+  if (!sd_writer.active){
+    sd_writer.begin();
+  }
+
+  IWatchdog.reload();
+  wave_manager.wake();  // restarts the GNSS engine for the drift track
+
+  // Blocking capture over wave_capture_duration; the watchdog is reloaded inside.
+  // Waits up to wave_gps_fix_timeout for a fix first and returns 2 if none arrives -
+  // a capture with no position is skipped outright, so nothing was sampled and there
+  // is no spectrum to finalise.
+  uint8_t wave_status = wave_manager.takeReading();
+  IWatchdog.reload();
+  wave_manager.sleep();
+
+  if (wave_status == 0){
+    // Finalise the Welch spectrum -> wave parameters and enqueue a result for transmit.
+    wave_manager.processCapture();
+    IWatchdog.reload();
+  } else if (debug_serial){
+    mySerial.print("Wave measurement skipped, takeReading status ");
+    mySerial.println(wave_status);
+  }
+}
+
+
+void transmit() {
 
   if (debug_serial){
     mySerial.println("Looking for base station");
@@ -307,13 +379,16 @@ void task_transmit() {
   LORA.wakeUp();
   sd_writer.logString("Looking for base station");
 
-  // Handshake
+  // Handshake. NOT bypassed in the bench build: DEBUG_WAVE_MSG fakes only the SOURCE
+  // of the wave result, never its journey. Everything from here on - handshake,
+  // learned send frequency, sendData, sd_writer - is the production path, which is
+  // the only reason a pass here says anything about the firmware that ships.
   if (perform_handshake){
     if (LORA.connectToBaseStation(max_radio_fix_look_time, max_radio_wait_time)){
     sd_writer.logString("Hands shaked");
     } else {
     sd_writer.logString("No base station found");
-    } 
+    }
     delay(send_delay_after_handshake);
   } else {
       // We do not check if a base station is present
@@ -351,6 +426,7 @@ void task_transmit() {
     sd_writer.logByteArray(thermo_manager.msgB, thermo_message_size);
     sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
 
+
     delay(200);
     LORA.packet_count++;
     IWatchdog.reload();
@@ -364,11 +440,70 @@ void task_transmit() {
 
     delay(500);
   }
-  
+
+  // Wave analysis data (if any). Independent of the thermo queue: a wave result
+  // rides along opportunistically whenever the base station is still listening.
+  while (LORA.available && !wave_manager.wave_analysis_results.empty()){
+#if DEBUG_WAVE_MSG
+    // BEFORE updateTransmitMessage, which pops the result off the queue. mySerial,
+    // not Serial: Serial is never begun on the drifter.
+    wave_manager.printPendingResult(mySerial);
+#endif
+
+    // Wave statistics (Significant wave height, peak period, etc) message
+    size_t wave_len = wave_manager.updateTransmitMessage();
+    if (wave_len == 0){
+      break;  // nothing serialised, so there is nothing to send or to pop
+    }
+    if (debug_serial){
+      mySerial.print("Sending W: "); mySerial.print(wave_len);
+      mySerial.print(" bytes on "); mySerial.print(LORA.current_frequency, 3);
+      mySerial.println(" MHz");
+    }
+    message_data = LORA.sendData(wave_manager.msgB, (uint8_t)wave_len, 10000);
+    IWatchdog.reload();
+
+    delay(500);
+    sd_writer.logByteArray(wave_manager.msgB, wave_len);
+    sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
+    
+    delay(200);
+    LORA.packet_count++;
+    IWatchdog.reload();
+
+    /*
+      The spectrum follows as its own message, paired to the one above by ts_start.
+    */
+    size_t psd_len = wave_manager.updatePsdTransmitMessage();
+    if (psd_len > 0){
+      if (debug_serial){
+        mySerial.print("Sending P: "); mySerial.print(psd_len);
+        mySerial.print(" bytes on "); mySerial.print(LORA.current_frequency, 3);
+        mySerial.println(" MHz");
+      }
+
+      message_data = LORA.sendData(wave_manager.psdB, (uint8_t)psd_len, 10000);
+      IWatchdog.reload();
+
+      delay(500);
+      sd_writer.logByteArray(wave_manager.psdB, psd_len);
+      sd_writer.logSignalInfo(message_data.RSSI, message_data.SNR);
+
+      delay(200);
+      LORA.packet_count++;
+      IWatchdog.reload();
+    }
+
+    wave_manager.popTransmittedResult();
+  }
+
   // Wrap up transmission, wait for base station instructions
   if (LORA.available){
-    LORA.transmitFinished(thermo_manager.temperatures.size());
+
+    LORA.transmitFinished(thermo_manager.temperatures.size()+wave_manager.wave_analysis_results.size());
+
     if (enable_baseStation_parameter_updates){
+
       // We listen for new parameters
       LORA.receiveInstructions();
 
@@ -378,26 +513,44 @@ void task_transmit() {
       //sd_writer.fetchRequestedMeasurements(LORA.measurementTargets);
     }
     LORA.updateMeasurementFrequency(gps_manager.current_buoy_velocity, maximal_measurement_period, minimal_measurement_period);
-
   }
   
   sd_writer.logString("Transmission done");
   sd_writer.closeLog();
 
   sleep_cycles_transmission = 0;
-  measurement_timer = millis();
   LORA.lastTransmission = millis();
   LORA.sleep();
 
 }
 
-void task_beacon(){
+void sendBeacon(){
     LORA.wakeUp();
     gps_manager.updateBeaconMsg(LORA.WiO_ID);
     LORA.transmitBeaconMessage(gps_manager.beaconMsg, beaconMsgSize);
     sleep_cycles_beacon = 0;
     beacon_timer        = millis();
     LORA.sleep();
+}
+
+/*
+  Transmit if the radio is due and either queue has something in it. A transmission
+  due within lookahead_ms counts as due now; callers about to block pass the length
+  of the block, others 0.
+*/
+static bool transmitIfDue(uint32_t lookahead_ms){
+  const bool transmission_due =
+      millisTimeCorrected(sleep_cycles_transmission) - LORA.lastTransmission + lookahead_ms
+          > minimal_transmission_period;
+  const bool have_payload =
+      gps_manager.GPSReadings.size() > packet_count_send_treshold
+      || !wave_manager.wave_analysis_results.empty();
+
+  if (transmission_due && have_payload){
+    transmit();
+    return true;
+  }
+  return false;
 }
 
 void loop() {
@@ -414,20 +567,50 @@ void loop() {
 
   }
 
-  // Measurement loop (temperature and GPS)
-  if (millis_time_corrected(sleep_cycles_measurement) - measurement_timer > LORA.measurement_period){
-      task_measure_gps_temp();
+  // Measurement loop (temperature and GPS). Skipped entirely in the bench build:
+  // the GPS was never started, and a wave-message test has no use for either sensor.
+#if !DEBUG_WAVE_MSG
+  if (millisTimeCorrected(sleep_cycles_measurement) - measurement_timer > LORA.measurement_period){
+      measurePositionTemperature();
   }
-  
+#endif
+
+  // Wave measurement loop (IMU): independent gate, own enable flag and period.
+  //Debug print enable wave analysis and measurement period, and time since last measurement
+
+
+#if DEBUG_WAVE_MSG
+  // Bench mode: no capture. A synthetic result is queued whenever the queue is empty
+  // and sent through the production path.
+  if (wave_manager.wave_analysis_results.empty()){
+      wave_manager.enqueueFakeResult();
+      if (debug_serial){
+        mySerial.println(F("DEBUG_WAVE_MSG: queued fake result"));
+      }
+  }
+#else
+  if (LORA.enable_wave_analysis &&
+      millisTimeCorrected(sleep_cycles_wave_measurement) - wave_measurement_timer > LORA.wave_capture_period){
+      /*
+        The capture blocks loop() for wave_capture_duration, so anything already queued
+        is sent first rather than waiting it out. Only here: on every other iteration
+        the transmission check below the gate covers it.
+      */
+      if (transmit_before_wave_capture){
+        if (transmitIfDue(wave_capture_duration) && debug_serial){
+          mySerial.println(F("Transmitted before wave capture (transmit_before_wave_capture)"));
+        }
+      }
+      waveCapture();
+  }
+#endif
+
   // Transmission protocol
-  if ((millis_time_corrected(sleep_cycles_transmission) - LORA.lastTransmission > minimal_transmission_period) && 
-      (gps_manager.GPSReadings.size() > packet_count_send_treshold)) {  
-        task_transmit();
-  }
+  transmitIfDue(0);
 
   // Recovery protocol
-  if ((millis_time_corrected(sleep_cycles_beacon) - beacon_timer > beacon_ping_period) && (enable_recovery_beacon)){
-    task_beacon();
+  if ((millisTimeCorrected(sleep_cycles_beacon) - beacon_timer > beacon_ping_period) && (enable_recovery_beacon)){
+    sendBeacon();
   }
 
   if (debug_serial){
@@ -441,6 +624,7 @@ void loop() {
   // We sleep for "sleep_time" before waking up to refresh the watchdog
   IWatchdog.reload();
   sleep_cycles_measurement++;
+  sleep_cycles_wave_measurement++;
   sleep_cycles_transmission++;
   if (sd_writer.active){
     sd_writer.shutdown();

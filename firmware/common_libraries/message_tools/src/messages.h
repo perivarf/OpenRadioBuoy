@@ -38,18 +38,19 @@ struct BeaconOutgoingMessage{
     time_t timestamp;
 };
 
-
-
 struct StringMessage{
-  String msg; // TODO: replace more meaningful struct
+  String msg;
   bool success;
 };
 
-
-
+/*
+  Link quality of the last received packet, 1e4 * dB. Zero-initialised, since
+  sendData leaves them untouched on a timeout.
+*/
 struct Message_Data{
-  uint32_t RSSI;
-  uint32_t SNR;
+  uint32_t RSSI{0};
+  uint32_t SNR{0};
+  bool     sent{false};
 };
 
 struct buoyInfo{

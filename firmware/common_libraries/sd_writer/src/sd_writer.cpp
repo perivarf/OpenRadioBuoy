@@ -1,30 +1,53 @@
 #include "sd_writer.h"
+#include "TimeLib.h"
 
 
 SDWriter sd_writer;
 
 /*
-  Initialising SDWriter, and file opening functions. 
+  Initialising SDWriter, and file opening functions.
 
   File functions return the following error codes
   Error codes:
     0 - Everything works as intended
     1 - SD card reader failed to open
-    2 - User tries to either open an already opened file, or 
+    2 - User tries to either open an already opened file, or
         write to nonexisting file
 */
 
+/*
+  SdFat calls this when a file is CREATED (all three stamps - create, access, write -
+  are set from it) and again on every sync() */
+static void sdDateTimeCallback(uint16_t *date, uint16_t *time){
+  time_t t = now();
+
+  if (year(t) < 1980){
+    *date = FS_DATE(1980, 1, 1);
+    *time = FS_TIME(0, 0, 0);
+    return;
+  }
+
+  *date = FS_DATE(year(t), month(t), day(t));
+  *time = FS_TIME(hour(t), minute(t), second(t));
+}
+
 uint32_t SDWriter::countFilesInDirectory(const char * dirName){
-  // Reads all files in given directory
-  uint16_t fileCount = 0;
+  /*
+    Count files in a directory. Each entry must be closed before openNext(), or it
+    stops after the first file. A local handle, so an open LogFile is untouched.
+  */
+  uint32_t fileCount = 0;
   File directory;
-  directory.open(dirName);
-  while (LogFile.openNext(&directory, O_RDONLY)) {
-    if (!LogFile.isHidden()) {
+  if (!directory.open(dirName, O_RDONLY)) return 0;
+
+  File entry;
+  while (entry.openNext(&directory, O_RDONLY)) {
+    if (!entry.isHidden() && !entry.isDir()) {
       fileCount++;
     }
+    entry.close();
+    IWatchdog.reload();  // a card with hundreds of readings must not trip the watchdog
   }
-  LogFile.close();
   directory.close();
   return fileCount;
 }
@@ -52,18 +75,21 @@ bool SDWriter::begin(void){
   SPI.setSCLK(SPI_SCK_PIN);
   SPI.begin();
 
+  // To enable timestamped files
+  FsDateTime::setCallback(sdDateTimeCallback);
+
   SD_fail = !SD.begin(SdSpiConfig(SPI_CS_SD_PIN, SHARED_SPI, SD_SCK_MHZ(SD_SPI_MHZ), &SPI));
 
   if (SD_fail && debug_serial){
-    // sdErrorCode/sdErrorData say whether the card never answered CMD0 (wiring,
-    // CS, no card) or failed later in the init handshake (card/speed issue).
+    // sdErrorCode/sdErrorData say whether the sd-card never answered CMD0 (wiring,
+    // CS, no sd-card) or failed later in the init handshake (sd-card/speed issue).
     Serial.print("SD begin failed, error 0x");
     Serial.print(SD.sdErrorCode(), HEX);
     Serial.print(" data 0x");
     Serial.println(SD.sdErrorData(), HEX);
   }
 
-  if (!SD_fail && ((WIO_MODE == BUOY_MODE) || (WIO_MODE == MOORED_MODE))){
+  if (!SD_fail && (WIO_MODE == BUOY_MODE)){
     active = true;
 
     // We create the necessary directories if not already present
@@ -77,7 +103,7 @@ bool SDWriter::begin(void){
         Serial.println("Counting files");
       }
       
-      logCount = countFilesInDirectory("readings/");
+      logCount = countFilesInDirectory(readings_dir);
       //Count amount of files in reading directory to ensure readability
       if (debug_serial){
         Serial.print("Num files: ");
@@ -160,11 +186,14 @@ int8_t SDWriter::startLogging(const char * filename){
   /*
     We check if the SD writer is in the correct mode to start new operations
   */
-  if ((mode == OLB_SD_INACTIVE) && (!SD_fail)){
-    mode   = OLB_SD_WRITE_MODE;
+  if ((mode == ORB_SD_INACTIVE) && (!SD_fail)){
+    mode   = ORB_SD_WRITE_MODE;
     LogFile = SD.open(filename, FILE_WRITE);
 
-    logCount++;
+    // Only reading logs bump logCount, which names the next reading file and seeds reading_ID.
+    if (strncmp(filename, readings_dir, sizeof(readings_dir) - 1) == 0){
+      logCount++;
+    }
     return 0;
 
   } else if (SD_fail) {
@@ -179,8 +208,8 @@ int8_t SDWriter::startReading(const char * filename){
   /*
     If the SD writer is inactive, start reading operation. Otherwise pass with error code
   */
-  if ((mode == OLB_SD_INACTIVE) && (!SD_fail)){
-    mode   = OLB_SD_READ_MODE;
+  if ((mode == ORB_SD_INACTIVE) && (!SD_fail)){
+    mode   = ORB_SD_READ_MODE;
     LogFile = SD.open(filename, FILE_READ);
     Serial.println("FILE OPENED");
     numLines = 0;
@@ -200,7 +229,7 @@ int8_t SDWriter::startReading(String filename){
 
 // File writing functions
 int8_t SDWriter::logString(const char * line){
-  if ((mode == OLB_SD_WRITE_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_WRITE_MODE) && (!SD_fail)){
     if (debug_serial){
       Serial.println("Writing the following line to file:");
       Serial.println(line);
@@ -237,7 +266,7 @@ int8_t SDWriter::logSignalInfo(uint32_t RSSI, uint32_t SNR){
 
 // The 'b' separator is included to indicate a new byte as to ensure unambigous log files
 int8_t SDWriter::logByteArray(byte* array, int length){
-  if ((mode == OLB_SD_WRITE_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_WRITE_MODE) && (!SD_fail)){
     if (debug_serial)
       Serial.println("Writing the following byte array to file:");
     for (int i = 0; i < length; i++){
@@ -267,23 +296,17 @@ int8_t SDWriter::logByteArray(byte* array, int length){
 
 int8_t SDWriter::readFile(void){
   /*
-    Read logfile (binary encoding)
-    Store all lines to file buffer
-    First character indicates if the line is a raw measurement (R)
-    or aggregated measurement (A)
+    Prepare the open logfile for line-by-line reading.
+    The file is no longer copied into RAM: this counts the lines into numLines and
+    rewinds, and the readers then fetch one line at a time with readLine().
   */
-  if ((mode == OLB_SD_READ_MODE) && (!SD_fail)){
-    char str_line[max_line_length];
-    while (LogFile.available()){
-      line = {"",0}; 
-      String nextline = LogFile.readStringUntil('\n');
-
-      sprintf(line.line, nextline.c_str());
-      line.length = nextline.length();
-      file_buffer.push_back(line);
-
+  if ((mode == ORB_SD_READ_MODE) && (!SD_fail)){
+    rewindRead();
+    fileLine tmp;
+    while (readLine(tmp) == 0){
       numLines++;
     }
+    rewindRead();
     IWatchdog.reload();
     return 0;
   } else {
@@ -292,9 +315,47 @@ int8_t SDWriter::readFile(void){
 }
 
 
+int8_t SDWriter::readLine(fileLine & out){
+  /*
+    Read the next line of the open logfile into out, without the line ending.
+    A line too long for out.line is truncated and the rest of it skipped, so the
+    next call starts on the following line.
+    Returns 0 when a line was read, 1 at end of file, on a read error, or when no
+    file is open for reading.
+  */
+  out = {"",0};
+  if ((mode != ORB_SD_READ_MODE) || SD_fail){
+    return 1;
+  }
+  // fgets drops '\r', stops after '\n' and returns 0 at end of file, -1 on error
+  int n = LogFile.fgets(out.line, sizeof(out.line));
+  if (n <= 0){
+    out.line[0] = '\0';
+    return 1;
+  }
+  if (out.line[n - 1] == '\n'){
+    out.line[--n] = '\0';
+  } else {
+    int c;
+    while (((c = LogFile.read()) >= 0) && (c != '\n')){}
+  }
+  out.length = n;
+  return 0;
+}
+
+
+void SDWriter::rewindRead(void){
+  if ((mode == ORB_SD_READ_MODE) && (!SD_fail)){
+    LogFile.rewind();
+  }
+}
+
+
 int8_t SDWriter::printFileToSerial(void){
-  for (uint8_t line_num = 0; line_num < numLines; line_num++ ){
-    Serial.println(file_buffer.at(line_num).line);
+  rewindRead();
+  fileLine tmp;
+  for (uint16_t line_num = 0; (line_num < numLines) && (readLine(tmp) == 0); line_num++ ){
+    Serial.println(tmp.line);
     delay(500);
     IWatchdog.reload();
   }
@@ -304,9 +365,9 @@ int8_t SDWriter::printFileToSerial(void){
 // Functions to stop writing/reading a file. Important to call before opening a new file. 
 
 int8_t SDWriter::closeLog(void){
-  if ((mode == OLB_SD_WRITE_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_WRITE_MODE) && (!SD_fail)){
     LogFile.close();
-    mode = OLB_SD_INACTIVE;
+    mode = ORB_SD_INACTIVE;
     numLines = 0;
     return 0;
   } else if (SD_fail) {
@@ -318,10 +379,10 @@ int8_t SDWriter::closeLog(void){
 
 
 int8_t SDWriter::closeRead(void){
-  if ((mode == OLB_SD_READ_MODE) && (!SD_fail)){
+  if ((mode == ORB_SD_READ_MODE) && (!SD_fail)){
     LogFile.close();
-    file_buffer.clear();
-    mode = OLB_SD_INACTIVE;
+    numLines = 0;
+    mode = ORB_SD_INACTIVE;
     return 0;
   } else if (SD_fail) {
     return 1;
@@ -403,6 +464,28 @@ void SDWriter::debugSerialPrintln(float number){
   }
   if (debug_SD && debugOpened){
     debugFile.println(number);
+    debugFile.sync();
+  }
+}
+
+
+void SDWriter::debugSerialPrint(float number, int digits){
+  if (debug_serial){
+    Serial.print(number, digits);
+  }
+  if (debug_SD && debugOpened){
+    debugFile.print(number, digits);
+    debugFile.sync();
+  }
+}
+
+
+void SDWriter::debugSerialPrintln(float number, int digits){
+  if (debug_serial){
+    Serial.println(number, digits);
+  }
+  if (debug_SD && debugOpened){
+    debugFile.println(number, digits);
     debugFile.sync();
   }
 }

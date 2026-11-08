@@ -1,0 +1,92 @@
+#include "rotation.h"
+
+#include <math.h>
+
+void rollPitchFromAccel(float ax, float ay, float az, float &roll, float &pitch) {
+  roll = atan2f(ay, az);
+  pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+}
+
+// https://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
+// with yaw=0
+void quatFromRollPitch(float q[4], float roll, float pitch) {
+  float cr = cosf(roll * 0.5f), sr = sinf(roll * 0.5f);
+  float cp = cosf(pitch * 0.5f), sp = sinf(pitch * 0.5f);
+  q[0] = cp * cr; q[1] = cp * sr; q[2] = sp * cr; q[3] = -sp * sr;
+}
+
+// r = p * q (Hamilton product)
+// https://arxiv.org/abs/1711.02508 (eq. 12 and 26)
+void quatMultiply(const float p[4], const float q[4], float r[4]) {
+  r[0] = p[0] * q[0] - p[1] * q[1] - p[2] * q[2] - p[3] * q[3];
+  r[1] = p[0] * q[1] + p[1] * q[0] + p[2] * q[3] - p[3] * q[2];
+  r[2] = p[0] * q[2] - p[1] * q[3] + p[2] * q[0] + p[3] * q[1];
+  r[3] = p[0] * q[3] + p[1] * q[2] - p[2] * q[1] + p[3] * q[0];
+}
+
+// p = p * q, normalised to unit length, because the quaternion is a rotation
+void quatMultiplyNorm(float p[4], const float q[4]) {
+  float r[4];
+  quatMultiply(p, q, r);
+  const float n = 1.0f / sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3]);
+  p[0] = r[0] * n;
+  p[1] = r[1] * n;
+  p[2] = r[2] * n;
+  p[3] = r[3] * n;
+}
+
+// Rotation vector v = th * u to quaternion
+// th = |v|, u = v/|v|, q = [cos(th/2), sin(th/2)*u]
+// https://arxiv.org/abs/1711.02508 (eq. 101)
+void quatFromRotationVector(const float v[3], float q[4]) {
+  const float th = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (th < 1.0e-12f) {
+    // sinf(th/2)/th is 0/0 at th = 0.
+    q[0] = 1.0f; 
+    q[1] = 0.5f * v[0]; 
+    q[2] = 0.5f * v[1]; 
+    q[3] = 0.5f * v[2];
+    return;
+  }
+  const float s = sinf(0.5f * th) / th;
+  q[0] = cosf(0.5f * th); 
+  q[1] = v[0] * s; 
+  q[2] = v[1] * s; 
+  q[3] = v[2] * s;
+}
+
+// Skew-symmmetric operator of v, i.e. 
+// the matrix M with M*u = v x u
+// https://arxiv.org/abs/1711.02508 (eq. 20)
+void skewSymmetric(const float v[3], float m[3][3]) {
+  m[0][0] =  0.0f;  m[0][1] = -v[2];  m[0][2] =  v[1];
+  m[1][0] =  v[2];  m[1][1] =  0.0f;  m[1][2] = -v[0];
+  m[2][0] = -v[1];  m[2][1] =  v[0];  m[2][2] =  0.0f;
+}
+
+// Body -> world rotation, w = R(q) * a. 
+// Quaternion-to-rotation-matrix formula
+// arXiv:1711.02508, eq. (115), s.25
+// Use fact that normalized quaternions satisfy qw² + qx² + qy² + qz² = 1:
+void rotateBodyToWorld(const float q[4], float ax, float ay, float az, float w[3]) {
+  const float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
+  w[0] = (1.0f - 2.0f * (qy * qy + qz * qz)) * ax +
+         2.0f * (qx * qy - qw * qz) * ay +
+         2.0f * (qx * qz + qw * qy) * az;
+  w[1] = 2.0f * (qx * qy + qw * qz) * ax +
+         (1.0f - 2.0f * (qx * qx + qz * qz)) * ay +
+         2.0f * (qy * qz - qw * qx) * az;
+  w[2] = 2.0f * (qx * qz - qw * qy) * ax +
+         2.0f * (qy * qz + qw * qx) * ay +
+         (1.0f - 2.0f * (qx * qx + qy * qy)) * az;
+}
+
+// Specific use case of rotateBodyToWorld: vertical linear accel, gravity removed.
+float verticalAccel(const float q[4], float ax, float ay, float az, float gravity) {
+  // Third row of the body->world rotation matrix, applied to (ax,ay,az).
+  float qw = q[0], qx = q[1], qy = q[2], qz = q[3];
+  float wZ = 2.0f * (qx * qz - qw * qy) * ax +
+             2.0f * (qy * qz + qw * qx) * ay +
+             (1.0f - 2.0f * (qx * qx + qy * qy)) * az;
+  return wZ - gravity;
+}

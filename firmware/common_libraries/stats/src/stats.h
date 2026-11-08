@@ -6,6 +6,9 @@
 #include "config.h"
 
 /*
+  n-sigma outlier rejection (sigma_filter / filter_vector) 
+  originates from the OpenMetBuoy project
+
   Note that integers should be scaled up by at least 1e4
   before filtering, as to avoid possible rounding errors from integer arithmetic.
 */

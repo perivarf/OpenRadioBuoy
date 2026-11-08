@@ -1,8 +1,8 @@
 {
-  "name": "OLB_parser_utils",
+  "name": "ORB_parser_utils",
   "version": "1.0.0",
-  "description": "Message parsing utilities for the Open Lora Buoy",
-  "keywords": "OLB, message parsing",
+  "description": "Message parsing utilities for the Open Radio Buoy",
+  "keywords": "ORB, message parsing",
   "authors":
   [
     {

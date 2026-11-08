@@ -11,10 +11,16 @@
 // Pins live in the project's config.h; this is the bus speed only.
 static constexpr uint8_t  SD_SPI_MHZ      {12};
 
+/*
+  The directory logCount is seeded from and counts. Written with the trailing
+  separator so it doubles as the prefix startLogging() matches a reading log on.
+*/
+static constexpr char readings_dir[] {"readings/"};
 
-static constexpr uint8_t OLB_SD_INACTIVE   {0};
-static constexpr uint8_t OLB_SD_WRITE_MODE {1};
-static constexpr uint8_t OLB_SD_READ_MODE  {2};
+
+static constexpr uint8_t ORB_SD_INACTIVE   {0};
+static constexpr uint8_t ORB_SD_WRITE_MODE {1};
+static constexpr uint8_t ORB_SD_READ_MODE  {2};
 static constexpr uint8_t DEBUG_MODE_NOTECARD_RESET {3};
 static constexpr uint8_t DEBUG_MODE_BST_HEARTBEAT  {4};
 static constexpr uint8_t DEBUG_MODE_NOTEHUB_SYNC   {5};
@@ -25,11 +31,11 @@ static constexpr uint8_t DEBUG_MODE_BUOY_RESCUE    {7};
 
 /*
   File reading parameters
-  Add computations to separate file
+  Files are read one line at a time straight from the card (readLine), so only one
+  line is held in RAM. Lines longer than max_line_length - 1 are truncated.
 */
 
 static constexpr uint8_t max_line_length   {128};
-static constexpr uint8_t max_file_length   {128};
 
 struct fileLine{
   char line[max_line_length];
@@ -56,6 +62,8 @@ class SDWriter{
     int8_t logByteArray(byte* array, int length);
     int8_t logSignalInfo(uint32_t RSSI, uint32_t SNR);
     int8_t readFile(void);
+    int8_t readLine(fileLine & out);
+    void   rewindRead(void);
     int8_t printFileToSerial(void);
     int8_t deleteFile(const char * filename);
  
@@ -63,6 +71,12 @@ class SDWriter{
     int8_t closeLog(void);
     int8_t closeRead(void);
     int8_t shutdown(void);
+
+    // Direct access to the mounted sd-card for libraries that need their own buffered
+    // File handles (e.g. wave_manager streaming imu.csv at 100 Hz, where the
+    // per-line sync in logString would be far too slow). The sd-card is mounted once
+    // in begin(); callers must not hold a File open across sd_writer's own logging.
+    SdFat & card(){ return SD; }
 
     // Flag checking if SD writer already is in use
     bool active = false;
@@ -74,22 +88,27 @@ class SDWriter{
 
     // File reading utilities
     uint16_t numLines = 0;
-    etl::deque<fileLine, max_file_length> file_buffer;
     
     // Debugging tools
     void debugSerialPrint(const char * line);
     void debugSerialPrint(float number);
     void debugSerialPrintln(const char * line);
     void debugSerialPrintln(float number);
+    // The one-argument float overloads print Arduino's default two decimals, which is
+    // too coarse for the wave parameters. An acceleration PSD needs far more: the peak
+    // runs from ~1e-2 (m/s^2)^2/Hz in a seaway down to ~6e-7 on a bench at rest, so it
+    // is printed with 9 decimals and anything less shows it as a row of zeros. Pass
+    // digits explicitly; digits = 0 also renders an integer-valued float without ".00".
+    void debugSerialPrint(float number, int digits);
+    void debugSerialPrintln(float number, int digits);
     int8_t debugByteArray(byte * array, int length);
     void closeDebug(void);
-    uint8_t mode = OLB_SD_INACTIVE;
+    uint8_t mode = ORB_SD_INACTIVE;
   private:
     bool SD_fail;
     File LogFile;
     File debugFile;
     SdFat SD;
-    fileLine line;
     uint32_t countFilesInDirectory(const char * dirName);
 };
 

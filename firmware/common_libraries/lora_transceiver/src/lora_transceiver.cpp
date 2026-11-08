@@ -3,6 +3,12 @@
 
 LoRa_Transceiver LORA;
 
+/*
+  TCXO supply voltage on DIO3, 0 = plain crystal. The drifter's module has no TCXO
+  despite the schematic; setting one gives XOSC_START_ERR and startTransmit -707.
+*/
+static constexpr float kTcxoVoltage = 0.0f;
+
 void setFlag(void){
   // Function called by RadioLib to mark completed operation
   operationDone = true;
@@ -41,13 +47,59 @@ void LoRa_Transceiver::beginRadio(double freq, double bw, int sf, int cr, int po
     use the changeFrequency method.
   */
   radio.setRfSwitchTable(rfswitch_pins, rfswitch_table);
-  state = radio.begin(freq, bw, sf, cr, (0x12),power, 8,1.7, false);
-  radio.setTCXO(1.7);
+  // XTAL reference: kTcxoVoltage is 0 and setTCXO() is deliberately not called, since
+  // that would hand DIO3 to a TCXO this module does not have. See kTcxoVoltage.
+  state = radio.begin(freq, bw, sf, cr, (0x12),power, 8, kTcxoVoltage, false);
   radio.setDio1Action(setFlag);
+  current_frequency = (float)freq;
   packet_count = 0;
   listening = false;
   delay(200);
+  if (debug_serial){
+    reportModuleDiagnostics(freq);
+  }
   IWatchdog.reload();
+}
+
+
+/*
+  Printed once from beginRadio(). XOSC, PLL and calibration errors are otherwise
+  silent: begin() still returns RADIOLIB_ERR_NONE.
+
+  No band-strap read here: PB12 is shared with the IMU's INT1, and imu_sampler
+  reads the strap where the pad is released.
+*/
+void LoRa_Transceiver::reportModuleDiagnostics(double freq){
+  Serial.print("Radio begin at ");
+  Serial.print(freq);
+  Serial.print(" MHz, state ");
+  Serial.println(state);
+
+  uint16_t errs = radio.getDeviceErrors();
+  Serial.print("Device errors: 0x");
+  Serial.println(errs, HEX);
+  if (errs & RADIOLIB_SX126X_XOSC_START_ERR){
+    Serial.println("  XOSC_START_ERR - reference oscillator did not start (TCXO/XTAL mismatch)");
+  }
+  if (errs & RADIOLIB_SX126X_PLL_LOCK_ERR){
+    Serial.println("  PLL_LOCK_ERR - PLL failed to lock");
+  }
+  if (errs & RADIOLIB_SX126X_IMG_CALIB_ERR){
+    Serial.println("  IMG_CALIB_ERR - image calibration failed");
+  }
+  if (errs & RADIOLIB_SX126X_PLL_CALIB_ERR){
+    Serial.println("  PLL_CALIB_ERR");
+  }
+  if (errs & RADIOLIB_SX126X_ADC_CALIB_ERR){
+    Serial.println("  ADC_CALIB_ERR");
+  }
+  if (errs & RADIOLIB_SX126X_RC13M_CALIB_ERR){
+    Serial.println("  RC13M_CALIB_ERR");
+  }
+  if (errs & RADIOLIB_SX126X_RC64K_CALIB_ERR){
+    Serial.println("  RC64K_CALIB_ERR");
+  }
+  delay(100);
 }
 
 
@@ -72,7 +124,13 @@ void LoRa_Transceiver::transmit(const char * msg){
 
 
 void LoRa_Transceiver::transmitB(byte * msg, uint8_t msgSize){
-  radio.startTransmit(msg, msgSize);
+  transmissionState = radio.startTransmit(msg, msgSize);
+  // A non-zero code means the radio never entered TX, so TxDone (DIO1) will never
+  // fire and any following waitUntilReady() would spin forever. Surface it.
+  if (debug_serial && transmissionState != RADIOLIB_ERR_NONE){
+    Serial.print("transmitB: startTransmit failed, code ");
+    Serial.println(transmissionState);
+  }
 }
 
 
@@ -97,11 +155,15 @@ void LoRa_Transceiver::sendFinalMessage(FrequencyMessage frequency_message)
 
 void LoRa_Transceiver::changeFrequency(double f){
   /*
-    This method restarts the radio with a new given frequency. 
+    This method restarts the radio with a new given frequency.
   */
-  state = radio.begin(f, LoRa_bw, LoRa_sf, LoRa_cr, (0x12), LoRa_power, 8,1.7, false);
-  radio.setTCXO(1.7);
+  // Re-apply the RF switch table (beginRadio does this too). Without it a fresh
+  // begin() leaves the STM32WL front-end unconfigured, so TX never keys up.
+  radio.setRfSwitchTable(rfswitch_pins, rfswitch_table);
+  // XTAL reference, same as beginRadio() - see kTcxoVoltage.
+  state = radio.begin(f, LoRa_bw, LoRa_sf, LoRa_cr, (0x12), LoRa_power, 8, kTcxoVoltage, false);
   radio.setDio1Action(setFlag);
+  current_frequency = (float)f;
   listening = false;
   delay(200);
   IWatchdog.reload();
@@ -109,6 +171,9 @@ void LoRa_Transceiver::changeFrequency(double f){
    if (debug_serial){
     Serial.print("Radio restarted at frequency: ");
     Serial.println(f);
+    if (state != RADIOLIB_ERR_NONE){
+      Serial.print("changeFrequency: begin failed, state "); Serial.println(state);
+    }
   }
 }
 
@@ -153,7 +218,6 @@ void LoRa_Transceiver::listenByteArray(uint32_t max_wait_time)
   if (operationDone)
   {
     operationDone = false;
-    // TODO: this might only work for temp
     int numBytes = radio.getPacketLength();
     state = radio.readData(byte_msg.byteMsg, numBytes);
     if (state == RADIOLIB_ERR_NONE)
@@ -165,6 +229,21 @@ void LoRa_Transceiver::listenByteArray(uint32_t max_wait_time)
     {
       byte_msg.success = false;
       byte_msg.numBytes = 0;
+      /*
+        A packet was detected but readData rejected it (usually CRC mismatch, -7).
+        RSSI/SNR describe that packet; above ~-30 dBm suggests receiver saturation.
+      */
+      if (debug_serial)
+      {
+        Serial.print("readData failed, code ");
+        Serial.print(state);
+        Serial.print(", len ");
+        Serial.print(numBytes);
+        Serial.print(", RSSI ");
+        Serial.print(radio.getRSSI());
+        Serial.print(" dBm, SNR ");
+        Serial.println(radio.getSNR());
+      }
     }
   }
   else
@@ -366,8 +445,18 @@ Message_Data LoRa_Transceiver::sendData(byte * message, uint8_t msgSize,  uint32
   }
   if (operationDone){
     operationDone = false;
+    message_data.sent = true;
     message_data.RSSI = (uint32_t) 1e4*radio.getRSSI();
     message_data.SNR  = (uint32_t) 1e4*radio.getSNR();
+  } else if (debug_serial){
+    // No TxDone within message_send_time: the packet did NOT go out. Worth saying
+    // out loud, because the RSSI/SNR logged below are 0 either way - they describe
+    // the last received packet, so a transmit that nobody answers reads the same
+    // as a transmit that never happened.
+    Serial.print("sendData: no TxDone after ");
+    Serial.print(millis() - start_send);
+    Serial.print(" ms, startTransmit code ");
+    Serial.println(transmissionState);
   }
   listenTime -= millis() - start_send;
   return message_data;
@@ -516,7 +605,6 @@ void LoRa_Transceiver::waitUntilReady(){
   /*
     Method which lets the radio wait until a message is successfully sent
   */
-  uint32_t start_wait = millis();
   if (debug_serial){
     Serial.println("Waiting for successful sending");
   }
@@ -558,9 +646,6 @@ void LoRa_Transceiver::transmitBeaconMessage(byte * beaconMsg, uint8_t msgSize){
   }
 }
 
-/*
-Todo: Use parser utils
-*/
 void LoRa_Transceiver::create_update_message(FrequencyMessage frequency_message)
 {
   uint8_t offset = 0;

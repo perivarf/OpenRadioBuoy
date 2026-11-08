@@ -13,6 +13,16 @@
 //This function is difficult to weave into a class structure
 void setFlag(void);
 
+/*
+  Exposes getDeviceErrors(), which RadioLib keeps protected unless built with
+  RADIOLIB_GODMODE. XOSC_START_ERR and PLL_LOCK_ERR only show up there.
+*/
+class STM32WLx_Diag : public STM32WLx {
+  public:
+    explicit STM32WLx_Diag(STM32WLx_Module * mod) : STM32WLx(mod) {}
+    using SX126x::getDeviceErrors;
+};
+
 static volatile bool operationDone = false;
 
  
@@ -27,13 +37,23 @@ class LoRa_Transceiver{
     uint32_t startup_timestamp = 0;
     bool available = false;
     int16_t state;
+    // Last frequency handed to beginRadio/changeFrequency, in MHz. The radio itself
+    // has no cheap getter, and "which channel did that actually go out on" is the
+    // first question whenever a transmit is not heard.
+    float current_frequency = 0.0f;
     int16_t packet_count;
     uint32_t lastTransmission;
     uint16_t msgCounter = 0;
     
-    // This variable is a LORA variable as we might give 
+    // This variable is a LORA variable as we might give
     // instructions to the buoy in terms of measurement period
     uint32_t measurement_period = base_measurement_period;
+
+    // Wave analysis is gated by its own runtime enable + period, kept on the LoRa
+    // object so the base station can re-tune them like measurement_period. Defaults
+    // come from common_config.h (shared by both targets).
+    bool     enable_wave_analysis = base_enable_wave_analysis;
+    uint32_t wave_capture_period  = base_wave_capture_period;
 
     // Setup functions
     void getWiOID(void);
@@ -86,8 +106,11 @@ class LoRa_Transceiver{
     //BST utils
     buoyInfo initEmptyBuoy();
     buoyInfo findBuoy(uint32_t);    
+    // One-shot module report after begin() - band variant and SX126x device errors.
+    // See the definition for why it has to run this early.
+    void reportModuleDiagnostics(double freq);
   private:
-    STM32WLx radio = new STM32WLx_Module();
+    STM32WLx_Diag radio{new STM32WLx_Module()};
     const uint32_t rfswitch_pins[5] = {PB8, PC13, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC};
     const Module::RfSwitchMode_t rfswitch_table[4] = {
       {STM32WLx::MODE_IDLE,  {LOW,  LOW}},

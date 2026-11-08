@@ -7,6 +7,9 @@
 
 */
 
+// Console on the debug header, see config.h
+HardwareSerial mySerial{DEBUG_SERIAL_RX_PIN, DEBUG_SERIAL_TX_PIN};
+
 static uint32_t measurement_timer;
 
 void setup() {
@@ -34,7 +37,7 @@ void loop() {
   if (millis() - measurement_timer > base_measurement_period){
     
     // We begin the GPS at the specified baud rate
-    gps_manager.begin(GPS_baud);
+    gps_manager.begin();
 
     //The SD library counts the amount of measurements taken
     char logname[25];
